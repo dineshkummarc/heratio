@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use Illuminate\Support\Facades\Schema;
 use App\Auth\AtomUserProvider;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
@@ -69,6 +70,7 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+		Schema::defaultStringLength(191);
         // Apply the operator's DB SMTP settings (email_setting) to the mail config
         // in EVERY context - web requests AND the queue worker / scheduler.
         // Previously this ran only per-web-request in LoginController, so QUEUED
