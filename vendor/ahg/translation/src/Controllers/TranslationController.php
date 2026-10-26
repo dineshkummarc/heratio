@@ -1,0 +1,1541 @@
+<?php
+
+/**
+ * TranslationController - Controller for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+
+
+namespace AhgTranslation\Controllers;
+
+use Illuminate\Http\Request;
+use Illuminate\Routing\Controller;
+use Illuminate\Support\Facades\DB;
+
+class TranslationController extends Controller
+{
+    /**
+     * class_name → [i18n_table, allowed columns] map for the save endpoint.
+     *
+     * The save flow looks up object.class_name to decide which *_i18n table
+     * to write to, and only the listed columns are accepted as targets.
+     */
+    private const I18N_TABLE_BY_CLASS = [
+        'QubitInformationObject' => [
+            'table'   => 'information_object_i18n',
+            'columns' => [
+                'title', 'alternate_title', 'edition', 'extent_and_medium',
+                'archival_history', 'acquisition', 'scope_and_content',
+                'appraisal', 'accruals', 'arrangement', 'access_conditions',
+                'reproduction_conditions', 'physical_characteristics',
+                'finding_aids', 'location_of_originals', 'location_of_copies',
+                'related_units_of_description', 'institution_responsible_identifier',
+                'rules', 'sources', 'revision_history',
+            ],
+        ],
+        'QubitActor' => [
+            'table'   => 'actor_i18n',
+            'columns' => [
+                'authorized_form_of_name', 'dates_of_existence', 'history',
+                'places', 'legal_status', 'functions', 'mandates',
+                'internal_structures', 'general_context',
+                'institution_responsible_identifier', 'rules', 'sources',
+                'revision_history',
+            ],
+        ],
+        'QubitRepository' => [
+            'table'   => 'actor_i18n',
+            'columns' => [
+                'authorized_form_of_name', 'dates_of_existence', 'history',
+                'places', 'legal_status', 'functions', 'mandates',
+                'internal_structures', 'general_context',
+                'institution_responsible_identifier', 'rules', 'sources',
+                'revision_history',
+            ],
+        ],
+        // Museum metadata (CCO) is a synthetic class - there's no `object` row
+        // with class_name='QubitMuseumMetadata'. The save flow gets the IO
+        // object_id, resolves museum_metadata.id WHERE object_id=?, then writes
+        // to museum_metadata_i18n keyed on (museum_metadata.id, culture).
+        // Caller must pass class_name=QubitMuseumMetadata explicitly.
+        'QubitMuseumMetadata' => [
+            'table'   => 'museum_metadata_i18n',
+            'id_via'  => 'museum_metadata.id WHERE object_id = :object_id',
+            'columns' => [
+                'work_type', 'object_type', 'classification', 'materials', 'techniques',
+                'measurements', 'dimensions', 'inscription', 'inscriptions', 'condition_notes',
+                'provenance', 'style_period', 'cultural_context', 'current_location',
+                'edition_description', 'state_description', 'state_identification',
+                'facture_description', 'technique_cco', 'technique_qualifier', 'orientation',
+                'physical_appearance', 'color', 'shape', 'condition_term', 'condition_description',
+                'condition_agent', 'treatment_type', 'treatment_agent', 'treatment_description',
+                'inscription_transcription', 'inscription_type', 'inscription_location',
+                'inscription_language', 'inscription_translation', 'mark_type', 'mark_description',
+                'mark_location', 'related_work_type', 'related_work_relationship', 'related_work_label',
+                'current_location_repository', 'current_location_geography', 'current_location_ref_number',
+                'creation_place', 'creation_place_type', 'discovery_place', 'discovery_place_type',
+                'provenance_text', 'ownership_history', 'legal_status', 'rights_type', 'rights_holder',
+                'rights_date', 'rights_remarks', 'cataloger_name', 'cataloging_institution',
+                'cataloging_remarks', 'record_type', 'record_level', 'creator_identity', 'creator_role',
+                'creator_extent', 'creator_qualifier', 'creator_attribution', 'creation_date_display',
+                'creation_date_qualifier', 'style', 'period', 'cultural_group', 'movement', 'school',
+                'dynasty', 'subject_indexing_type', 'subject_display', 'subject_extent',
+                'historical_context', 'architectural_context', 'archaeological_context',
+                'object_class', 'object_category', 'object_sub_category', 'edition_number', 'edition_size',
+            ],
+        ],
+    ];
+
+    /**
+     * Map UI field keys to DB columns in information_object_i18n.
+     * Mirrors AhgTranslationRepository::allowedFields() from AtoM plugin.
+     */
+    private const ALLOWED_FIELDS = [
+        'title' => 'title',
+        'alternate_title' => 'alternate_title',
+        'edition' => 'edition',
+        'extent_and_medium' => 'extent_and_medium',
+        'archival_history' => 'archival_history',
+        'acquisition' => 'acquisition',
+        'scope_and_content' => 'scope_and_content',
+        'appraisal' => 'appraisal',
+        'accruals' => 'accruals',
+        'arrangement' => 'arrangement',
+        'access_conditions' => 'access_conditions',
+        'reproduction_conditions' => 'reproduction_conditions',
+        'physical_characteristics' => 'physical_characteristics',
+        'finding_aids' => 'finding_aids',
+        'location_of_originals' => 'location_of_originals',
+        'location_of_copies' => 'location_of_copies',
+        'related_units_of_description' => 'related_units_of_description',
+        'institution_responsible_identifier' => 'institution_responsible_identifier',
+        'rules' => 'rules',
+        'sources' => 'sources',
+        'revision_history' => 'revision_history',
+    ];
+
+    /**
+     * Max field lengths for translation output.
+     */
+    private const FIELD_MAX_LENGTHS = [
+        'title' => 1024,
+        'alternate_title' => 1024,
+        'edition' => 255,
+        'institution_responsible_identifier' => 1024,
+    ];
+
+    /**
+     * Target languages with culture codes (the 11 SA official languages, nd
+     * + sn for the wider SADC region - all covered by MzansiLM, #128 - plus
+     * international languages). Canonical list lives in ahg-core so the four
+     * translation pickers stay in sync; see LanguageOptions::translationTargets.
+     *
+     * @return array<string,string>
+     */
+    private static function targetLanguages(): array
+    {
+        return \AhgCore\Support\LanguageOptions::translationTargets();
+    }
+
+    /**
+     * Translation settings page (MT endpoint, timeout, health check).
+     */
+    public function settings(Request $request)
+    {
+        if ($request->isMethod('POST')) {
+            $endpoint = trim((string) $request->input('endpoint'));
+            $timeout = trim((string) $request->input('timeout'));
+            $apiKey = trim((string) $request->input('api_key'));
+
+            if ($endpoint !== '') {
+                $this->setSetting('mt.endpoint', $endpoint);
+            }
+            if ($timeout !== '' && ctype_digit($timeout)) {
+                $this->setSetting('mt.timeout_seconds', $timeout);
+            }
+            if ($apiKey !== '') {
+                $this->setSetting('mt.api_key', $apiKey);
+            }
+
+            return redirect()->route('ahgtranslation.settings')
+                ->with('notice', 'Settings updated');
+        }
+
+        $endpoint = $this->getSetting('mt.endpoint', 'https://ai.theahg.co.za/ai/v1/translate');
+        $timeout = $this->getSetting('mt.timeout_seconds', '60');
+        $apiKey = $this->getSetting('mt.api_key', '');
+
+        return view('ahg-translation::settings', [
+            'endpoint' => $endpoint,
+            'timeout' => $timeout,
+            'apiKey' => $apiKey,
+        ]);
+    }
+
+    /**
+     * Show translation form for an information object in a specific culture.
+     *
+     * GET /admin/translation/translate/{slug}
+     */
+    public function translate(Request $request, string $slug)
+    {
+        $objectId = DB::table('slug')->where('slug', $slug)->value('object_id');
+        if (!$objectId) {
+            abort(404, 'Record not found');
+        }
+
+        $culture = app()->getLocale();
+
+        // Get the IO title
+        $io = DB::table('information_object_i18n')
+            ->where('id', $objectId)
+            ->where('culture', $culture)
+            ->first();
+
+        // Which cultures actually exist for this record
+        $availableCultures = DB::table('information_object_i18n')
+            ->where('id', $objectId)
+            ->pluck('culture')
+            ->toArray();
+
+        // Translation settings from ahg_ner_settings / ahg_translation_settings
+        $selectedFields = json_decode(
+            $this->getSetting('translation_fields', '["title","scope_and_content"]'),
+            true
+        ) ?: ['title', 'scope_and_content'];
+        $defaultTarget = $this->getSetting('translation_target_lang', 'af');
+        $saveCultureDefault = $this->getSetting('translation_save_culture', '1') === '1';
+        $overwriteDefault = $this->getSetting('translation_overwrite', '0') === '1';
+
+        // All translatable fields
+        $allFields = [
+            'title' => 'Title',
+            'alternate_title' => 'Alternate Title',
+            'scope_and_content' => 'Scope and Content',
+            'archival_history' => 'Archival History',
+            'acquisition' => 'Acquisition',
+            'arrangement' => 'Arrangement',
+            'access_conditions' => 'Access Conditions',
+            'reproduction_conditions' => 'Reproduction Conditions',
+            'finding_aids' => 'Finding Aids',
+            'related_units_of_description' => 'Related Units',
+            'appraisal' => 'Appraisal',
+            'accruals' => 'Accruals',
+            'physical_characteristics' => 'Physical Characteristics',
+            'location_of_originals' => 'Location of Originals',
+            'location_of_copies' => 'Location of Copies',
+            'extent_and_medium' => 'Extent and Medium',
+            'sources' => 'Sources',
+            'rules' => 'Rules',
+            'revision_history' => 'Revision History',
+        ];
+
+        return view('ahg-translation::translate', [
+            'objectId' => $objectId,
+            'slug' => $slug,
+            'title' => $io->title ?? 'Untitled',
+            'culture' => $culture,
+            'availableCultures' => $availableCultures,
+            'targetLanguages' => self::targetLanguages(),
+            'allFields' => $allFields,
+            'selectedFields' => $selectedFields,
+            'defaultTarget' => $defaultTarget,
+            'saveCultureDefault' => $saveCultureDefault,
+            'overwriteDefault' => $overwriteDefault,
+        ]);
+    }
+
+    /**
+     * POST /admin/translation/translate/{slug}
+     *
+     * AJAX endpoint: translate a single field for an IO.
+     * Returns JSON with draft_id, translation, source_text.
+     */
+    public function store(Request $request, string $slug)
+    {
+        $objectId = DB::table('slug')->where('slug', $slug)->value('object_id');
+        if (!$objectId) {
+            return response()->json(['ok' => false, 'error' => 'Record not found'], 404);
+        }
+
+        $fieldKey = (string) $request->input('field');
+        $targetFieldKey = (string) $request->input('targetField', $fieldKey);
+        $source = (string) $request->input('source', app()->getLocale());
+        $target = (string) $request->input('target', $this->getSetting('mt.target_culture', 'en'));
+        $readCulture = (string) $request->input('readCulture', '');
+        $apply = (int) $request->input('apply', 0) === 1;
+        $overwrite = (int) $request->input('overwrite', 0) === 1;
+        $saveCulture = (int) $request->input('saveCulture', 1) === 1;
+
+        $dbCulture = !empty($readCulture) ? $readCulture : $source;
+
+        if (!isset(self::ALLOWED_FIELDS[$fieldKey])) {
+            return response()->json(['ok' => false, 'error' => 'Unsupported source field: ' . $fieldKey]);
+        }
+        if (!isset(self::ALLOWED_FIELDS[$targetFieldKey])) {
+            return response()->json(['ok' => false, 'error' => 'Unsupported target field: ' . $targetFieldKey]);
+        }
+
+        $sourceColumn = self::ALLOWED_FIELDS[$fieldKey];
+        $targetColumn = self::ALLOWED_FIELDS[$targetFieldKey];
+
+        // Read source text
+        $sourceText = DB::table('information_object_i18n')
+            ->where('id', $objectId)
+            ->where('culture', $dbCulture)
+            ->value($sourceColumn);
+
+        if ($sourceText === null || trim($sourceText) === '') {
+            return response()->json(['ok' => false, 'error' => 'No source text for this field/language']);
+        }
+
+        // Max length for target field
+        $maxLength = self::FIELD_MAX_LENGTHS[$targetColumn] ?? 65535;
+
+        // Call the MT service
+        $result = $this->translateText($sourceText, $source, $target, $maxLength);
+
+        // Log attempt
+        $this->logAttempt($objectId, $fieldKey, $source, $target, $result);
+
+        if (empty($result['ok'])) {
+            return response()->json([
+                'ok' => false,
+                'error' => $result['error'] ?? 'Translation failed',
+                'http_status' => $result['http_status'] ?? null,
+            ]);
+        }
+
+        $translated = $result['translation'];
+        $userId = auth()->id();
+
+        // Issue #61 Phase 2b: record the AI inference. The auto-translate path
+        // is a write event - the model produced $translated for ($objectId,
+        // $targetColumn, $target) and that output ends up in a draft + later
+        // potentially in *_i18n. Log it as an inference; the override pattern
+        // (Phase 3) catches reviewer corrections.
+        try {
+            $svc = app(\AhgProvenanceAi\Services\InferenceService::class);
+            [$inH, $inE]   = \AhgProvenanceAi\DTO\InferenceRecord::hashAndExcerpt((string) $sourceText);
+            [$outH, $outE] = \AhgProvenanceAi\DTO\InferenceRecord::hashAndExcerpt((string) $translated);
+            $svc->record(new \AhgProvenanceAi\DTO\InferenceRecord(
+                serviceName:      'TRANSLATION',
+                modelName:        (string) ($result['model'] ?? 'unknown'),
+                modelVersion:     'unknown',
+                inputHash:        $inH,
+                outputHash:       $outH,
+                targetEntityType: 'information_object',
+                targetEntityId:   (int) $objectId,
+                targetField:      $targetColumn . '@' . $target,
+                confidence:       null,
+                standard:         'Heratio-i18n-MT',
+                endpoint:         (string) ($result['endpoint'] ?? ''),
+                inputExcerpt:     $inE,
+                outputExcerpt:    $outE,
+                elapsedMs:        isset($result['elapsed_ms']) ? (int) $result['elapsed_ms'] : null,
+                userId:           $userId,
+            ));
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('TranslationController: inference write failed: ' . $e->getMessage());
+        }
+
+        // Create draft
+        $draft = $this->createDraft($objectId, $targetFieldKey, $source, $target, $sourceText, $translated, $userId);
+        if (empty($draft['ok'])) {
+            return response()->json(['ok' => false, 'error' => $draft['error'] ?? 'Failed to create draft']);
+        }
+
+        $resp = [
+            'ok' => true,
+            'draft_id' => $draft['draft_id'],
+            'deduped' => $draft['deduped'] ?? false,
+            'translation' => $translated,
+            'source_text' => $sourceText,
+            'source_field' => $fieldKey,
+            'target_field' => $targetFieldKey,
+        ];
+
+        if ($apply) {
+            $targetCulture = $saveCulture ? $target : $source;
+            $applied = $this->applyDraft((int) $draft['draft_id'], $overwrite, $targetCulture);
+            $resp['apply_ok'] = !empty($applied['ok']);
+            $resp['saved_culture'] = $targetCulture;
+            if (empty($applied['ok'])) {
+                $resp['apply_error'] = $applied['error'] ?? 'Apply failed';
+            }
+        }
+
+        return response()->json($resp);
+    }
+
+    /**
+     * POST /admin/translation/apply
+     *
+     * Apply a translation draft (with optional edited text).
+     */
+    public function apply(Request $request)
+    {
+        $draftId = (int) $request->input('draftId');
+        $overwrite = (int) $request->input('overwrite', 0) === 1;
+        $saveCulture = (int) $request->input('saveCulture', 1) === 1;
+        $targetCulture = (string) $request->input('targetCulture', '');
+        $editedText = $request->input('editedText');
+
+        if ($editedText !== null && $editedText !== '') {
+            DB::table('ahg_translation_draft')
+                ->where('id', $draftId)
+                ->where('status', 'draft')
+                ->update(['translated_text' => $editedText]);
+        }
+
+        if ($saveCulture && $targetCulture !== '') {
+            $result = $this->applyDraft($draftId, $overwrite, $targetCulture);
+        } else {
+            $result = $this->applyDraft($draftId, $overwrite);
+        }
+
+        return response()->json($result);
+    }
+
+    /**
+     * POST /admin/translation/save
+     *
+     * Persist a single field translation directly into the entity's *_i18n
+     * table. This is the simple "I edited this and want it saved" endpoint
+     * that the per-field Save button on the Translate modal posts to.
+     *
+     * Inputs:
+     *   - object_id: int (required)        - IO/Actor/Repository ID
+     *   - culture:   string (required)     - target culture code (e.g. 'af')
+     *   - field:     string (required)     - i18n column name
+     *   - value:     string (required)     - translated text
+     *   - confirmed: bool (optional)       - true if a human reviewed it
+     *
+     * Provenance is recorded in ahg_translation_log with source='ai' (when
+     * confirmed=false) or 'human' (when confirmed=true), plus created_by_user_id.
+     */
+    public function save(Request $request)
+    {
+        $objectId  = (int) $request->input('object_id');
+        $culture   = trim((string) $request->input('culture'));
+        $field     = trim((string) $request->input('field'));
+        $value     = (string) $request->input('value', '');
+        $confirmed = (bool) $request->input('confirmed', false);
+        $reqReview = (bool) $request->input('review', false);
+
+        if ($objectId <= 0 || $culture === '' || $field === '') {
+            return response()->json([
+                'ok' => false,
+                'error' => 'object_id, culture, and field are required',
+            ], 422);
+        }
+
+        // Caller may pass class_name explicitly (e.g. QubitMuseumMetadata, which
+        // is a synthetic class - there's no `object` row with that class_name).
+        // Otherwise fall back to looking up object.class_name.
+        $explicitClass = trim((string) $request->input('class_name'));
+        if ($explicitClass !== '' && isset(self::I18N_TABLE_BY_CLASS[$explicitClass])) {
+            $className = $explicitClass;
+        } else {
+            $className = DB::table('object')->where('id', $objectId)->value('class_name');
+            if (!$className) {
+                return response()->json(['ok' => false, 'error' => 'Object not found'], 404);
+            }
+        }
+
+        if (!isset(self::I18N_TABLE_BY_CLASS[$className])) {
+            return response()->json([
+                'ok' => false,
+                'error' => "Unsupported entity class: {$className}",
+            ], 422);
+        }
+
+        $cfg = self::I18N_TABLE_BY_CLASS[$className];
+        $i18nTable = $cfg['table'];
+        $allowed   = $cfg['columns'];
+
+        if (!in_array($field, $allowed, true)) {
+            return response()->json([
+                'ok' => false,
+                'error' => "Field '{$field}' is not translatable for {$className}",
+            ], 422);
+        }
+
+        // Resolve the i18n row id. For most classes this equals object_id.
+        // QubitMuseumMetadata maps the IO object_id to museum_metadata.id.
+        $i18nRowId = $objectId;
+        if ($className === 'QubitMuseumMetadata') {
+            $i18nRowId = (int) DB::table('museum_metadata')
+                ->where('object_id', $objectId)
+                ->value('id');
+            if ($i18nRowId <= 0) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => 'No museum_metadata row exists for this object - create one before translating.',
+                ], 404);
+            }
+        }
+
+        // ── Workflow split (issue #54-style, applied to per-record translation) ──
+        // Admin (default)         → write directly to *_i18n
+        // Admin with ?review=1    → queue as ahg_translation_draft for second reviewer
+        // Editor / translator     → always queue as ahg_translation_draft
+        // Anyone else             → 403 (the acl:translate middleware should already
+        //                            block; this is defence-in-depth)
+        $isAdmin   = \AhgCore\Services\AclService::isAdministrator();
+        $canTranslate = \AhgCore\Services\AclService::check(null, 'translate')
+            || $isAdmin
+            || \AhgCore\Services\AclService::isEditor()
+            || \AhgCore\Services\AclService::isTranslator();
+        if (!$canTranslate) {
+            return response()->json(['ok' => false, 'error' => 'forbidden'], 403);
+        }
+        $autoApprove = $isAdmin && !$reqReview;
+
+        if (!$autoApprove) {
+            // Read source for the draft row context (best-effort - old value goes
+            // in source_text so the reviewer can compare).
+            $oldValue = DB::table($i18nTable)
+                ->where('id', $i18nRowId)
+                ->where('culture', $culture)
+                ->value($field);
+            $entityType = $className === 'QubitMuseumMetadata' ? 'museum_metadata' : 'information_object';
+            $sourceText = (string) ($oldValue ?? '');
+            $draftId = DB::table('ahg_translation_draft')->insertGetId([
+                'object_id'           => $objectId,        // IO id; draftApprove resolves the i18n row again
+                'entity_type'         => $entityType,
+                'field_name'          => $field,
+                'source_culture'      => $culture,
+                'target_culture'      => $culture,
+                'source_hash'         => hash('sha256', $sourceText),
+                'source_text'         => $sourceText,
+                'translated_text'     => $value,
+                'status'              => 'draft',
+                'created_by_user_id'  => auth()->id(),
+                'created_at'          => now(),
+            ]);
+            return response()->json([
+                'ok'         => true,
+                'state'      => 'pending',
+                'draft_id'   => $draftId,
+                'class'      => $className,
+                'object_id'  => $objectId,
+                'culture'    => $culture,
+                'field'      => $field,
+                'message'    => 'Submitted for review.',
+            ]);
+        }
+
+        // Upsert the i18n row for the requested culture.
+        $exists = DB::table($i18nTable)
+            ->where('id', $i18nRowId)
+            ->where('culture', $culture)
+            ->exists();
+
+        if ($exists) {
+            DB::table($i18nTable)
+                ->where('id', $i18nRowId)
+                ->where('culture', $culture)
+                ->update([$field => $value]);
+        } else {
+            DB::table($i18nTable)->insert([
+                'id'      => $i18nRowId,
+                'culture' => $culture,
+                $field    => $value,
+            ]);
+        }
+
+        // Log provenance: who saved it, machine vs human, the saved value.
+        try {
+            DB::table('ahg_translation_log')->insert([
+                'object_id'           => $objectId,
+                'field_name'          => $field,
+                'source_culture'      => null,
+                'target_culture'      => $culture,
+                'endpoint'            => null,
+                'http_status'         => null,
+                'ok'                  => 1,
+                'error'               => null,
+                'value'               => $value,
+                'source'              => $confirmed ? 'human' : 'ai',
+                'created_by_user_id'  => auth()->id(),
+                'confirmed'           => $confirmed ? 1 : 0,
+                'elapsed_ms'          => null,
+                'created_at'          => now(),
+            ]);
+        } catch (\Throwable $e) {
+            // Provenance logging is best-effort; never block the save.
+        }
+
+        return response()->json([
+            'ok'        => true,
+            'state'     => 'approved',
+            'object_id' => $objectId,
+            'culture'   => $culture,
+            'field'     => $field,
+            'source'    => $confirmed ? 'human' : 'ai',
+            'class'     => $className,
+            'table'     => $i18nTable,
+        ]);
+    }
+
+    /**
+     * GET /admin/translation/health
+     *
+     * Health check for MT endpoint.
+     */
+    public function health()
+    {
+        $endpoint = $this->getSetting('mt.endpoint', 'https://ai.theahg.co.za/ai/v1/translate');
+        $apiKey = $this->getSetting('mt.api_key', '<set in ahg_settings>');
+
+        // #1250 - same Bearer-key fallback as translateText() so the health
+        // probe authenticates against the AHG AI gateway instead of getting a
+        // misleading 401. Header is only added when a key resolves.
+        $headers = [
+            'Content-Type: application/json',
+            'X-API-Key: ' . $apiKey,
+        ];
+        $bearerKey = $this->resolveMtBearerKey($apiKey);
+        if ($bearerKey !== '') {
+            $headers[] = 'Authorization: Bearer ' . $bearerKey;
+        }
+
+        $ch = curl_init($endpoint);
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_POSTFIELDS => json_encode(['source' => 'af', 'target' => 'en', 'text' => 'toets']),
+            CURLOPT_TIMEOUT => 5,
+        ]);
+        $raw = curl_exec($ch);
+        $errno = curl_errno($ch);
+        $err = curl_error($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        $ok = ($errno === 0) && ($status >= 200 && $status < 500);
+
+        return response()->json([
+            'ok' => $ok,
+            'endpoint' => $endpoint,
+            'http_status' => $status,
+            'curl_error' => $errno ? ($errno . ': ' . $err) : null,
+        ]);
+    }
+
+    /**
+     * GET /admin/translation/languages
+     *
+     * List available languages from setting table.
+     */
+    public function languages()
+    {
+        // AtoM stores setting values on `setting_i18n`, keyed by setting.id + culture.
+        $culture = app()->getLocale();
+        $cultures = DB::table('setting as s')
+            ->leftJoin('setting_i18n as si', function ($j) use ($culture) {
+                $j->on('si.id', '=', 's.id')->where('si.culture', '=', $culture);
+            })
+            ->where('s.name', 'i18n_languages')
+            ->value('si.value');
+
+        $defaultCulture = DB::table('setting as s')
+            ->leftJoin('setting_i18n as si', function ($j) use ($culture) {
+                $j->on('si.id', '=', 's.id')->where('si.culture', '=', $culture);
+            })
+            ->where('s.name', 'default_culture')
+            ->value('si.value') ?? 'en';
+
+        $enabledCultures = $cultures ? json_decode($cultures, true) : ['en'];
+
+        // Build language list with names
+        $languageList = [];
+        foreach (self::targetLanguages() as $code => $name) {
+            $languageList[] = [
+                'code' => $code,
+                'name' => $name,
+                'enabled' => in_array($code, $enabledCultures),
+                'default' => $code === $defaultCulture,
+            ];
+        }
+
+        return view('ahg-translation::languages', [
+            'languages' => $languageList,
+            'enabledCultures' => $enabledCultures,
+            'defaultCulture' => $defaultCulture,
+        ]);
+    }
+
+    /**
+     * POST /admin/translation/languages
+     *
+     * Add/update a language in the system i18n_languages setting.
+     */
+    public function addLanguage(Request $request)
+    {
+        $request->validate([
+            'code' => 'required|string|max:8',
+        ]);
+
+        $code = trim($request->input('code'));
+
+        // AtoM setting values live on `setting_i18n`, keyed by setting.id + culture.
+        $culture = app()->getLocale();
+        $row = DB::table('setting as s')
+            ->leftJoin('setting_i18n as si', function ($j) use ($culture) {
+                $j->on('si.id', '=', 's.id')->where('si.culture', '=', $culture);
+            })
+            ->where('s.name', 'i18n_languages')
+            ->select('s.id', 'si.value')
+            ->first();
+        $cultures = ($row && $row->value) ? json_decode($row->value, true) : ['en'];
+
+        if (!in_array($code, $cultures)) {
+            $cultures[] = $code;
+            $json = json_encode($cultures);
+
+            if ($row) {
+                DB::table('setting_i18n')->updateOrInsert(
+                    ['id' => $row->id, 'culture' => $culture],
+                    ['value' => $json]
+                );
+            } else {
+                $settingId = DB::table('setting')->insertGetId([
+                    'name'           => 'i18n_languages',
+                    'scope'          => 'global',
+                    'source_culture' => $culture,
+                ]);
+                DB::table('setting_i18n')->insert([
+                    'id'      => $settingId,
+                    'culture' => $culture,
+                    'value'   => $json,
+                ]);
+            }
+        }
+
+        return redirect()->route('ahgtranslation.languages')
+            ->with('notice', 'Language "' . e($code) . '" added.');
+    }
+
+    // ── Private helpers (migrated from AhgTranslationService) ────────
+
+    /**
+     * Call the NLLB-200 translation API.
+     */
+    private function translateText(string $text, string $sourceCulture, string $targetCulture, ?int $maxLength = null): array
+    {
+        $endpoint = $this->getSetting('mt.endpoint', 'https://ai.theahg.co.za/ai/v1/translate');
+        $apiKey = $this->getSetting('mt.api_key', '<set in ahg_settings>');
+        $timeout = (int) $this->getSetting('mt.timeout_seconds', '60');
+
+        $payloadData = [
+            'text' => $text,
+            'source' => $sourceCulture,
+            'target' => $targetCulture,
+        ];
+        if ($maxLength !== null) {
+            $payloadData['max_length'] = $maxLength;
+        }
+        $payload = json_encode($payloadData);
+
+        $t0 = microtime(true);
+
+        // #1250 - the MT endpoint can be the AHG AI gateway, which authenticates
+        // via a Bearer key (returns 401 "Missing API key" without one). Prefer
+        // the operator-set mt.api_key; when that is empty fall back to the
+        // shared gateway key (ahg_ner_settings.api_key, then ahg_ai_settings
+        // feature='general' api_key) the way QdrantRetriever resolves it. Only
+        // attach the Bearer header when a key is present so a legacy
+        // direct-adapter endpoint still works keyless. The existing X-API-Key
+        // header is preserved for any adapter that reads it.
+        $headers = [
+            'Content-Type: application/json',
+            'X-API-Key: ' . $apiKey,
+        ];
+        $bearerKey = $this->resolveMtBearerKey($apiKey);
+        if ($bearerKey !== '') {
+            $headers[] = 'Authorization: Bearer ' . $bearerKey;
+        }
+
+        $ch = curl_init($endpoint);
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_POSTFIELDS => $payload,
+            CURLOPT_TIMEOUT => $timeout,
+        ]);
+
+        $raw = curl_exec($ch);
+        $errno = curl_errno($ch);
+        $errstr = curl_error($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        $elapsedMs = (int) round((microtime(true) - $t0) * 1000);
+
+        if ($errno !== 0) {
+            return [
+                'ok' => false,
+                'translation' => null,
+                'http_status' => $status ?: null,
+                'error' => 'cURL error ' . $errno . ': ' . $errstr,
+                'elapsed_ms' => $elapsedMs,
+                'endpoint' => $endpoint,
+            ];
+        }
+
+        $data = json_decode((string) $raw, true);
+        if (!is_array($data)) {
+            return [
+                'ok' => false,
+                'translation' => null,
+                'http_status' => $status,
+                'error' => 'Invalid JSON from MT endpoint',
+                'elapsed_ms' => $elapsedMs,
+                'endpoint' => $endpoint,
+            ];
+        }
+
+        $translation = $data['translated'] ?? $data['translatedText'] ?? $data['translation'] ?? null;
+
+        if ($status < 200 || $status >= 300 || !is_string($translation)) {
+            return [
+                'ok' => false,
+                'translation' => null,
+                'http_status' => $status,
+                'error' => $data['detail'] ?? $data['error'] ?? 'MT endpoint returned non-2xx or missing translation',
+                'elapsed_ms' => $elapsedMs,
+                'endpoint' => $endpoint,
+            ];
+        }
+
+        return [
+            'ok' => true,
+            'translation' => $translation,
+            'http_status' => $status,
+            'error' => null,
+            'elapsed_ms' => $elapsedMs,
+            'endpoint' => $endpoint,
+            'model' => $data['model'] ?? 'nllb-200',
+        ];
+    }
+
+    /**
+     * Create a translation draft record.
+     */
+    private function createDraft(int $objectId, string $fieldName, string $sourceCulture, string $targetCulture, string $sourceText, string $translatedText, ?int $userId = null): array
+    {
+        $sourceHash = hash('sha256', $sourceText);
+
+        try {
+            DB::table('ahg_translation_draft')->insert([
+                'object_id' => $objectId,
+                'entity_type' => 'information_object',
+                'field_name' => $fieldName,
+                'source_culture' => $sourceCulture,
+                'target_culture' => $targetCulture,
+                'source_hash' => $sourceHash,
+                'source_text' => $sourceText,
+                'translated_text' => $translatedText,
+                'status' => 'draft',
+                'created_by_user_id' => $userId,
+                'created_at' => now(),
+            ]);
+            return ['ok' => true, 'draft_id' => (int) DB::getPdo()->lastInsertId()];
+        } catch (\Exception $e) {
+            // Find existing (dedupe)
+            $row = DB::table('ahg_translation_draft')
+                ->where('object_id', $objectId)
+                ->where('field_name', $fieldName)
+                ->where('source_culture', $sourceCulture)
+                ->where('target_culture', $targetCulture)
+                ->where('source_hash', $sourceHash)
+                ->first();
+
+            if ($row) {
+                return ['ok' => true, 'draft_id' => (int) $row->id, 'deduped' => true];
+            }
+            return ['ok' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Apply a translation draft to information_object_i18n.
+     */
+    private function applyDraft(int $draftId, bool $overwrite = false, ?string $targetCulture = null): array
+    {
+        $draft = DB::table('ahg_translation_draft')->where('id', $draftId)->first();
+        if (!$draft) {
+            return ['ok' => false, 'error' => 'Draft not found'];
+        }
+        if ($draft->status !== 'draft') {
+            return ['ok' => false, 'error' => 'Draft not in draft state'];
+        }
+
+        if (!isset(self::ALLOWED_FIELDS[$draft->field_name])) {
+            return ['ok' => false, 'error' => 'Field not allowed'];
+        }
+
+        $column = self::ALLOWED_FIELDS[$draft->field_name];
+        $objectId = (int) $draft->object_id;
+        $culture = $targetCulture !== null ? $targetCulture : $draft->target_culture;
+        $text = $draft->translated_text;
+
+        // Ensure i18n row exists
+        $exists = DB::table('information_object_i18n')
+            ->where('id', $objectId)
+            ->where('culture', $culture)
+            ->exists();
+
+        if (!$exists) {
+            DB::table('information_object_i18n')->insert([
+                'id' => $objectId,
+                'culture' => $culture,
+            ]);
+        }
+
+        // Check existing value
+        $current = DB::table('information_object_i18n')
+            ->where('id', $objectId)
+            ->where('culture', $culture)
+            ->value($column);
+
+        if (!$overwrite && $current !== null && trim($current) !== '') {
+            return ['ok' => false, 'error' => 'Target field not empty; use overwrite=1 to replace'];
+        }
+
+        DB::table('information_object_i18n')
+            ->where('id', $objectId)
+            ->where('culture', $culture)
+            ->update([$column => $text]);
+
+        DB::table('ahg_translation_draft')
+            ->where('id', $draftId)
+            ->update(['status' => 'applied', 'applied_at' => now()]);
+
+        return ['ok' => true, 'culture' => $culture];
+    }
+
+    /**
+     * Log a translation attempt.
+     */
+    private function logAttempt(?int $objectId, ?string $field, ?string $src, ?string $tgt, array $result): void
+    {
+        try {
+            DB::table('ahg_translation_log')->insert([
+                'object_id' => $objectId,
+                'field_name' => $field,
+                'source_culture' => $src,
+                'target_culture' => $tgt,
+                'endpoint' => $result['endpoint'] ?? null,
+                'http_status' => $result['http_status'] ?? null,
+                'ok' => !empty($result['ok']) ? 1 : 0,
+                'error' => $result['error'] ?? null,
+                'elapsed_ms' => $result['elapsed_ms'] ?? null,
+                'created_at' => now(),
+            ]);
+        } catch (\Exception $e) {
+            // Ignore log errors
+        }
+    }
+
+    /**
+     * Get a translation setting.
+     */
+    private function getSetting(string $key, $default = null)
+    {
+        try {
+            $row = DB::table('ahg_translation_settings')
+                ->where('setting_key', $key)
+                ->value('setting_value');
+            return $row !== null ? $row : $default;
+        } catch (\Exception $e) {
+            return $default;
+        }
+    }
+
+    /**
+     * Set a translation setting (upsert).
+     */
+    private function setSetting(string $key, string $value): void
+    {
+        try {
+            DB::statement(
+                "INSERT INTO ahg_translation_settings (setting_key, setting_value)
+                 VALUES (?, ?)
+                 ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+                [$key, $value]
+            );
+        } catch (\Exception $e) {
+            // Table may not exist yet
+        }
+    }
+
+    /**
+     * Resolve the Bearer key for the MT endpoint (#1250).
+     *
+     * Prefers the operator-set mt.api_key. When that is empty (or still the
+     * "<set in ahg_settings>" placeholder), falls back to the shared AHG AI
+     * gateway key the same way QdrantRetriever does: ahg_ner_settings.api_key,
+     * then ahg_ai_settings feature='general' api_key. Returns '' when nothing
+     * is configured so a legacy direct-adapter endpoint is still called keyless.
+     */
+    private function resolveMtBearerKey(?string $mtApiKey): string
+    {
+        $mtApiKey = trim((string) $mtApiKey);
+        if ($mtApiKey !== '' && $mtApiKey !== '<set in ahg_settings>') {
+            return $mtApiKey;
+        }
+
+        try {
+            $key = DB::table('ahg_ner_settings')
+                ->where('setting_key', 'api_key')
+                ->value('setting_value');
+            if ($key !== null && $key !== '') {
+                return (string) $key;
+            }
+
+            $key = DB::table('ahg_ai_settings')
+                ->where('feature', 'general')
+                ->where('setting_key', 'api_key')
+                ->value('setting_value');
+            if ($key !== null && $key !== '') {
+                return (string) $key;
+            }
+        } catch (\Throwable $e) {
+            // Settings tables absent on a fresh install - fall through.
+        }
+
+        return '';
+    }
+
+    /**
+     * GET /admin/translation/drafts - list pending MT drafts with filters.
+     */
+    public function drafts(Request $request)
+    {
+        $status = (string) $request->query('status', 'draft');
+        $cultureFilter = (string) $request->query('target_culture', '');
+        $objectFilter = (int) $request->query('object_id', 0);
+        $perPage = max(10, min(200, (int) $request->query('per_page', 50)));
+
+        $q = DB::table('ahg_translation_draft as d')
+            ->leftJoin('object as o', 'o.id', '=', 'd.object_id')
+            ->leftJoin('slug as s', 's.object_id', '=', 'd.object_id')
+            ->leftJoin('users as u', 'u.id', '=', 'd.created_by_user_id')
+            ->select([
+                'd.*',
+                's.slug',
+                'o.class_name',
+                'u.email as created_by_email',
+            ])
+            ->orderByDesc('d.created_at');
+
+        if ($status !== 'all' && in_array($status, ['draft', 'applied', 'rejected'], true)) {
+            $q->where('d.status', $status);
+        }
+        if ($cultureFilter !== '') {
+            $q->where('d.target_culture', $cultureFilter);
+        }
+        if ($objectFilter > 0) {
+            $q->where('d.object_id', $objectFilter);
+        }
+
+        $total = (clone $q)->count();
+        $drafts = $q->limit($perPage)->get();
+
+        $cultures = DB::table('ahg_translation_draft')
+            ->select('target_culture')
+            ->groupBy('target_culture')
+            ->pluck('target_culture')
+            ->toArray();
+
+        return view('ahg-translation::drafts', [
+            'drafts' => $drafts,
+            'total' => $total,
+            'status' => $status,
+            'cultureFilter' => $cultureFilter,
+            'objectFilter' => $objectFilter,
+            'perPage' => $perPage,
+            'cultures' => $cultures,
+        ]);
+    }
+
+    /**
+     * POST /admin/translation/drafts/{id}/approve - apply a single draft to its target *_i18n row.
+     */
+    public function draftApprove(Request $request, int $id)
+    {
+        $draft = DB::table('ahg_translation_draft')->where('id', $id)->first();
+        if (!$draft) {
+            return back()->with('error', 'Draft not found');
+        }
+        if ($draft->status === 'applied') {
+            return back()->with('notice', 'Draft already applied');
+        }
+
+        // Issue #59 Phase 3 - dropdown-source drafts (ahg_dropdown / term /
+        // setting) bypass the IO/museum_metadata orphan check (which targets
+        // the `object` table) and apply via DropdownController::applyI18nSave
+        // directly to the source's _i18n table. Same pattern as
+        // museum_metadata's class_name dispatch below.
+        $dropdownSources = ['ahg_dropdown', 'term', 'setting'];
+        if (in_array($draft->entity_type ?? '', $dropdownSources, true)) {
+            return $this->draftApplyDropdown($draft);
+        }
+
+        // Orphan check - the underlying object may have been deleted between
+        // draft submission and approval. Saving would fail with "Object not
+        // found" (or trip the FK on information_object_i18n.id). Mark the
+        // draft as rejected with a clear note so it stops cluttering the queue.
+        $stillExists = DB::table('object')->where('id', $draft->object_id)->exists();
+        if (!$stillExists) {
+            DB::table('ahg_translation_draft')
+                ->where('id', $id)
+                ->update(['status' => 'rejected']);
+            return back()->with('notice',
+                "Draft #{$id} discarded - original record (object #{$draft->object_id}) was deleted before approval.");
+        }
+
+        // Re-use save() logic by invoking it with the draft's payload. For
+        // museum_metadata drafts pass class_name explicitly so save() resolves
+        // museum_metadata.id from the IO object_id.
+        $reqPayload = [
+            'object_id' => $draft->object_id,
+            'culture'   => $draft->target_culture,
+            'field'     => $draft->field_name,
+            'value'     => $draft->translated_text,
+            'confirmed' => 1,
+        ];
+        if (($draft->entity_type ?? null) === 'museum_metadata') {
+            $reqPayload['class_name'] = 'QubitMuseumMetadata';
+        }
+        $req = new Request($reqPayload);
+        $resp = $this->save($req);
+        $payload = $resp instanceof \Illuminate\Http\JsonResponse ? $resp->getData(true) : [];
+
+        if (($payload['ok'] ?? false) === true) {
+            DB::table('ahg_translation_draft')
+                ->where('id', $id)
+                ->update(['status' => 'applied', 'applied_at' => now()]);
+            return back()->with('success', "Draft #{$id} applied to {$draft->target_culture}.");
+        }
+        return back()->with('error', 'Apply failed: ' . ($payload['error'] ?? 'unknown'));
+    }
+
+    /**
+     * Issue #59 Phase 3 - apply a queued draft whose entity_type is one of
+     * the 3 dropdown sources. Source-aware orphan check (the parent table
+     * differs per source) then dispatches to DropdownController::applyI18nSave
+     * which does the upsert into the right *_i18n table.
+     */
+    protected function draftApplyDropdown(object $draft)
+    {
+        $source   = (string) $draft->entity_type;
+        $rowId    = (int) $draft->object_id;
+        $culture  = (string) $draft->target_culture;
+        $label    = (string) $draft->translated_text;
+        $parents  = [
+            'ahg_dropdown' => 'ahg_dropdown',
+            'term'         => 'term',
+            'setting'      => 'setting',
+        ];
+        $parentTable = $parents[$source] ?? null;
+        if (!$parentTable) {
+            return back()->with('error', "Unknown dropdown source '{$source}' on draft #{$draft->id}");
+        }
+
+        // Source-aware orphan check - parent row may have been deleted between
+        // draft submission and approval. Reject the draft so it stops
+        // cluttering the queue, same pattern as the IO/museum_metadata branch.
+        try {
+            $stillExists = \Illuminate\Support\Facades\Schema::hasTable($parentTable)
+                && DB::table($parentTable)->where('id', $rowId)->exists();
+        } catch (\Throwable $e) {
+            $stillExists = false;
+        }
+        if (!$stillExists) {
+            DB::table('ahg_translation_draft')
+                ->where('id', $draft->id)
+                ->update(['status' => 'rejected']);
+            return back()->with('notice',
+                "Draft #{$draft->id} discarded - parent {$source} row #{$rowId} was deleted before approval.");
+        }
+
+        try {
+            \AhgDropdownManage\Controllers\DropdownController::applyI18nSave($source, $rowId, $culture, $label);
+        } catch (\Throwable $e) {
+            return back()->with('error', "Apply failed for draft #{$draft->id}: " . $e->getMessage());
+        }
+
+        DB::table('ahg_translation_draft')
+            ->where('id', $draft->id)
+            ->update(['status' => 'applied', 'applied_at' => now()]);
+
+        return back()->with('success', "Draft #{$draft->id} applied to {$source}.{$rowId} ({$culture}).");
+    }
+
+    /**
+     * POST /admin/translation/drafts/cleanup-orphans - bulk-mark every pending
+     * draft whose underlying object has been deleted as 'rejected'.
+     */
+    public function draftCleanupOrphans(Request $request)
+    {
+        if (!\AhgCore\Services\AclService::isAdministrator()) {
+            return back()->with('error', 'Admin only');
+        }
+        $orphanIds = DB::table('ahg_translation_draft as d')
+            ->leftJoin('object as o', 'o.id', '=', 'd.object_id')
+            ->whereNull('o.id')
+            ->where('d.status', 'draft')
+            ->pluck('d.id')
+            ->all();
+        if (empty($orphanIds)) {
+            return back()->with('notice', 'No orphaned drafts to clean up.');
+        }
+        DB::table('ahg_translation_draft')->whereIn('id', $orphanIds)
+            ->update(['status' => 'rejected']);
+        return back()->with('success', count($orphanIds) . ' orphaned draft(s) discarded.');
+    }
+
+    /**
+     * POST /admin/translation/drafts/{id}/edit-text - admin inline edit of
+     * the queued translation. Only mutates pending ('draft') rows; applied /
+     * rejected rows are locked (their text is already on the entity or out of
+     * the queue). Returns JSON for the inline save flow on the drafts table.
+     */
+    public function draftUpdateText(Request $request, int $id)
+    {
+        if (!\AhgCore\Services\AclService::isAdministrator()) {
+            return response()->json(['ok' => false, 'error' => 'Admin only'], 403);
+        }
+        $text = (string) $request->input('translated_text', '');
+        $updated = DB::table('ahg_translation_draft')
+            ->where('id', $id)
+            ->where('status', 'draft')
+            ->update(['translated_text' => $text]);
+        if (!$updated) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Draft not found, already applied, or already rejected.',
+            ], 404);
+        }
+        return response()->json(['ok' => true, 'id' => $id, 'translated_text' => $text]);
+    }
+
+    /**
+     * POST /admin/translation/drafts/{id}/reject - mark draft as rejected (does not apply).
+     */
+    public function draftReject(Request $request, int $id)
+    {
+        $updated = DB::table('ahg_translation_draft')
+            ->where('id', $id)
+            ->whereIn('status', ['draft', 'applied'])
+            ->update(['status' => 'rejected']);
+        return back()->with($updated ? 'success' : 'error',
+            $updated ? "Draft #{$id} rejected." : 'Draft not found or already rejected.');
+    }
+
+    /**
+     * POST /admin/translation/drafts/batch - bulk approve/reject by ID list.
+     */
+    public function draftBatch(Request $request)
+    {
+        $ids = array_filter(array_map('intval', (array) $request->input('ids', [])));
+        $action = (string) $request->input('action');
+        if (empty($ids) || ! in_array($action, ['approve', 'reject'], true)) {
+            return back()->with('error', 'No drafts selected or invalid action.');
+        }
+
+        $ok = 0;
+        $fail = 0;
+        foreach ($ids as $id) {
+            $sub = $action === 'approve'
+                ? $this->draftApprove($request, $id)
+                : $this->draftReject($request, $id);
+            // The sub-call returns redirect responses; treat anything non-error as success.
+            // Use session flash to count outcomes.
+            if (session()->has('error')) {
+                $fail++;
+                session()->forget('error');
+            } else {
+                $ok++;
+                session()->forget('success');
+                session()->forget('notice');
+            }
+        }
+        return back()->with('success', "Batch {$action}: {$ok} ok, {$fail} failed.");
+    }
+
+    // ─── UI string editor (issue #54 MVP) ──────────────────────────────────
+
+    /**
+     * GET /admin/translation/strings - list every key in lang/en.json with
+     * a column per enabled locale, plus search / missing-locale filters.
+     */
+    public function stringsIndex(Request $request)
+    {
+        // Editor or Administrator only - translators / contributors don't get
+        // to edit UI strings even via the workflow.
+        if (!\AhgCore\Services\AclService::isAdministrator() && !\AhgCore\Services\AclService::isEditor()) {
+            abort(403, 'Insufficient permissions');
+        }
+
+        $svc = app(\AhgTranslation\Services\UiStringService::class);
+
+        $missing  = $request->input('missing');
+        $contains = $request->input('contains');
+        // Accepts either ?changed=since:YYYY-MM-DD (issue spec) or
+        // ?changed=YYYY-MM-DD (shorthand). The 'since:' prefix is optional.
+        $changedRaw   = (string) $request->input('changed', '');
+        $changedSince = null;
+        if ($changedRaw !== '') {
+            $changedSince = preg_replace('/^since:\s*/i', '', $changedRaw);
+        }
+        $page     = max(1, (int) $request->input('page', 1));
+        $limit    = 100;
+        $offset   = ($page - 1) * $limit;
+
+        $allLocales = $svc->enabledLocales();
+
+        // Default the column to the current request culture so the table is
+        // always en + one target (no "all enabled" firehose). If the request
+        // culture is en, pick the first non-en enabled locale as the default.
+        $locale = $request->input('locale');
+        if (!$locale || !in_array($locale, $allLocales, true) || $locale === 'en') {
+            $current = app()->getLocale();
+            if ($current !== 'en' && in_array($current, $allLocales, true)) {
+                $locale = $current;
+            } else {
+                foreach ($allLocales as $code) {
+                    if ($code !== 'en') { $locale = $code; break; }
+                }
+            }
+        }
+
+        $matrix = $svc->matrix($locale ?: null, $missing ?: null, $contains ?: null, $limit, $offset, $changedSince ?: null);
+
+        // Pending count for the badge in the header link to the review queue.
+        $pendingCount = (int) DB::table('ui_string_change')->where('status', 'pending')->count();
+
+        return view('ahg-translation::strings', [
+            'matrix'        => $matrix,
+            'allLocales'    => $allLocales,
+            'locale'        => $locale,
+            'missing'       => $missing,
+            'contains'      => $contains,
+            'changed'       => $changedRaw,
+            'changedSince'  => $changedSince,
+            'page'          => $page,
+            'limit'         => $limit,
+            'totalPages'    => (int) ceil(($matrix['total'] ?? 0) / max(1, $limit)),
+            'isAdmin'       => \AhgCore\Services\AclService::isAdministrator(),
+            'pendingCount'  => $pendingCount,
+        ]);
+    }
+
+    /**
+     * GET /admin/translation/strings/history?locale=zu&key=Title
+     * Returns the audit chain for one (locale, key) pair as a tiny HTML
+     * partial suitable for injection into a Bootstrap modal body.
+     */
+    public function stringsHistory(Request $request)
+    {
+        if (!\AhgCore\Services\AclService::isAdministrator() && !\AhgCore\Services\AclService::isEditor()) {
+            abort(403, 'Insufficient permissions');
+        }
+        $request->validate([
+            'locale' => 'required|string|max:16',
+            'key'    => 'required|string',
+        ]);
+        $svc = app(\AhgTranslation\Services\UiStringService::class);
+        $rows = $svc->historyFor($request->input('locale'), $request->input('key'));
+        return view('ahg-translation::_string-history', [
+            'rows'   => $rows,
+            'locale' => $request->input('locale'),
+            'key'    => $request->input('key'),
+        ]);
+    }
+
+    /**
+     * POST /admin/translation/strings/save - save a single key+value.
+     *
+     * Workflow:
+     *  - Admin (default)            → applyApproved (writes JSON immediately, audit row)
+     *  - Admin with ?review=1       → submitChange (queues for second reviewer)
+     *  - Editor                     → submitChange (queues; needs admin approval)
+     *  - Anyone else                → 403
+     */
+    public function stringsSave(Request $request)
+    {
+        $request->validate([
+            'locale' => 'required|string|max:16',
+            'key'    => 'required|string',
+            'value'  => 'nullable|string',
+            'review' => 'nullable|boolean',
+        ]);
+
+        $userId   = (int) (auth()->id() ?? 0);
+        $isAdmin  = \AhgCore\Services\AclService::isAdministrator();
+        $isEditor = \AhgCore\Services\AclService::isEditor();
+        if (!$userId || (!$isAdmin && !$isEditor)) {
+            return response()->json(['ok' => false, 'error' => 'forbidden'], 403);
+        }
+
+        $svc       = app(\AhgTranslation\Services\UiStringService::class);
+        $reqReview = (bool) $request->input('review');
+        $autoApprove = $isAdmin && !$reqReview;
+
+        try {
+            $locale = $request->input('locale');
+            $key    = $request->input('key');
+            $value  = $request->input('value');
+            if ($autoApprove) {
+                $svc->applyApproved($userId, $locale, $key, $value);
+                // Mirror into setting_i18n if this key matches a ui_label setting
+                // (issue #57 part A - keep both surfaces in sync until B lands).
+                $this->mirrorStringToSettingI18n($locale, $key, $value);
+                return response()->json(['ok' => true, 'state' => 'approved']);
+            }
+            $pendingId = $svc->submitChange($userId, $locale, $key, $value);
+            return response()->json(['ok' => true, 'state' => 'pending', 'pending_id' => $pendingId]);
+        } catch (\Throwable $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()], 400);
+        }
+    }
+
+    /**
+     * Mirror a UI-string write into setting_i18n for any setting whose en value
+     * (with &nbsp; normalised) matches this key. Best-effort - never throws.
+     *
+     * Why: setting_i18n is hydrated AFTER lang/*.json by SetLocale middleware,
+     * so without this mirror the strings editor's write would be invisible at
+     * render time for the 27 ui_label keys that also live as settings.
+     *
+     * AtoM base table compatibility: this only writes to setting_i18n rows
+     * whose parent setting has scope='ui_label'. Other setting scopes
+     * (atom_features, advanced_search, etc.) are untouched.
+     */
+    protected function mirrorStringToSettingI18n(string $culture, string $key, ?string $value): void
+    {
+        if ($key === '' || $culture === '' || $culture === 'en') return;
+        try {
+            $matches = DB::table('setting as s')
+                ->join('setting_i18n as si_en', function ($j) {
+                    $j->on('s.id', '=', 'si_en.id')->where('si_en.culture', '=', 'en');
+                })
+                ->where('s.scope', 'ui_label')
+                ->whereRaw("REPLACE(si_en.value, '&nbsp;', ' ') = ?", [$key])
+                ->pluck('s.id');
+            foreach ($matches as $settingId) {
+                DB::table('setting_i18n')->updateOrInsert(
+                    ['id' => (int) $settingId, 'culture' => $culture],
+                    ['value' => (string) ($value ?? '')]
+                );
+            }
+            if (count($matches) > 0) {
+                \AhgCore\Services\SettingHelper::flush();
+            }
+        } catch (\Throwable $e) {
+            // best-effort - never block the primary save
+        }
+    }
+
+    /**
+     * GET /admin/translation/strings/pending - review queue for translation
+     * changes submitted by editors (or by admins who opted in to review).
+     * Admin-only.
+     */
+    public function stringsPending(Request $request)
+    {
+        $svc = app(\AhgTranslation\Services\UiStringService::class);
+        $locale  = $request->input('locale');
+        $changes = $svc->pendingChanges($locale ?: null);
+        return view('ahg-translation::strings-pending', [
+            'changes'    => $changes,
+            'locale'     => $locale,
+            'allLocales' => $svc->enabledLocales(),
+        ]);
+    }
+
+    /**
+     * POST /admin/translation/strings/{id}/approve - admin approves a pending
+     * change. Applies it to lang/{locale}.json and stamps the audit row.
+     */
+    public function stringsApprove(Request $request, int $id)
+    {
+        if (!\AhgCore\Services\AclService::isAdministrator()) {
+            return response()->json(['ok' => false, 'error' => 'admin required'], 403);
+        }
+        $row = \DB::table('ui_string_change')->where('id', $id)->where('status', 'pending')->first();
+        if (!$row) {
+            return response()->json(['ok' => false, 'error' => 'not found or already reviewed'], 404);
+        }
+        $svc = app(\AhgTranslation\Services\UiStringService::class);
+        try {
+            $svc->applyApproved((int) auth()->id(), $row->locale, $row->key_text, $row->new_value, $id, $request->input('note'));
+            // Mirror into setting_i18n for ui_label scope (#57 part A).
+            $this->mirrorStringToSettingI18n($row->locale, $row->key_text, $row->new_value);
+        } catch (\Throwable $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()], 400);
+        }
+        return response()->json(['ok' => true]);
+    }
+
+    /**
+     * POST /admin/translation/strings/{id}/reject - admin rejects a pending change.
+     */
+    public function stringsReject(Request $request, int $id)
+    {
+        if (!\AhgCore\Services\AclService::isAdministrator()) {
+            return response()->json(['ok' => false, 'error' => 'admin required'], 403);
+        }
+        $svc = app(\AhgTranslation\Services\UiStringService::class);
+        $ok = $svc->rejectPending((int) auth()->id(), $id, $request->input('note'));
+        return response()->json(['ok' => $ok]);
+    }
+
+    /**
+     * GET /admin/translation/strings/mt-suggest - returns a machine-translated
+     * suggestion for a single key. Reuses the existing translateText() backend
+     * (Ollama / Server 78 GPU per #45).
+     */
+    public function stringsMtSuggest(Request $request)
+    {
+        $request->validate([
+            'locale' => 'required|string|max:16',
+            'text'   => 'required|string',
+        ]);
+        try {
+            $r = $this->translateText($request->input('text'), 'en', $request->input('locale'));
+            if (!empty($r['ok']) && !empty($r['translated'])) {
+                return response()->json(['ok' => true, 'translated' => $r['translated']]);
+            }
+            return response()->json(['ok' => false, 'error' => $r['error'] ?? 'MT backend returned empty'], 502);
+        } catch (\Throwable $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()], 502);
+        }
+    }
+}

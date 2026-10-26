@@ -1,0 +1,203 @@
+{{-- Network Graph - cloned from AtoM --}}
+@extends('theme::layouts.2col')
+@section('sidebar')@include('research::research._sidebar', ['sidebarActive' => 'projects'])@endsection
+@section('content')
+
+<nav aria-label="{{ __('breadcrumb') }}">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="{{ route('research.dashboard') }}">{{ __('Research') }}</a></li>
+        <li class="breadcrumb-item"><a href="{{ route('research.viewProject', $project->id) }}">{{ e($project->title) }}</a></li>
+        <li class="breadcrumb-item active">{{ __('Network Graph') }}</li>
+    </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="h2">{{ __('Network Graph') }}</h1>
+    <div class="d-flex gap-2">
+        <select id="filterType" class="form-select form-select-sm" style="width:auto;">
+            <option value="">{{ __('All Types') }}</option>
+            <option value="biographical">{{ __('Biographical') }}</option>
+            <option value="chronological">{{ __('Chronological') }}</option>
+            <option value="spatial">{{ __('Spatial') }}</option>
+            <option value="relational">{{ __('Relational') }}</option>
+            <option value="attributive">{{ __('Attributive') }}</option>
+        </select>
+        <select id="filterStatus" class="form-select form-select-sm" style="width:auto;">
+            <option value="">{{ __('All Statuses') }}</option>
+            <option value="proposed">{{ __('Proposed') }}</option>
+            <option value="verified">{{ __('Verified') }}</option>
+            <option value="disputed">{{ __('Disputed') }}</option>
+        </select>
+        <input type="text" id="nodeSearch" class="form-control form-control-sm" style="width:180px;" placeholder="{{ __('Search nodes...') }}">
+        <div class="btn-group btn-group-sm">
+            <button id="exportGraphML" class="btn btn-outline-secondary" title="{{ __('Export GraphML') }}"><i class="fas fa-download me-1"></i>{{ __('GraphML') }}</button>
+        </div>
+        <a href="{{ route('research.assertions', $project->id) }}" class="btn btn-sm btn-outline-primary">{{ __('List View') }}</a>
+    </div>
+</div>
+
+{{-- Legend --}}
+<div class="card mb-3">
+    <div class="card-body py-2 d-flex align-items-center gap-3 flex-wrap">
+        <small class="text-muted me-1">{{ __('Node types:') }}</small>
+        <span><svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="#4e79a7"/></svg> {{ __('Person') }}</span>
+        <span><svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="#e15759"/></svg> {{ __('Organization') }}</span>
+        <span><svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="#f28e2c"/></svg> {{ __('Event') }}</span>
+        <span><svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="#59a14f"/></svg> {{ __('Place') }}</span>
+        <span><svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="#76b7b2"/></svg> {{ __('Object') }}</span>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-body p-0 position-relative">
+                <div id="graphContainer" style="width:100%; height:600px; background:#fafafa;"></div>
+                <div class="position-absolute bottom-0 end-0 p-2 d-flex gap-1">
+                    <button id="zoomIn" class="btn btn-sm btn-light border" title="{{ __('Zoom in') }}"><i class="fas fa-plus"></i></button>
+                    <button id="zoomOut" class="btn btn-sm btn-light border" title="{{ __('Zoom out') }}"><i class="fas fa-minus"></i></button>
+                    <button id="zoomReset" class="btn btn-sm btn-light border" title="{{ __('Reset view') }}"><i class="fas fa-expand"></i></button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card" id="detailPanel">
+            <div class="card-header"><h5 class="mb-0">{{ __('Node Details') }}</h5></div>
+            <div class="card-body" id="detailContent">
+                <p class="text-muted mb-0">{{ __('Click a node to see details.') }}</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+{{-- d3 vendored locally (#1423) at public/vendor/d3/7/
+     and jsdelivr is - see App\Csp\HeratioCspPreset. Loaded here rather
+     than relying on the layout because this view's d3 code runs inside
+     @section('content'), which renders before the layout's own d3 tag. --}}
+<script src="{{ asset('vendor/d3/7/d3.min.js') }}"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    var projectId = {{ (int) $project->id }};
+    var svg, gAll, simulation, nodeElements, linkElements, labelElements;
+    var allData = {nodes:[], edges:[]};
+
+    var typeColors = {
+        actor:'#4e79a7', person:'#4e79a7',
+        organization:'#e15759', corporate_body:'#e15759',
+        event:'#f28e2c',
+        place:'#59a14f',
+        information_object:'#76b7b2', object:'#76b7b2'
+    };
+
+    function loadGraph() {
+        var url = '{{ route("research.networkGraph", $project->id) }}';
+        var ft = document.getElementById('filterType').value;
+        var fs = document.getElementById('filterStatus').value;
+        var params = [];
+        if (ft) params.push('assertion_type=' + ft);
+        if (fs) params.push('status=' + fs);
+        if (params.length) url += '?' + params.join('&');
+
+        fetch(url, {headers:{'Accept':'application/json'}}).then(function(r){return r.json();}).then(function(data) {
+            allData = data;
+            renderGraph(data);
+        });
+    }
+
+    function renderGraph(data) {
+        d3.select('#graphContainer').selectAll('*').remove();
+        if (!data.nodes || data.nodes.length === 0) {
+            d3.select('#graphContainer').append('p').attr('class','text-muted p-4').text('No data to display. Create assertions first.');
+            return;
+        }
+
+        var width = document.getElementById('graphContainer').clientWidth, height = 600;
+        svg = d3.select('#graphContainer').append('svg').attr('width', width).attr('height', height);
+        gAll = svg.append('g');
+
+        var zoom = d3.zoom().scaleExtent([0.1, 5]).on('zoom', function(event) { gAll.attr('transform', event.transform); });
+        svg.call(zoom);
+        document.getElementById('zoomIn').onclick = function() { svg.transition().call(zoom.scaleBy, 1.3); };
+        document.getElementById('zoomOut').onclick = function() { svg.transition().call(zoom.scaleBy, 0.7); };
+        document.getElementById('zoomReset').onclick = function() { svg.transition().call(zoom.transform, d3.zoomIdentity); };
+
+        simulation = d3.forceSimulation(data.nodes)
+            .force('link', d3.forceLink(data.edges).id(function(d){return d.id;}).distance(120))
+            .force('charge', d3.forceManyBody().strength(-250))
+            .force('center', d3.forceCenter(width/2, height/2))
+            .force('collision', d3.forceCollide().radius(20));
+
+        linkElements = gAll.append('g').selectAll('line').data(data.edges).enter().append('line')
+            .attr('stroke','#999').attr('stroke-opacity',0.5).attr('stroke-width',1.5);
+        var edgeLabels = gAll.append('g').selectAll('text').data(data.edges).enter().append('text')
+            .text(function(d){return d.label||'';}).attr('font-size','8px').attr('fill','#888').attr('text-anchor','middle');
+
+        nodeElements = gAll.append('g').selectAll('circle').data(data.nodes).enter().append('circle')
+            .attr('r', function(d){return Math.max(6, Math.min(16, 6 + (d.connections||0)));})
+            .attr('fill', function(d){return typeColors[d.type]||'#76b7b2';})
+            .attr('stroke','#fff').attr('stroke-width',1.5).style('cursor','pointer')
+            .call(d3.drag().on('start',function(e,d){if(!e.active)simulation.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y;})
+                .on('drag',function(e,d){d.fx=e.x;d.fy=e.y;}).on('end',function(e,d){if(!e.active)simulation.alphaTarget(0);d.fx=null;d.fy=null;}));
+
+        labelElements = gAll.append('g').selectAll('text').data(data.nodes).enter().append('text')
+            .text(function(d){return d.label;}).attr('font-size','10px').attr('dx',14).attr('dy',4);
+
+        nodeElements.on('click', function(event, d) {
+            nodeElements.attr('stroke','#fff').attr('stroke-width',1.5);
+            d3.select(this).attr('stroke','#333').attr('stroke-width',3);
+            showDetail(d);
+        });
+
+        simulation.on('tick', function() {
+            linkElements.attr('x1',function(d){return d.source.x;}).attr('y1',function(d){return d.source.y;})
+                .attr('x2',function(d){return d.target.x;}).attr('y2',function(d){return d.target.y;});
+            edgeLabels.attr('x',function(d){return(d.source.x+d.target.x)/2;}).attr('y',function(d){return(d.source.y+d.target.y)/2;});
+            nodeElements.attr('cx',function(d){return d.x;}).attr('cy',function(d){return d.y;});
+            labelElements.attr('x',function(d){return d.x;}).attr('y',function(d){return d.y;});
+        });
+    }
+
+    function showDetail(node) {
+        var conns = allData.edges.filter(function(e) {
+            var s = typeof e.source==='object'?e.source.id:e.source, t = typeof e.target==='object'?e.target.id:e.target;
+            return s===node.id||t===node.id;
+        });
+        var h = '<h6>'+esc(node.label)+'</h6>';
+        h += '<p class="mb-1"><span class="badge" style="background:'+(typeColors[node.type]||'#76b7b2')+'">'+esc(node.type||'unknown')+'</span></p>';
+        h += '<p class="mb-2 text-muted small">ID: '+node.id+' | Connections: '+conns.length+'</p>';
+        if (conns.length) {
+            h += '<hr><h6 class="small">Connections</h6><ul class="list-unstyled small">';
+            conns.forEach(function(e) {
+                var other = (typeof e.source==='object'?e.source.id:e.source)===node.id
+                    ? (typeof e.target==='object'?e.target:allData.nodes.find(function(n){return n.id===e.target;}))
+                    : (typeof e.source==='object'?e.source:allData.nodes.find(function(n){return n.id===e.source;}));
+                if(other) h+='<li><span class="badge bg-light text-dark">'+esc(e.label||'related')+'</span> '+esc(other.label||'Node')+'</li>';
+            });
+            h += '</ul>';
+        }
+        if(node.entity_url) h+='<a href="'+node.entity_url+'" class="btn btn-sm btn-outline-primary mt-2">View Entity</a>';
+        document.getElementById('detailContent').innerHTML = h;
+    }
+
+    function esc(s){var d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+
+    // Search
+    document.getElementById('nodeSearch').addEventListener('input', function() {
+        var term = this.value.toLowerCase();
+        if (!nodeElements) return;
+        nodeElements.style('opacity', function(d){return !term||d.label.toLowerCase().indexOf(term)>=0?1:0.15;});
+        labelElements.style('opacity', function(d){return !term||d.label.toLowerCase().indexOf(term)>=0?1:0.15;});
+    });
+
+    // Export
+    document.getElementById('exportGraphML').addEventListener('click', function() {
+        window.location.href = '/research/network-graph/' + projectId + '/export/graphml';
+    });
+
+    loadGraph();
+    document.getElementById('filterType').addEventListener('change', loadGraph);
+    document.getElementById('filterStatus').addEventListener('change', loadGraph);
+});
+</script>
+@endsection

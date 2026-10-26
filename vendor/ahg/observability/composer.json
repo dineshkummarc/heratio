@@ -1,0 +1,25 @@
+{
+    "name": "ahg/observability",
+    "description": "Prometheus metrics + OpenTelemetry tracing for Heratio (issue #677 Phases 3-5)",
+    "type": "library",
+    "license": "AGPL-3.0-or-later",
+    "require": {
+        "php": "^8.3",
+        "promphp/prometheus_client_php": "^2.13",
+        "open-telemetry/api": "^1.0",
+        "open-telemetry/sdk": "^1.0",
+        "open-telemetry/exporter-otlp": "^1.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "AhgObservability\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "AhgObservability\\Providers\\AhgObservabilityServiceProvider"
+            ]
+        }
+    }
+}

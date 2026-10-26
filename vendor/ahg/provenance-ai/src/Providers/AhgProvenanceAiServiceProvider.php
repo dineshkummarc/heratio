@@ -1,0 +1,143 @@
+<?php
+
+/**
+ * AhgProvenanceAiServiceProvider - Service provider for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace AhgProvenanceAi\Providers;
+
+use AhgProvenanceAi\Services\InferenceService;
+use AhgProvenanceAi\Services\OverrideService;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\ServiceProvider;
+
+/**
+ * Boots the AI provenance package: auto-installs the schema on first request,
+ * binds InferenceService as a singleton.
+ *
+ * The auto-install pattern mirrors AhgDropdownManageServiceProvider's approach
+ * (see project memory project_dropdown_phase_1) so a fresh checkout doesn't
+ * need a manual mysql import step.
+ */
+class AhgProvenanceAiServiceProvider extends ServiceProvider
+{
+    public function register(): void
+    {
+        $this->app->singleton(InferenceService::class, function ($app) {
+            return new InferenceService;
+        });
+        $this->app->singleton(OverrideService::class, function ($app) {
+            return new OverrideService;
+        });
+    }
+
+    public function boot(): void
+    {
+        $this->ensureSchema();
+        $this->loadRoutesFrom(__DIR__.'/../../routes/api.php');
+
+        // heratio#137 - AI Inventory & Governance dashboard.
+        $this->loadRoutesFrom(__DIR__.'/../../routes/web.php');
+        $this->loadViewsFrom(__DIR__.'/../../resources/views', 'ahg-provenance-ai');
+
+        // #62 Fuseki replay command + 5-min schedule. The command itself
+        // is a no-op when there are no NULL-URI rows queued, so the
+        // schedule fires harmlessly when the pool is healthy. Schedule
+        // self-gates on fuseki_sync_enabled - flipping that toggle off
+        // silences the loop without artisan re-cache.
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                \AhgProvenanceAi\Console\Commands\FusekiReplayCommand::class,
+                \AhgProvenanceAi\Console\Commands\KeygenCommand::class,
+                \AhgProvenanceAi\Console\Commands\MigrateStarCommand::class,
+            ]);
+            $this->app->booted(function () {
+                $schedule = $this->app->make(\Illuminate\Console\Scheduling\Schedule::class);
+                $schedule->command('ahg:provenance-ai:replay')
+                    ->everyFiveMinutes()
+                    ->withoutOverlapping(10)
+                    ->when(function () {
+                        try {
+                            $v = \Illuminate\Support\Facades\DB::table('ahg_settings')
+                                ->where('setting_key', 'fuseki_sync_enabled')
+                                ->value('setting_value');
+
+                            return $v === null ? true : (bool) intval($v);
+                        } catch (\Throwable $e) {
+                            return false;
+                        }
+                    });
+            });
+        }
+    }
+
+    /**
+     * Idempotent first-boot installer. Skipped when both tables already exist.
+     * Failure is logged but does not throw - provisioning concerns must not
+     * crash the request handler.
+     *
+     * Uses DB::unprepared() so the multi-statement install.sql (with leading
+     * SQL comments and the SET FOREIGN_KEY_CHECKS wrapper) executes as one
+     * batch, matching the AhgDropdownManageServiceProvider precedent.
+     */
+    protected function ensureSchema(): void
+    {
+        try {
+            if (! Schema::hasTable('ahg_ai_inference') || ! Schema::hasTable('ahg_ai_override')) {
+                $sql = @file_get_contents(__DIR__.'/../../database/install.sql');
+                if (is_string($sql) && $sql !== '') {
+                    DB::unprepared($sql);
+                }
+            }
+            // heratio#136 - Ed25519 signature columns. install.sql uses
+            // CREATE TABLE IF NOT EXISTS, so an already-created table needs
+            // an explicit, idempotent ALTER for the new columns.
+            if (Schema::hasTable('ahg_ai_inference') && ! Schema::hasColumn('ahg_ai_inference', 'signature')) {
+                Schema::table('ahg_ai_inference', function ($table) {
+                    $table->text('signature')->nullable()->after('fuseki_graph_uri');
+                    $table->string('signer_key_id', 64)->nullable()->after('signature');
+                });
+            }
+            // heratio#135 - structured model-provenance manifest (JSON), on
+            // the inference row and on the model config it snapshots from.
+            if (Schema::hasTable('ahg_ai_inference') && ! Schema::hasColumn('ahg_ai_inference', 'model_manifest')) {
+                Schema::table('ahg_ai_inference', function ($table) {
+                    $table->json('model_manifest')->nullable();
+                });
+            }
+            // heratio#141 - RAG-guardrail verdict column, same idempotent pattern.
+            if (Schema::hasTable('ahg_ai_inference') && ! Schema::hasColumn('ahg_ai_inference', 'guardrail')) {
+                Schema::table('ahg_ai_inference', function ($table) {
+                    $table->json('guardrail')->nullable();
+                });
+            }
+            if (Schema::hasTable('ahg_llm_config') && ! Schema::hasColumn('ahg_llm_config', 'model_manifest')) {
+                Schema::table('ahg_llm_config', function ($table) {
+                    $table->json('model_manifest')->nullable();
+                });
+            }
+        } catch (\Throwable $e) {
+            \Log::warning('[ahg-provenance-ai] auto-install failed: '.$e->getMessage());
+        }
+    }
+}

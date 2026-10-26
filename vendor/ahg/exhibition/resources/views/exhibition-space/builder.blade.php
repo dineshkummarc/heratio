@@ -1,0 +1,2160 @@
+{{-- heratio#1138 - Digital Twin: virtual collection builder (Phase 1). --}}
+@extends('theme::layouts.1col')
+
+@section('title', __('Digital Twin Builder') . ' - ' . $space->name)
+@section('body-class', 'exhibition-space builder')
+
+@section('content')
+  <div class="d-flex flex-wrap align-items-baseline mb-2 gap-2">
+    <h1 class="mb-0 flex-grow-1">
+      <i class="fas fa-cubes me-2"></i>{{ __('Digital Twin Builder') }}
+      <small class="text-muted">{{ $space->name }}</small>
+    </h1>
+    @include('ahg-exhibition::exhibition-space._nav-actions', ['space' => $space, 'current' => 'builder'])
+    @auth<button type="button" id="simLiveBtn" class="btn btn-sm btn-outline-success" title="{{ __('Seed demo sensor readings to preview the live overlay') }}"><i class="fas fa-temperature-half me-1"></i>{{ __('Simulate live data') }}</button>@endauth
+    @auth<button type="button" id="genRecBtn" class="btn btn-sm btn-outline-success" title="{{ __('Use AI to suggest related objects for the walkthrough') }}"><i class="fas fa-wand-magic-sparkles me-1"></i>{{ __('AI recommendations') }}</button>@endauth
+  </div>
+  <p class="text-muted small mb-3">
+    {{ __('The start of digital twins: arrange this collection visually. Search an object, drop it on the floorplan, then drag, rotate and scale it into place. Changes save automatically.') }}
+  </p>
+
+  @if(session('success'))<div class="alert alert-success py-2">{{ session('success') }}</div>@endif
+  @if(session('error'))<div class="alert alert-danger py-2">{{ session('error') }}</div>@endif
+  @if($errors->any())<div class="alert alert-danger py-2"><ul class="mb-0">@foreach($errors->all() as $e)<li>{{ $e }}</li>@endforeach</ul></div>@endif
+
+  <div class="row g-3">
+    {{-- Left: tools --}}
+    <div class="col-lg-3">
+      <div class="card mb-3">
+        <div class="card-header py-2"><strong><i class="fas fa-plus me-1"></i>{{ __('Add object') }}</strong></div>
+        <div class="card-body">
+          <select id="objectSearch" class="form-control form-control-sm">
+            <option value="">{{ __('Type to search...') }}</option>
+          </select>
+          <label for="initialSize" class="form-label small mt-2 mb-1">{{ __('Initial size (units)') }}</label>
+          <input type="number" id="initialSize" class="form-control form-control-sm" min="0" step="0.01" value="1">
+          <small class="text-muted d-block mt-1">{{ __('Selecting an object drops it on the canvas at this size.') }}</small>
+        </div>
+      </div>
+      @auth
+      <div class="card mb-3">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+          <strong><i class="fas fa-wand-magic-sparkles me-1"></i><span id="recHdr">{{ __('AI suggestions') }}</span></strong>
+          <button type="button" id="recRefresh" class="btn btn-sm btn-outline-secondary py-0" title="{{ __('Refresh') }}"><i class="fas fa-rotate"></i></button>
+        </div>
+        <div class="card-body p-2" style="max-height:260px;overflow:auto;">
+          <p class="small text-muted mb-2">{{ __('Select an object to see its suggestions, or none for all. Click + to add a pick to this room.') }}</p>
+          <div id="recList" class="small text-muted">{{ __('Run "AI recommendations" first, then refresh.') }}</div>
+        </div>
+      </div>
+      @endauth
+
+      <div class="card mb-3">
+        <div class="card-header py-2"><strong><i class="fas fa-list me-1"></i>{{ __('Objects in this space') }}</strong> <span class="badge bg-secondary" id="objCount">0</span></div>
+        <div class="card-body p-2" style="max-height:220px;overflow:auto;">
+          <div id="objList" class="small text-muted">{{ __('None yet.') }}</div>
+        </div>
+      </div>
+
+      <div class="card mb-3">
+        <div class="card-header py-2"><strong><i class="fas fa-sliders-h me-1"></i>{{ __('Selected object') }}</strong></div>
+        <div class="card-body">
+          <div id="selPanel" class="text-muted small">{{ __('Click an object on the canvas to select it.') }}</div>
+          <div id="selControls" class="d-none">
+            <div class="fw-bold small mb-2" id="selTitle"></div>
+            <div class="btn-group btn-group-sm w-100 mb-2" role="group">
+              <button type="button" class="btn btn-outline-secondary" data-act="rotL" title="{{ __('Rotate left') }}"><i class="fas fa-undo"></i></button>
+              <button type="button" class="btn btn-outline-secondary" data-act="rotR" title="{{ __('Rotate right') }}"><i class="fas fa-redo"></i></button>
+              <button type="button" class="btn btn-outline-secondary" data-act="smaller" title="{{ __('Smaller') }}"><i class="fas fa-search-minus"></i></button>
+              <button type="button" class="btn btn-outline-secondary" data-act="bigger" title="{{ __('Bigger') }}"><i class="fas fa-search-plus"></i></button>
+            </div>
+            <div class="btn-group btn-group-sm w-100 mb-2" role="group">
+              <button type="button" class="btn btn-outline-warning" data-act="spot" id="spotBtn" title="{{ __('Spotlight: click to cycle off / light on approach / always-on. All modes dim the surroundings as you walk closer.') }}"><i class="fas fa-lightbulb me-1"></i>{{ __('Spot off') }}</button>
+              <button type="button" class="btn btn-outline-info" data-act="case" id="caseBtn" title="{{ __('Show this item inside a glass display case on a plinth') }}"><i class="fas fa-box-open me-1"></i>{{ __('Case') }}</button>
+              <button type="button" class="btn btn-outline-success" data-act="floor" id="floorBtn" title="{{ __('Stand this 3D model directly on the floor (no pedestal)') }}"><i class="fas fa-down-long me-1"></i>{{ __('On floor') }}</button>
+              <button type="button" class="btn btn-outline-secondary" data-act="front" title="{{ __('Bring to front') }}"><i class="fas fa-arrow-up"></i></button>
+              <button type="button" class="btn btn-outline-secondary" data-act="back" title="{{ __('Send to back') }}"><i class="fas fa-arrow-down"></i></button>
+            </div>
+            {{-- heratio#1139 - numeric display scale. The Bigger/Smaller buttons above
+                 still work and remain the quick way to nudge; this is for when you know
+                 the number. The two stay in sync because both write node.scale(). --}}
+            <label for="selScale" class="form-label small mb-1">{{ __('Display scale') }}</label>
+            <div class="input-group input-group-sm mb-2">
+              <input type="number" id="selScale" class="form-control" min="0.1" max="5" step="0.05"
+                     title="{{ __('Display size multiplier, 0.1 to 5. 1.0 renders about 1.5 m tall in the walkthrough.') }}">
+              <span class="input-group-text">&times;</span>
+            </div>
+            {{-- Optional real-world height. The walkthrough renders a piece at
+                 (1.5 m * display scale), so these are two views of one number and
+                 editing either updates the other. --}}
+            <label for="selHeightM" class="form-label small mb-1">{{ __('or real height (m)') }}</label>
+            <div class="input-group input-group-sm mb-2">
+              <input type="number" id="selHeightM" class="form-control" min="0.15" max="7.5" step="0.05"
+                     title="{{ __('Real-world height in metres. Sets the display scale to match.') }}">
+              <span class="input-group-text">m</span>
+            </div>
+            <label for="selSize" class="form-label small mb-1">{{ __('Size (units)') }}</label>
+            <input type="number" id="selSize" class="form-control form-control-sm mb-2" min="0" step="0.01">
+            <div id="tiltControls" class="d-none border-top pt-2 mb-2">
+              <label class="form-label small mb-1">{{ __('3D orientation (degrees)') }}</label>
+              <div class="row g-1 mb-1">
+                <div class="col-6"><input type="number" id="tiltX" class="form-control form-control-sm" step="90" placeholder="{{ __('Tilt X') }}"></div>
+                <div class="col-6"><input type="number" id="tiltZ" class="form-control form-control-sm" step="90" placeholder="{{ __('Tilt Z') }}"></div>
+              </div>
+              <button type="button" id="tiltAuto" class="btn btn-outline-secondary btn-sm w-100">{{ __('Auto (reset)') }}</button>
+              <small class="text-muted d-block mt-1">{{ __('Empty = auto. Use 90 / -90 to stand a model upright.') }}</small>
+            </div>
+            <div class="border-top pt-2 mb-2">
+              <label class="form-label small mb-1">{{ __('Tour viewing spot') }}</label>
+              <div class="d-flex gap-1">
+                <button type="button" id="viewSpotBtn" class="btn btn-sm btn-outline-primary flex-fill" title="{{ __('Then click a spot on the plan where the tour should stand to view this object') }}"><i class="fas fa-eye me-1"></i>{{ __('Set spot') }}</button>
+                <button type="button" id="viewSpotClear" class="btn btn-sm btn-outline-secondary" title="{{ __('Clear viewing spot (back to automatic)') }}"><i class="fas fa-times"></i></button>
+              </div>
+              <small class="text-muted d-block mt-1">{{ __('Where the guided tour stands to view this object. Best for floor objects - wall art is framed head-on automatically.') }}</small>
+            </div>
+            <label for="selWall" class="form-label small mb-1">{{ __('Hang on wall') }}</label>
+            <select id="selWall" class="form-select form-select-sm mb-2"></select>
+            <button type="button" id="btnRemove" class="btn btn-sm btn-outline-danger w-100"><i class="fas fa-trash me-1"></i>{{ __('Remove from twin') }}</button>
+          </div>
+        </div>
+      </div>
+
+      @auth
+      {{-- Furniture & fittings picker: click a piece to drop it in the room, then drag it on the floor. --}}
+      <div class="card mb-3">
+        <div class="card-header py-2"><strong><i class="fas fa-couch me-1"></i>{{ __('Furniture & fittings') }}</strong> <span class="badge bg-secondary" id="furnCount">0</span></div>
+        <div class="card-body">
+          <p class="small text-muted mb-2">{{ __('Click to add to the room centre, then drag the brown dot to position. Double-click a dot to remove.') }}</p>
+          <div class="d-flex flex-wrap gap-1" id="furnPicker">
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-furn="bench"><i class="fas fa-chair me-1"></i>{{ __('Bench') }}</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-furn="pedestal"><i class="fas fa-cube me-1"></i>{{ __('Pedestal') }}</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-furn="case"><i class="fas fa-box-open me-1"></i>{{ __('Display case') }}</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-furn="planter"><i class="fas fa-seedling me-1"></i>{{ __('Planter') }}</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-furn="table"><i class="fas fa-table me-1"></i>{{ __('Table') }}</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-furn="chair"><i class="fas fa-chair me-1"></i>{{ __('Chair') }}</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-furn="railing"><i class="fas fa-grip-lines me-1"></i>{{ __('Rope railing') }}</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-furn="pillar-round"><i class="fas fa-circle me-1"></i>{{ __('Round pillar') }}</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-furn="pillar-square"><i class="fas fa-square me-1"></i>{{ __('Square pillar') }}</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-furn="person-man"><i class="fas fa-person me-1"></i>{{ __('Man') }}</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-furn="person-woman"><i class="fas fa-person-dress me-1"></i>{{ __('Woman') }}</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-furn="arch"><i class="fas fa-archway me-1"></i>{{ __('Arch') }}</button>
+          </div>
+          {{-- Custom furniture library: upload your own 3D models / images, then click to place them. --}}
+          <div class="border-top mt-2 pt-2">
+            <label class="form-label small mb-1"><i class="fas fa-cloud-arrow-up me-1"></i>{{ __('Your furniture library') }}</label>
+            <p class="small text-muted mb-1">{{ __('Upload 3D models (glb, gltf, obj, stl, ply) or images, then click a tile to drop it in the room.') }}</p>
+            <input type="file" id="faFile" accept=".glb,.gltf,.obj,.stl,.ply,image/*" class="form-control form-control-sm mb-1">
+            <input type="text" id="faLabel" class="form-control form-control-sm mb-1" placeholder="{{ __('Name (defaults to file name)') }}" maxlength="120">
+            <textarea id="faDesc" class="form-control form-control-sm mb-1" rows="2" maxlength="2000" placeholder="{{ __('Description (optional)') }}"></textarea>
+            <button type="button" id="faUpload" class="btn btn-sm btn-outline-primary w-100 mb-2"><i class="fas fa-upload me-1"></i>{{ __('Upload to library') }}</button>
+            <div class="d-flex flex-wrap gap-1" id="furnLibrary"></div>
+          </div>
+          {{-- Single-click a placed item to select it, then adjust its size/height. Pillars take height from this. --}}
+          <div id="furnSel" class="border-top mt-2 pt-2" style="display:none">
+            <label class="form-label small mb-1"><span id="furnSelKind" class="fw-bold"></span> - <span id="furnScaleLabel">{{ __('Size') }}</span>: <span id="furnScaleVal">1.0</span>x</label>
+            <input type="range" id="furnScale" class="form-range" min="0.3" max="4" step="0.1" value="1">
+            <label class="form-label small mb-1 mt-1">{{ __('Rotate') }}: <span id="furnRotVal">0</span>&deg;</label>
+            <input type="range" id="furnRot" class="form-range" min="0" max="345" step="15" value="0">
+            <div id="furnRailRow" class="input-group input-group-sm mt-1" style="display:none">
+              <span class="input-group-text">{{ __('Poles') }}</span>
+              <input type="number" id="furnSegments" class="form-control" min="2" max="20" step="1" value="2">
+            </div>
+            <button type="button" id="furnAddPole" class="btn btn-sm btn-outline-secondary w-100 mt-1" style="display:none"><i class="fas fa-plus me-1"></i>{{ __('Add pole') }}</button>
+            <div class="small text-muted" id="furnPoleHint" style="display:none">{{ __('Drag the orange pole dots to place each post; double-click a dot to remove (min 2).') }}</div>
+            <div class="small text-muted" id="furnPillarHint" style="display:none">{{ __('Pillar height = 3m x this (about 0.9-12m). View in 3D walkthrough.') }}</div>
+          </div>
+        </div>
+      </div>
+
+      @endauth
+
+    </div>
+
+    {{-- Right: canvas --}}
+    <div class="col-lg-9">
+      <div class="card">
+        <div class="card-header py-2 d-flex flex-wrap justify-content-between align-items-center gap-2">
+          <div class="btn-group btn-group-sm" role="group">
+            <button type="button" id="modeFloor" class="btn btn-primary">{{ __('Floor view') }}</button>
+            <button type="button" id="modeWall" class="btn btn-outline-primary">{{ __('Wall view') }}</button>
+          </div>
+          <select id="wvWall" class="form-select form-select-sm d-none" style="max-width:160px;">
+            <option value="north">{{ __('Back wall') }}</option>
+            <option value="south">{{ __('Front wall') }}</option>
+            <option value="west">{{ __('Left wall') }}</option>
+            <option value="east">{{ __('Right wall') }}</option>
+          </select>
+          <button type="button" id="wvAddWin" class="btn btn-sm btn-outline-info d-none" title="{{ __('Add a window to this wall - then drag it to position, double-click to remove') }}"><i class="fas fa-window-maximize me-1"></i>{{ __('Add window') }}</button>
+          <span class="small text-muted"><span id="saveState">{{ __('All changes saved') }}</span> <i id="saveIcon" class="fas fa-check text-success ms-1"></i></span>
+        </div>
+        <div class="card-body p-0" style="position:relative;">
+          <div id="stageWrap" style="width:100%;background:#f4f4f4;border-radius:0 0 .375rem .375rem;overflow:hidden;"></div>
+          {{-- #1172 Wall-view window editor: appears when a window is clicked --}}
+          <div id="winEdit" class="d-none" style="position:absolute;top:10px;right:10px;z-index:6;background:#fff;border:1px solid #adb5bd;border-radius:6px;padding:8px;box-shadow:0 2px 10px rgba(0,0,0,.2);width:172px;">
+            <div class="small fw-bold mb-2"><i class="fas fa-window-maximize me-1 text-info"></i>{{ __('Window') }}</div>
+            <div class="input-group input-group-sm mb-1"><span class="input-group-text" style="width:52px">{{ __('Width') }}</span><input type="number" id="winEditW" class="form-control" min="0.4" max="6" step="0.1"><span class="input-group-text">m</span></div>
+            <div class="input-group input-group-sm mb-1"><span class="input-group-text" style="width:52px">{{ __('Sill') }}</span><input type="number" id="winEditSill" class="form-control" min="0" max="3" step="0.1"><span class="input-group-text">m</span></div>
+            <div class="input-group input-group-sm mb-2"><span class="input-group-text" style="width:52px">{{ __('Height') }}</span><input type="number" id="winEditH" class="form-control" min="0.3" max="3.5" step="0.1"><span class="input-group-text">m</span></div>
+            <button type="button" id="winEditDel" class="btn btn-sm btn-danger w-100 mb-1"><i class="fas fa-trash me-1"></i>{{ __('Remove window') }}</button>
+            <button type="button" id="winEditClose" class="btn btn-sm btn-outline-secondary w-100">{{ __('Done') }}</button>
+          </div>
+        </div>
+      </div>
+
+      @auth
+      {{-- Room appearance & setup - collapsed by default so the page stays short; equal-height tiles. --}}
+      <button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-bs-toggle="collapse" data-bs-target="#roomSettings" aria-expanded="false" aria-controls="roomSettings">
+        <i class="fas fa-sliders-h me-1"></i>{{ __('Room & scene settings') }}<i class="fas fa-chevron-down ms-1 small"></i>
+      </button>
+      <div class="collapse mt-2" id="roomSettings">
+      <div class="row g-3">
+        <div class="col-md-6 col-xl-3">
+          <div class="card mb-0 h-100">
+            <div class="card-header py-2"><strong><i class="fas fa-map me-1"></i>{{ __('Floorplan') }}</strong></div>
+            <div class="card-body">
+              <form method="POST" action="{{ route('exhibition-space.builder.floorplan', ['slug' => $space->slug]) }}" enctype="multipart/form-data">
+                @csrf
+                <input type="file" name="floorplan" accept="image/*" class="form-control form-control-sm mb-2" required>
+                <div class="row g-1 mb-2">
+                  <div class="col-6"><input type="number" step="0.01" min="0" name="floorplan_width_m" class="form-control form-control-sm" placeholder="{{ __('Width m') }}" value="{{ $space->floorplan_width_m }}"></div>
+                  <div class="col-6"><input type="number" step="0.01" min="0" name="floorplan_height_m" class="form-control form-control-sm" placeholder="{{ __('Height m') }}" value="{{ $space->floorplan_height_m }}"></div>
+                </div>
+                <button type="submit" class="btn btn-sm btn-outline-primary w-100"><i class="fas fa-upload me-1"></i>{{ __('Upload floorplan') }}</button>
+              </form>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-md-6 col-xl-3">
+          <div class="card mb-0 h-100">
+            <div class="card-header py-2"><strong><i class="fas fa-image me-1"></i>{{ __('Ceiling') }}</strong></div>
+            <div class="card-body">
+              {{-- Preview of the current ceiling so you can see what is set (updates on upload). --}}
+              <div class="border rounded p-1 text-center mb-2" style="background:#f8f9fa">
+                @if(!empty($space->ceiling_image_path))
+                <img src="{{ $space->ceiling_image_path }}" alt="" style="max-width:100%;max-height:90px;border-radius:3px">
+                <div class="text-truncate text-muted mt-1" style="font-size:11px">{{ basename($space->ceiling_image_path) }}</div>
+                @else
+                <div class="text-muted py-2" style="font-size:11px">{{ __('No ceiling image (plaster + cornice default)') }}</div>
+                @endif
+              </div>
+              <form method="POST" action="{{ route('exhibition-space.builder.ceiling', ['slug' => $space->slug]) }}" enctype="multipart/form-data" class="mb-2">
+                @csrf
+                <input type="file" name="ceiling" accept="image/*" class="form-control form-control-sm mb-2" required>
+                <button type="submit" class="btn btn-sm btn-outline-primary w-100"><i class="fas fa-upload me-1"></i>{{ __('Upload painted ceiling') }}</button>
+              </form>
+              @if(!empty($space->ceiling_image_path))
+              <form method="POST" action="{{ route('exhibition-space.builder.ceiling-clear', ['slug' => $space->slug]) }}">
+                @csrf
+                <button type="submit" class="btn btn-sm btn-outline-danger w-100"><i class="fas fa-times me-1"></i>{{ __('Clear ceiling') }}</button>
+              </form>
+              @endif
+            </div>
+          </div>
+        </div>
+
+        <div class="col-md-6 col-xl-3">
+          <div class="card mb-0 h-100">
+            <div class="card-header py-2"><strong><i class="fas fa-paint-roller me-1"></i>{{ __('Wall painting') }}</strong></div>
+            <div class="card-body">
+              <label class="form-label small mb-1">{{ __('Apply to') }}</label>
+              <select id="wpTarget" class="form-select form-select-sm mb-2"></select>
+              {{-- Preview of what is currently loaded for the chosen target, so you know what is there before replacing it. --}}
+              <div class="border rounded p-1 text-center mb-2" style="background:#f8f9fa">
+                <img id="wpPreview" alt="" style="max-width:100%;max-height:90px;display:none;border-radius:3px">
+                <div id="wpName" class="text-truncate text-muted mt-1" style="font-size:11px">{{ __('No painting on this wall') }}</div>
+              </div>
+              <input type="file" id="wpFile" accept="image/*" class="form-control form-control-sm mb-2">
+              <button type="button" id="wpUpload" class="btn btn-sm btn-outline-primary w-100 mb-1"><i class="fas fa-upload me-1"></i>{{ __('Upload painting') }}</button>
+              <button type="button" id="wpClear" class="btn btn-sm btn-outline-danger w-100 mb-2"><i class="fas fa-times me-1"></i>{{ __('Clear painting') }}</button>
+              <hr class="my-2">
+              <label class="form-label small mb-1">{{ __('Or paint a colour') }}</label>
+              <div class="d-flex flex-wrap gap-1 mb-2" id="wcSwatches">
+                @foreach (['#f5f1e8' => 'Gallery white', '#e9e2d0' => 'Warm stone', '#d9cbb2' => 'Sand', '#cfd8d3' => 'Sage grey', '#b8c4cc' => 'Cool grey', '#9aa7b0' => 'Slate', '#7d8a74' => 'Olive', '#8a6d5b' => 'Taupe', '#6e5a4e' => 'Mocha', '#5a6b7a' => 'Petrol', '#7a4b50' => 'Oxblood', '#2f3640' => 'Charcoal'] as $hex => $label)
+                <button type="button" class="wc-swatch border rounded" data-color="{{ $hex }}" title="{{ $label }}" style="width:24px;height:24px;background:{{ $hex }};padding:0"></button>
+                @endforeach
+              </div>
+              <div class="input-group input-group-sm mb-2">
+                <input type="color" id="wcCustom" class="form-control form-control-color" value="#e9e2d0" title="{{ __('Custom colour') }}">
+                <button type="button" id="wcApply" class="btn btn-outline-primary"><i class="fas fa-fill-drip me-1"></i>{{ __('Apply colour') }}</button>
+              </div>
+              <button type="button" id="wcClear" class="btn btn-sm btn-outline-danger w-100"><i class="fas fa-times me-1"></i>{{ __('Clear colour') }}</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-md-6 col-xl-3">
+          <div class="card mb-0 h-100">
+            <div class="card-header py-2"><strong><i class="fas fa-image me-1"></i>{{ __('Floor image') }}</strong></div>
+            <div class="card-body">
+              <p class="small text-muted mb-2">{{ __('Upload a tileable photo (marble, parquet, mosaic) - it repeats across the floor as 2x2 m tiles. Replaces the default marble until cleared.') }}</p>
+              <div class="border rounded p-1 text-center mb-2" style="background:#f8f9fa">
+                <img id="flPreview" alt="" style="max-width:100%;max-height:90px;display:none;border-radius:3px">
+                <div id="flName" class="text-truncate text-muted mt-1" style="font-size:11px">{{ __('No floor image (using marble/plan)') }}</div>
+              </div>
+              <input type="file" id="flFile" accept="image/*" class="form-control form-control-sm mb-2">
+              <button type="button" id="flUpload" class="btn btn-sm btn-outline-primary w-100 mb-1"><i class="fas fa-upload me-1"></i>{{ __('Upload floor image') }}</button>
+              <button type="button" id="flClear" class="btn btn-sm btn-outline-danger w-100 mb-2"><i class="fas fa-times me-1"></i>{{ __('Clear floor image') }}</button>
+              <hr class="my-2">
+              {{-- Tiling: tile size (also sizes the marble tiles) + optional grout grid on the floor image. --}}
+              <div class="form-check form-switch mb-1">
+                <input class="form-check-input" type="checkbox" id="flGrout" {{ ($space->floor_grout ?? 0) ? 'checked' : '' }}>
+                <label class="form-check-label small" for="flGrout">{{ __('Grout grid on floor image') }}</label>
+              </div>
+              <div class="input-group input-group-sm mb-1">
+                <span class="input-group-text">{{ __('Tile (m)') }}</span>
+                <input type="number" id="flTile" class="form-control" min="0.25" max="10" step="0.25" value="{{ $space->floor_tile_m ?? 2 }}">
+              </div>
+              <div class="input-group input-group-sm">
+                <span class="input-group-text">{{ __('Grout (mm)') }}</span>
+                <input type="number" id="flGroutMm" class="form-control" min="0.5" max="100" step="0.5" value="{{ $space->floor_grout_mm ?? 8 }}">
+              </div>
+              <small class="text-muted d-block mt-1">{{ __('Tile size (marble + floor-image grout) and grout-line width. Thin or wide - your call.') }}</small>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-md-6 col-xl-3">
+          <div class="card mb-0 h-100">
+            <div class="card-header py-2"><strong><i class="fas fa-cube me-1"></i>{{ __('Photoreal capture') }}</strong></div>
+            <div class="card-body">
+              <p class="small text-muted mb-2">{{ __('Back this room with a photoreal scan (photogrammetry mesh or point cloud). It renders inside the 3D walkthrough; your object placements and the live overlay stay on top.') }}</p>
+              <div class="border rounded p-1 text-center mb-2" style="background:#f8f9fa">
+                <div id="scName" class="text-truncate text-muted" style="font-size:11px">{{ __('No scan shell (using built room)') }}</div>
+              </div>
+              <input type="file" id="scFile" accept=".glb,.gltf,.obj,.stl,.ply,.pcd" class="form-control form-control-sm mb-2">
+              <button type="button" id="scUpload" class="btn btn-sm btn-outline-primary w-100 mb-1"><i class="fas fa-upload me-1"></i>{{ __('Upload scan shell') }}</button>
+              <button type="button" id="scClear" class="btn btn-sm btn-outline-danger w-100 mb-2"><i class="fas fa-times me-1"></i>{{ __('Clear scan shell') }}</button>
+              <div class="input-group input-group-sm mb-2">
+                <span class="input-group-text">{{ __('Fit scale') }}</span>
+                <input type="number" id="scScale" class="form-control" min="0.001" max="1000" step="0.05" value="{{ $space->scan_shell_scale ?? 1 }}">
+              </div>
+              <label class="small text-muted mb-1">{{ __('360 / Matterport embed URL (optional)') }}</label>
+              <input type="url" id="scEmbed" class="form-control form-control-sm mb-2" placeholder="{{ __('https://my.matterport.com/show/?m=…') }}" value="{{ $space->scan_embed_url ?? '' }}">
+              <button type="button" id="scMeta" class="btn btn-sm btn-outline-secondary w-100">{{ __('Save scale & embed') }}</button>
+              <small class="text-muted d-block mt-1">{{ __('Meshes (glTF/OBJ/STL/PLY) render as the room; point clouds (.pcd, point-cloud .ply) render as points, downsampled for large scans. Embed URL adds a "360 view" button. For .las/.e57, export to PLY or PCD first.') }}</small>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-md-6 col-xl-3">
+          <div class="card mb-0 h-100">
+            <div class="card-header py-2"><strong><i class="fas fa-ruler-combined me-1"></i>{{ __('Room size (m)') }}</strong></div>
+            <div class="card-body">
+              <div class="row g-1 mb-2">
+                <div class="col-4"><input type="number" id="rdW" class="form-control form-control-sm" min="1" step="0.5" placeholder="W" value="{{ $space->room_w }}"></div>
+                <div class="col-4"><input type="number" id="rdD" class="form-control form-control-sm" min="1" step="0.5" placeholder="D" value="{{ $space->room_d }}"></div>
+                <div class="col-4"><input type="number" id="rdH" class="form-control form-control-sm" min="1" step="0.5" placeholder="H" value="{{ $space->room_h }}"></div>
+              </div>
+              <button type="button" id="rdSave" class="btn btn-sm btn-outline-primary w-100">{{ __('Save room size') }}</button>
+              <small class="text-muted d-block mt-1">{{ __('Width / Depth / wall Height. Raise H for taller walls.') }}</small>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-md-6 col-xl-3">
+          <div class="card mb-0 h-100">
+            <div class="card-header py-2"><strong><i class="fas fa-grip-lines-vertical me-1"></i>{{ __('Interior walls') }}</strong></div>
+            <div class="card-body">
+              <button type="button" id="wallAdd" class="btn btn-sm btn-outline-primary w-100 mb-2"><i class="fas fa-plus me-1"></i>{{ __('Add wall') }}</button>
+              <div id="wallList" class="small"></div>
+              <small id="wallHint" class="text-muted d-block mt-1">{{ __('Add a divider wall to hang objects in the middle of the room.') }}</small>
+            </div>
+          </div>
+        </div>
+
+        {{-- heratio#1151 - open-standard exports + embed --}}
+        <div class="col-md-6 col-xl-3">
+          <div class="card mb-0 h-100">
+            <div class="card-header py-2"><strong><i class="fas fa-share-nodes me-1"></i>{{ __('Share & interoperability') }}</strong></div>
+            <div class="card-body small">
+              <p class="text-muted mb-2">{{ __('Open-standard exports so other systems and institutions can consume this twin.') }}</p>
+              <a class="btn btn-sm btn-outline-secondary w-100 mb-1" target="_blank" rel="noopener" href="{{ route('exhibition-space.iiif', ['slug' => $space->slug]) }}"><i class="fas fa-image me-1"></i>{{ __('IIIF manifest') }}</a>
+              <a class="btn btn-sm btn-outline-secondary w-100 mb-1" target="_blank" rel="noopener" href="{{ route('exhibition-space.scene', ['slug' => $space->slug]) }}"><i class="fas fa-cube me-1"></i>{{ __('3D scene (JSON)') }}</a>
+              <a class="btn btn-sm btn-outline-secondary w-100 mb-2" target="_blank" rel="noopener" href="{{ route('exhibition-space.jsonld', ['slug' => $space->slug]) }}"><i class="fas fa-diagram-project me-1"></i>{{ __('Linked data (JSON-LD)') }}</a>
+              <label class="form-label mb-1">{{ __('Embed this walkthrough') }}</label>
+              <textarea id="embedSnippet" class="form-control form-control-sm" rows="3" readonly onclick="this.select()">&lt;iframe src="{{ route('exhibition-space.walkthrough', ['slug' => $space->slug]) }}" width="100%" height="600" style="border:0" allowfullscreen&gt;&lt;/iframe&gt;</textarea>
+              <button type="button" class="btn btn-sm btn-outline-primary w-100 mt-1" onclick="if(navigator.clipboard){navigator.clipboard.writeText(document.getElementById('embedSnippet').value);this.innerHTML='<i class=\'fas fa-check me-1\'></i>{{ __('Copied') }}';}"><i class="fas fa-copy me-1"></i>{{ __('Copy embed code') }}</button>
+            </div>
+          </div>
+        </div>
+
+        {{-- heratio#1277 federated twin - borrow a peer institution's object (read-only) --}}
+        <div class="col-md-6 col-xl-3">
+          <div class="card mb-0 h-100">
+            <div class="card-header py-2"><strong><i class="fas fa-people-arrows me-1"></i>{{ __('Borrow from a partner') }}</strong></div>
+            <div class="card-body small">
+              <p class="text-muted mb-2">{{ __('Borrow a single object from a partner institution\'s published exhibition. It shows read-only, attributed "Courtesy of ...", and links back to the owner. Nothing is copied - media stays on the partner.') }}</p>
+              <label class="form-label mb-1">{{ __('Partner') }}</label>
+              <select id="peerSel" class="form-select form-select-sm mb-2">
+                @forelse(($peers ?? []) as $pr)
+                  <option value="{{ $pr['id'] }}" data-base="{{ $pr['base_url'] }}">{{ $pr['name'] }}</option>
+                @empty
+                @endforelse
+                <option value="">{{ __('Other (enter URL)') }}</option>
+              </select>
+              <input id="peerBase" class="form-control form-control-sm mb-2 d-none" placeholder="{{ __('https://partner.example/') }}" maxlength="500">
+              <label class="form-label mb-1">{{ __('Exhibition slug') }}</label>
+              <input id="peerSlug" class="form-control form-control-sm mb-2" placeholder="{{ __('e.g. founders-gallery') }}" maxlength="255">
+              <button type="button" id="peerFetchBtn" class="btn btn-sm btn-outline-primary w-100 mb-2"><i class="fas fa-cloud-arrow-down me-1"></i>{{ __('Fetch objects') }}</button>
+              <div id="peerMsg" class="small mb-1"></div>
+              <div id="peerObjList" class="list-group list-group-flush small" style="max-height:220px;overflow:auto;"></div>
+            </div>
+          </div>
+        </div>
+
+        {{-- authored audio guided tour --}}
+        <div class="col-md-6 col-xl-3">
+          <div class="card mb-0 h-100">
+            <div class="card-header py-2"><strong><i class="fas fa-route me-1"></i>{{ __('Guided tour (audio)') }}</strong></div>
+            <div class="card-body small">
+              <p class="text-muted mb-2">{{ __('Build routes of objects with a script the guide reads aloud. Visitors pick a tour and press Play in the walkthrough.') }}</p>
+              <div class="input-group input-group-sm mb-2">
+                <select id="gtTourSel" class="form-select form-select-sm"></select>
+                <button type="button" id="gtNewTourBtn" class="btn btn-outline-success" title="{{ __('New tour') }}"><i class="fas fa-plus"></i></button>
+                <button type="button" id="gtDelTourBtn" class="btn btn-outline-danger" title="{{ __('Delete this tour') }}"><i class="fas fa-trash"></i></button>
+              </div>
+              <label for="gtTourName" class="form-label small mb-1">{{ __('Tour name') }} <span class="text-muted">- {{ __('edit to rename the selected tour') }}</span></label>
+              <input id="gtTourName" class="form-control form-control-sm mb-2" placeholder="{{ __('Tour name') }}" maxlength="80">
+              <div class="d-flex align-items-center gap-2 mb-2">
+                <label class="form-label small mb-0 text-nowrap">{{ __('Show objects from') }}</label>
+                <select id="gtScope" class="form-select form-select-sm">
+                  <option value="room" selected>{{ __('This room') }}</option>
+                  <option value="building">{{ __('Whole building') }}</option>
+                </select>
+              </div>
+              <div class="input-group input-group-sm mb-2">
+                <select id="gtAddSel" class="form-select form-select-sm"></select>
+                <button type="button" id="gtAddBtn" class="btn btn-outline-primary" title="{{ __('Add to tour') }}"><i class="fas fa-plus"></i></button>
+              </div>
+              <div class="form-check form-switch small mb-2">
+                <input class="form-check-input" type="checkbox" id="gtRouteMode">
+                <label class="form-check-label" for="gtRouteMode">{{ __('Route mode: click objects on the plan to add stops in order') }}</label>
+              </div>
+              <div id="gtList"></div>
+              <div id="gtRoomOrder"></div>
+              <div class="d-flex gap-1 mt-2">
+                <button type="button" id="gtSaveBtn" class="btn btn-sm btn-success flex-fill"><i class="fas fa-save me-1"></i>{{ __('Save tours') }}</button>
+                <button type="button" id="gtPreviewBtn" class="btn btn-sm btn-outline-primary flex-fill" title="{{ __('Save then open the walkthrough and play this tour') }}"><i class="fas fa-play me-1"></i>{{ __('Preview') }}</button>
+              </div>
+              <span id="gtSaveMsg" class="text-success"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+      </div>{{-- /#roomSettings collapse --}}
+      @endauth
+    </div>
+  </div>
+
+  <link href="{{ asset('vendor/tom-select/2.2.2/tom-select.bootstrap5.min.css') }}" rel="stylesheet">
+  <script src="{{ asset('vendor/tom-select/2.2.2/tom-select.complete.min.js') }}"></script>
+  <script src="{{ asset('vendor/konva/9.3.6/konva.min.js') }}"></script>
+  <script nonce="{{ $cspNonce ?? '' }}">
+  (function () {
+    var CSRF = '{{ csrf_token() }}';
+    var URLS = {
+      autocomplete: '{{ url('informationobject/autocomplete') }}',
+      place: '{{ route('exhibition-space.builder.place', ['slug' => $space->slug]) }}',
+      layout: '{{ route('exhibition-space.builder.layout', ['slug' => $space->slug]) }}',
+      remove: '{{ route('exhibition-space.builder.remove', ['slug' => $space->slug]) }}',
+      size: '{{ route('exhibition-space.builder.size', ['slug' => $space->slug]) }}',
+      tilt: '{{ route('exhibition-space.builder.tilt', ['slug' => $space->slug]) }}',
+      spotlight: '{{ route('exhibition-space.builder.spotlight', ['slug' => $space->slug]) }}',
+      displayCase: '{{ route('exhibition-space.builder.display-case', ['slug' => $space->slug]) }}',
+      onFloor: '{{ route('exhibition-space.builder.on-floor', ['slug' => $space->slug]) }}',
+      viewSpot: '{{ route('exhibition-space.builder.view-spot', ['slug' => $space->slug]) }}',
+      zorder: '{{ route('exhibition-space.builder.zorder', ['slug' => $space->slug]) }}',
+      walls: '{{ route('exhibition-space.builder.walls', ['slug' => $space->slug]) }}',
+      wall: '{{ route('exhibition-space.builder.wall', ['slug' => $space->slug]) }}',
+      wallPlace: '{{ route('exhibition-space.builder.wall-place', ['slug' => $space->slug]) }}',
+      wallPos: '{{ route('exhibition-space.builder.wall-pos', ['slug' => $space->slug]) }}',
+      placements: '{{ route('exhibition-space.builder.placements', ['slug' => $space->slug]) }}',
+      roomDims: '{{ route('exhibition-space.builder.room-dims', ['slug' => $space->slug]) }}',
+      simLive: '{{ route('exhibition-space.readings.simulate', ['slug' => $space->slug]) }}',
+      genRec: '{{ route('exhibition-space.recommend.generate', ['slug' => $space->slug]) }}',
+      recommend: '{{ route('exhibition-space.recommend', ['slug' => $space->slug]) }}',
+      guidedTour: '{{ route('exhibition-space.guided-tour', ['slug' => $space->slug]) }}',
+      tourAudio: '{{ route('exhibition-space.tour-audio', ['slug' => $space->slug]) }}',
+      walkthrough: '{{ route('exhibition-space.walkthrough', ['slug' => $space->slug]) }}',
+      peerScene: '{{ route('exhibition-space.peer-scene', ['slug' => $space->slug]) }}',   // #1277 fetch a peer's scene
+      placeRemote: '{{ route('exhibition-space.place-remote', ['slug' => $space->slug]) }}'   // #1277 borrow a peer object
+    };
+    var PEERS = @json($peers ?? []);   // #1277 active federation peers (id, name, base_url)
+    var FLOORPLAN = @json($space->floorplan_image_path);
+    var PLACEMENTS = @json($placements);
+    var GUIDED_TOUR = @json($guidedTour ?? []);
+    var TOUR_OBJECTS = @json($tourObjects ?? []);   // building-wide objects for the tour picker
+    var WALLS = @json($walls ?? []);
+    var DOORS = @json($doors ?? []);
+    var WINDOWS = @json($windows ?? []);   // #1172
+    var SPACE_ID = {{ (int) $space->id }};
+    var WINDOWS_URL = '{{ route('exhibition-space.plan.windows', ['slug' => $space->slug]) }}';   // add/edit windows from Wall view too (#1172)
+    var LAYOUT = @json($layout ?? null);   // sibling-room rects for adjacency doorways (plan mode)
+    var SHAPE = @json($shape ?? null);
+    var ROOM_W = {{ $space->room_w ?: 18 }}, ROOM_D = {{ $space->room_d ?: 14 }}, ROOM_H = {{ $space->room_h ?: 4 }};
+    // Manual-only doors: the builder shows ONLY doors the curator placed (auto-doorways removed).
+    function autoDoors() {
+      return [];
+      var s = LAYOUT.self, out = [];   // (legacy auto-doorway code below kept but unreachable)
+      ['north', 'south', 'west', 'east'].forEach(function (side) {
+        var vertical = (side === 'west' || side === 'east');
+        var edge = side === 'north' ? s.z : side === 'south' ? s.z + s.d : side === 'west' ? s.x : s.x + s.w;
+        var a0 = vertical ? s.z : s.x, a1 = vertical ? s.z + s.d : s.x + s.w;
+        (LAYOUT.others || []).forEach(function (rj) {
+          var jMin = vertical ? rj.x : rj.z, jMax = vertical ? rj.x + rj.w : rj.z + rj.d;
+          if (Math.abs(jMax - edge) > 0.3 && Math.abs(jMin - edge) > 0.3) return;   // not adjoining this plane
+          var b0 = vertical ? rj.z : rj.x, b1 = vertical ? rj.z + rj.d : rj.x + rj.w;
+          var oa = Math.max(a0, b0), ob = Math.min(a1, b1);
+          if (ob - oa > 0.8) {
+            var mid = (oa + ob) / 2, dw = Math.min(1.6, (ob - oa) * 0.7);
+            var span = vertical ? s.d : s.w, base = vertical ? s.z : s.x;
+            out.push({ wall: side, pos: (mid - base) / span, width: dw, auto: true });
+          }
+        });
+      });
+      return out;
+    }
+    function allDoors() { return (DOORS || []).concat(autoDoors()); }
+    function aspectH(w) { return Math.round(w * Math.max(0.35, Math.min(1.6, ROOM_D / ROOM_W))); }
+
+    if (typeof Konva === 'undefined') {
+      document.getElementById('stageWrap').innerHTML =
+        '<div class="p-4 text-muted">{{ __('Canvas library failed to load.') }}</div>';
+      return;
+    }
+
+    var wrap = document.getElementById('stageWrap');
+    var W = Math.max(320, wrap.clientWidth || 800);
+    var H = aspectH(W);   // match the room's real proportions (from the plan)
+    var NODE = 90; // base object box in px
+
+    var stage = new Konva.Stage({ container: 'stageWrap', width: W, height: H });
+    var bgLayer = new Konva.Layer();
+    var wallLayer = new Konva.Layer();
+    var doorLayer = new Konva.Layer({ listening: false });
+    var layer = new Konva.Layer();
+    var routeLayer = new Konva.Layer({ listening: false });   // guided-tour visual route overlay
+    var viewLayer = new Konva.Layer({ listening: false });    // tour viewing-spot markers (eye + line to object)
+    var wvLayer = new Konva.Layer({ visible: false });
+    stage.add(bgLayer); stage.add(wallLayer); stage.add(doorLayer); stage.add(layer); stage.add(viewLayer); stage.add(routeLayer); stage.add(wvLayer);
+
+    // Door indicators on the floor view: show where each perimeter door is so
+    // objects can be placed clear of them. Doors are edited in the Building Plan.
+    function drawDoorMarkers() {
+      doorLayer.destroyChildren();
+      allDoors().forEach(function (d) {
+        var pts, lx, ly;
+        // Polygon-edge door (shaped rooms store {edge:N}): draw along the real edge.
+        if (typeof d.edge === 'number' && SHAPE && SHAPE.length >= 3) {
+          var a = SHAPE[d.edge % SHAPE.length], b = SHAPE[(d.edge + 1) % SHAPE.length];
+          if (!a || !b) return;
+          var ax = a.x * W, ay = a.z * H, bx = b.x * W, by = b.z * H;
+          var ex = bx - ax, ey = by - ay, ep = Math.hypot(ex, ey) || 1, ux = ex / ep, uy = ey / ep;
+          var em = Math.hypot((b.x - a.x) * ROOM_W, (b.z - a.z) * ROOM_D) || 1;
+          var dlen = Math.min((d.width || 1.6) / em, 1) * ep;
+          var pos = (d.pos == null ? 0.5 : d.pos), cxp = ax + ex * pos, cyp = ay + ey * pos;
+          pts = [cxp - ux * dlen / 2, cyp - uy * dlen / 2, cxp + ux * dlen / 2, cyp + uy * dlen / 2];
+          lx = cxp - 16; ly = cyp - 6;
+        } else {
+          var horiz = (d.wall === 'north' || d.wall === 'south');
+          var lenPx = (d.width / (horiz ? ROOM_W : ROOM_D)) * (horiz ? W : H);
+          if (d.wall === 'north') { var x = d.pos * W; pts = [x - lenPx / 2, 0, x + lenPx / 2, 0]; lx = x - 16; ly = 2; }
+          else if (d.wall === 'south') { var xs = d.pos * W; pts = [xs - lenPx / 2, H, xs + lenPx / 2, H]; lx = xs - 16; ly = H - 16; }
+          else if (d.wall === 'west') { var y = d.pos * H; pts = [0, y - lenPx / 2, 0, y + lenPx / 2]; lx = 6; ly = y - 6; }
+          else { var ye = d.pos * H; pts = [W, ye - lenPx / 2, W, ye + lenPx / 2]; lx = W - 38; ly = ye - 6; }
+        }
+        var dcol = d.auto ? '#0d6efd' : '#198754';   // auto-doorway (between rooms) = blue, manual door = green
+        doorLayer.add(new Konva.Line({ points: pts, stroke: dcol, strokeWidth: 8, lineCap: 'round', opacity: 0.9 }));
+        doorLayer.add(new Konva.Text({ x: lx, y: ly, width: 36, align: 'center', text: d.auto ? '{{ __('doorway') }}' : '{{ __('door') }}', fontSize: 9, fill: dcol }));
+      });
+      doorLayer.draw();
+    }
+
+    // Background mirrors the room's plan footprint: the floor (image or grid) is
+    // clipped to the polygon shape, with the area outside shaded as "void", so the
+    // builder matches the room created in the floor-plan layout.
+    function drawBackground() {
+      bgLayer.destroyChildren();
+      var shaped = (SHAPE && SHAPE.length >= 3);
+      bgLayer.add(new Konva.Rect({ x: 0, y: 0, width: W, height: H, fill: '#dfe2e6', listening: false }));   // void
+      var clipFn = shaped ? function (ctx) {
+        ctx.beginPath(); ctx.moveTo(SHAPE[0].x * W, SHAPE[0].z * H);
+        for (var i = 1; i < SHAPE.length; i++) ctx.lineTo(SHAPE[i].x * W, SHAPE[i].z * H);
+        ctx.closePath();
+      } : undefined;
+      var roomBg = new Konva.Group(clipFn ? { clipFunc: clipFn } : {});
+      bgLayer.add(roomBg);
+      roomBg.add(new Konva.Rect({ x: 0, y: 0, width: W, height: H, fill: '#ffffff', listening: false }));   // floor
+      if (FLOORPLAN) {
+        var bg = new Image();
+        bg.onload = function () { roomBg.add(new Konva.Image({ image: bg, x: 0, y: 0, width: W, height: H, listening: false })); bgLayer.draw(); };
+        bg.src = FLOORPLAN;
+      } else {
+        var grid = 40;
+        for (var gx = 0; gx <= W; gx += grid) roomBg.add(new Konva.Line({ points: [gx, 0, gx, H], stroke: '#e3e3e3', strokeWidth: 1, listening: false }));
+        for (var gy = 0; gy <= H; gy += grid) roomBg.add(new Konva.Line({ points: [0, gy, W, gy], stroke: '#e3e3e3', strokeWidth: 1, listening: false }));
+      }
+      // Numbered wall badges (match the "Hang on wall" dropdown), nudged inward.
+      function wallBadge(mx, my, n) {
+        bgLayer.add(new Konva.Circle({ x: mx, y: my, radius: 9, fill: '#0d6efd', opacity: 0.85, listening: false }));
+        bgLayer.add(new Konva.Text({ x: mx - 9, y: my - 6, width: 18, align: 'center', text: '' + n, fontSize: 11, fill: '#fff', listening: false }));
+      }
+      if (shaped) {
+        var pts = []; SHAPE.forEach(function (p) { pts.push(p.x * W, p.z * H); });
+        bgLayer.add(new Konva.Line({ points: pts, closed: true, stroke: '#0d6efd', strokeWidth: 2, listening: false }));
+        var cxp = 0, cyp = 0; SHAPE.forEach(function (p) { cxp += p.x; cyp += p.z; }); cxp = cxp / SHAPE.length * W; cyp = cyp / SHAPE.length * H;
+        for (var e = 0; e < SHAPE.length; e++) {
+          var pa = SHAPE[e], pb = SHAPE[(e + 1) % SHAPE.length];
+          var mx = (pa.x + pb.x) / 2 * W, my = (pa.z + pb.z) / 2 * H;
+          var dx = cxp - mx, dy = cyp - my, dl = Math.hypot(dx, dy) || 1; mx += dx / dl * 14; my += dy / dl * 14;
+          wallBadge(mx, my, e + 1);
+        }
+      } else {
+        // Rectangle: Wall 1 back(top), 2 front(bottom), 3 left, 4 right (matches dropdown).
+        wallBadge(W / 2, 16, 1); wallBadge(W / 2, H - 16, 2); wallBadge(16, H / 2, 3); wallBadge(W - 16, H / 2, 4);
+      }
+      bgLayer.draw();
+    }
+    drawBackground();
+
+    var tr = new Konva.Transformer({ rotateEnabled: true, enabledAnchors: ['top-left','top-right','bottom-left','bottom-right'], keepRatio: true });
+    layer.add(tr);
+    var selected = null;
+
+    // ---- save (debounced) ----
+    var dirty = false, saveTimer = null;
+    function setState(t, ok) {
+      document.getElementById('saveState').textContent = t;
+      var ic = document.getElementById('saveIcon');
+      ic.className = ok ? 'fas fa-check text-success ms-1' : 'fas fa-circle-notch fa-spin text-warning ms-1';
+    }
+    function scheduleSave() {
+      dirty = true; setState('{{ __('Saving...') }}', false);
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(saveLayout, 700);
+    }
+    function saveLayout() {
+      var positions = layer.find('.placement').map(function (g) {
+        return {
+          id: g.getAttr('placementId'),
+          pos_x: g.x() / W, pos_y: g.y() / H,
+          rotation_deg: g.rotation(), scale: g.scaleX(),
+          z_order: g.zIndex()
+        };
+      });
+      fetch(URLS.layout, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' },
+        body: JSON.stringify({ positions: positions })
+      }).then(function (r) { return r.json(); })
+        .then(function () { dirty = false; setState('{{ __('All changes saved') }}', true); })
+        .catch(function () { setState('{{ __('Save failed - retrying') }}', false); setTimeout(saveLayout, 2000); });
+    }
+
+    function selectNode(g) {
+      if (typeof setViewSpotMode === 'function') setViewSpotMode(false);   // reset any armed viewing-spot pick
+      selected = g; tr.nodes([g]);
+      document.getElementById('selPanel').classList.add('d-none');
+      document.getElementById('selControls').classList.remove('d-none');
+      document.getElementById('selTitle').textContent = g.getAttr('titleText') || '';
+      document.getElementById('selSize').value = g.getAttr('sizeUnits') != null ? g.getAttr('sizeUnits') : 0;
+      syncScaleInputs(g.scaleX());   // heratio#1139
+      var canTilt = g.getAttr('objKind') === '3d' || g.getAttr('isSplat');   // splats need orientation too
+      document.getElementById('tiltControls').classList.toggle('d-none', !canTilt);
+      if (canTilt) {
+        var tx = g.getAttr('tiltX'); var tz = g.getAttr('tiltZ');
+        document.getElementById('tiltX').value = (tx === null || tx === undefined) ? '' : tx;
+        document.getElementById('tiltZ').value = (tz === null || tz === undefined) ? '' : tz;
+      }
+      refreshWallOptions();
+      document.getElementById('selWall').value = g.getAttr('wallKey') || '';
+      setSpotBtn((+g.getAttr('spotlight')) || 0);
+      var cb = document.getElementById('caseBtn'); if (cb) { var con = !!g.getAttr('displayCase'); cb.classList.toggle('btn-info', con); cb.classList.toggle('btn-outline-info', !con); }
+      var fb = document.getElementById('floorBtn'); if (fb) { var fon = !!g.getAttr('onFloor'); fb.classList.toggle('btn-success', fon); fb.classList.toggle('btn-outline-success', !fon); }
+      layer.draw();
+      if (typeof loadRecs === 'function') loadRecs();   // #1149 filter suggestions to this object
+    }
+    // ---- heratio#1139 numeric display scale ----
+    // The walkthrough renders a wall piece at (WT_BASE_H * display scale) metres
+    // (see hangOnWall in walkthrough.blade.php), so scale and real height are two
+    // views of one number. Keep this constant in step with that view.
+    var WT_BASE_H = 1.5;
+    var SCALE_MIN = 0.1, SCALE_MAX = 5;
+
+    function clampScale(v) { return Math.max(SCALE_MIN, Math.min(SCALE_MAX, v)); }
+
+    /** Refresh both inputs from a scale value, without firing their change handlers. */
+    function syncScaleInputs(s) {
+      s = clampScale((+s) || 1);
+      var si = document.getElementById('selScale');
+      var hi = document.getElementById('selHeightM');
+      if (si) si.value = Math.round(s * 100) / 100;
+      if (hi) hi.value = Math.round(s * WT_BASE_H * 100) / 100;
+    }
+
+    /** Apply a scale to the selected node, sync the inputs and persist. */
+    function applyScale(s) {
+      if (!selected) return;
+      s = clampScale((+s) || 1);
+      selected.scale({ x: s, y: s });
+      syncScaleInputs(s);
+      layer.draw();
+      scheduleSave();
+    }
+
+    (function () {
+      var si = document.getElementById('selScale');
+      var hi = document.getElementById('selHeightM');
+      if (si) si.addEventListener('change', function () { applyScale(this.value); });
+      // Real height is the same number expressed in metres - divide back out.
+      if (hi) hi.addEventListener('change', function () {
+        var m = parseFloat(this.value);
+        if (!isFinite(m) || m <= 0) { syncScaleInputs(selected ? selected.scaleX() : 1); return; }
+        applyScale(m / WT_BASE_H);
+      });
+    })();
+
+    // #1174 spotlight mode button: 0 off, 1 light on approach, 2 always-on (object stays lit).
+    function setSpotBtn(m) {
+      var sb = document.getElementById('spotBtn'); if (!sb) return;
+      m = (+m) || 0;
+      var txt = ['{{ __('Spot off') }}', '{{ __('Spot: approach') }}', '{{ __('Spot: always') }}'][m];
+      sb.classList.toggle('btn-warning', m > 0);
+      sb.classList.toggle('btn-outline-warning', m === 0);
+      sb.innerHTML = '<i class="fas fa-lightbulb me-1"></i>' + txt;
+      sb.title = txt;
+    }
+    function clearSelect() {
+      selected = null; tr.nodes([]);
+      document.getElementById('selPanel').classList.remove('d-none');
+      document.getElementById('selControls').classList.add('d-none');
+      layer.draw();
+      if (typeof loadRecs === 'function') loadRecs();   // #1149 back to all suggestions
+    }
+
+    // ---- build a placement node ----
+    function addNode(p) {
+      var px = (p.pos_x !== null && p.pos_x !== undefined) ? p.pos_x * W : W / 2;
+      var py = (p.pos_y !== null && p.pos_y !== undefined) ? p.pos_y * H : H / 2;
+      var g = new Konva.Group({
+        x: px, y: py, draggable: true, name: 'placement',
+        rotation: p.rotation_deg || 0, scaleX: p.scale || 1, scaleY: p.scale || 1
+      });
+      g.setAttr('placementId', p.id);
+      g.setAttr('ioId', p.information_object_id);   // #1149 for AI-suggestion filtering
+      g.setAttr('titleText', p.title);
+      g.setAttr('sizeUnits', p.size_units_used != null ? p.size_units_used : 0);
+      g.setAttr('objKind', p.kind || null);
+      g.setAttr('isSplat', !!p.splat);
+      g.setAttr('wallKey', p.wall_or_zone || '');
+      g.setAttr('tiltX', (p.tilt_x === null || p.tilt_x === undefined) ? null : p.tilt_x);
+      g.setAttr('tiltZ', (p.tilt_z === null || p.tilt_z === undefined) ? null : p.tilt_z);
+      g.setAttr('spotlight', (+p.spotlight) || 0);
+      g.setAttr('displayCase', (+p.display_case) || 0);
+      g.setAttr('onFloor', (+p.on_floor) || 0);
+      g.setAttr('zOrder', p.z_order || 0);
+      g.setAttr('viewX', (p.view_x === null || p.view_x === undefined) ? null : +p.view_x);
+      g.setAttr('viewY', (p.view_y === null || p.view_y === undefined) ? null : +p.view_y);
+
+      var rect = new Konva.Rect({
+        x: -NODE / 2, y: -NODE / 2, width: NODE, height: NODE,
+        fill: '#ffffff', stroke: '#6c757d', strokeWidth: 1, cornerRadius: 4,
+        shadowColor: '#000', shadowBlur: 6, shadowOpacity: 0.15, shadowOffset: { x: 0, y: 2 }
+      });
+      g.add(rect);
+
+      if (p.thumb_url) {
+        var img = new Image();
+        img.onload = function () {
+          var ki = new Konva.Image({ image: img, x: -NODE / 2 + 3, y: -NODE / 2 + 3, width: NODE - 6, height: NODE - 6, cornerRadius: 3 });
+          g.add(ki); ki.moveToBottom(); rect.moveToBottom(); layer.draw();
+        };
+        img.onerror = function () {
+          g.add(new Konva.Text({ text: '#' + p.information_object_id, x: -NODE / 2, y: -8, width: NODE, align: 'center', fontSize: 11, fill: '#999' }));
+          layer.draw();
+        };
+        img.src = p.thumb_url;
+      } else {
+        g.add(new Konva.Text({ text: '#' + p.information_object_id, x: -NODE / 2, y: -8, width: NODE, align: 'center', fontSize: 11, fill: '#999' }));
+      }
+
+      var label = new Konva.Label({ x: 0, y: NODE / 2 + 4 });
+      label.add(new Konva.Tag({ fill: 'rgba(33,37,41,0.85)', cornerRadius: 3, pointerDirection: 'up', pointerWidth: 6, pointerHeight: 4 }));
+      label.add(new Konva.Text({ text: (p.title || '').substring(0, 28), fontSize: 11, padding: 3, fill: '#fff' }));
+      label.offsetX(label.width() / 2);
+      g.add(label);
+
+      // #1277 borrowed peer object: a small "Courtesy of" badge so the curator can tell it apart.
+      if (p.remote) {
+        g.setAttr('remote', 1);
+        g.setAttr('remotePeer', p.remote_peer || '');
+        g.setAttr('verified', p.verified ? 1 : 0);
+        var badge = new Konva.Label({ x: -NODE / 2 + 2, y: -NODE / 2 + 2 });
+        badge.add(new Konva.Tag({ fill: 'rgba(13,110,253,0.9)', cornerRadius: 3 }));
+        badge.add(new Konva.Text({ text: '🌐', fontSize: 11, padding: 2, fill: '#fff' }));   // globe glyph
+        g.add(badge);
+        // F3 federation twin (#1246): an UNVERIFIED borrowed object (the peer scene
+        // carried no valid X-Federation-Signature) gets an amber warning badge,
+        // consistent with the #1205/#1210 'unverified' treatment.
+        if (!p.verified) {
+          var warn = new Konva.Label({ x: NODE / 2 - 14, y: -NODE / 2 + 2 });
+          warn.add(new Konva.Tag({ fill: 'rgba(255,193,7,0.95)', cornerRadius: 3 }));
+          warn.add(new Konva.Text({ text: '⚠', fontSize: 11, padding: 2, fill: '#000' }));
+          warn.listening(false);
+          g.add(warn);
+        }
+      }
+
+      g.on('click tap', function (e) {
+        e.cancelBubble = true;
+        // In tour "route mode" a click adds the object to the current tour as the
+        // next stop (and the route line redraws); otherwise it selects as usual.
+        if (window.__exhibRouteMode && typeof window.__exhibAddStop === 'function') {
+          window.__exhibAddStop(g.getAttr('ioId'));
+        } else {
+          selectNode(g);
+        }
+      });
+      g.on('dragmove', function () { if (window.__exhibRouteMode) drawTourRoute(); drawViewSpots(); });
+      g.on('dragend', scheduleSave);
+      g.on('transformend', scheduleSave);
+      layer.add(g);
+      return g;
+    }
+
+    // ---- Guided-tour visual route overlay (numbered stops + connecting line) ----
+    function nodeByIo(io) {
+      var hit = null;
+      layer.find('.placement').forEach(function (n) { if (String(n.getAttr('ioId')) === String(io)) hit = n; });
+      return hit;
+    }
+    function drawTourRoute() {
+      routeLayer.destroyChildren();
+      if (!window.__exhibRouteMode || !layer.visible()) { routeLayer.draw(); return; }
+      var ios = (typeof window.__exhibStops === 'function') ? (window.__exhibStops() || []) : [];
+      var pts = [], seq = [];
+      ios.forEach(function (io) { var n = nodeByIo(io); if (n) { pts.push(n.x(), n.y()); seq.push({ x: n.x(), y: n.y() }); } });
+      if (pts.length >= 4) {
+        routeLayer.add(new Konva.Line({ points: pts, stroke: '#0d6efd', strokeWidth: 3, opacity: 0.85, lineJoin: 'round', lineCap: 'round', dash: [10, 6] }));
+      }
+      seq.forEach(function (p, i) {
+        var grp = new Konva.Group({ x: p.x, y: p.y, listening: false });
+        grp.add(new Konva.Circle({ radius: 11, fill: '#0d6efd', stroke: '#fff', strokeWidth: 2 }));
+        grp.add(new Konva.Text({ text: '' + (i + 1), x: -11, y: -6, width: 22, align: 'center', fontSize: 12, fontStyle: 'bold', fill: '#fff' }));
+        routeLayer.add(grp);
+      });
+      routeLayer.draw();
+    }
+    window.__exhibDrawRoute = drawTourRoute;
+
+    // ---- Tour viewing-spot markers (an eye dot + dashed line to the object) ----
+    function drawViewSpots() {
+      viewLayer.destroyChildren();
+      layer.find('.placement').forEach(function (n) {
+        var vx = n.getAttr('viewX'), vy = n.getAttr('viewY');
+        if (vx === null || vx === undefined || vy === null || vy === undefined) return;
+        var ex = vx * W, ey = vy * H;
+        viewLayer.add(new Konva.Line({ points: [ex, ey, n.x(), n.y()], stroke: '#0d6efd', strokeWidth: 1.5, dash: [6, 4], opacity: 0.7 }));
+        var grp = new Konva.Group({ x: ex, y: ey });
+        grp.add(new Konva.Circle({ radius: 9, fill: '#0d6efd', stroke: '#fff', strokeWidth: 2 }));
+        grp.add(new Konva.Circle({ radius: 3, fill: '#fff' }));
+        viewLayer.add(grp);
+      });
+      viewLayer.draw();
+    }
+    function setViewSpotMode(on) {
+      window.__viewSpotMode = on;
+      var b = document.getElementById('viewSpotBtn');
+      if (b) { b.classList.toggle('btn-primary', on); b.classList.toggle('btn-outline-primary', !on); b.innerHTML = on ? '<i class="fas fa-crosshairs me-1"></i>{{ __('Click the plan...') }}' : '<i class="fas fa-eye me-1"></i>{{ __('Set spot') }}'; }
+      stage.container().style.cursor = on ? 'crosshair' : '';
+    }
+
+    PLACEMENTS.forEach(addNode);
+    layer.draw();
+    drawViewSpots();
+    renderObjList();
+
+    // ---- interior walls ----
+    var wallAdding = false, wallStart = null;
+    var wallBtn = document.getElementById('wallAdd');
+    var wallHintEl = document.getElementById('wallHint');
+    var HINT_IDLE = '{{ __('Add a divider wall to hang objects in the middle of the room.') }}';
+    function setWallMode(on) {
+      wallAdding = on; wallStart = null;
+      wallBtn.classList.toggle('btn-primary', on); wallBtn.classList.toggle('btn-outline-primary', !on);
+      wallHintEl.textContent = on
+        ? '{{ __('Click the start point, then the end point. Snaps to 0.25 m.') }}'
+        : HINT_IDLE;
+      stage.container().style.cursor = on ? 'crosshair' : 'default';
+      // heratio#1139: the edit handles listen only outside add mode, or they would
+      // swallow the clicks that place a new wall. Redraw to apply the change.
+      redrawWalls();
+    }
+    // ---- heratio#1139 interior wall editor ----
+    // Walls used to be inert lines you could only add and delete. They are now
+    // movable (drag the line), reshapable and rotatable (drag either end), snapped
+    // to a real-world grid, and labelled with their live length in metres.
+    //
+    // Everything still round-trips through the existing saveWalls() endpoint, which
+    // already sanitises and clamps to 0-1 - no backend change was needed.
+    var WALL_GRID_M = 0.25;    // snap step in metres
+    var WALL_AXIS_M = 0.20;    // within this, an end snaps square to its partner
+
+    function wallLenM(w) {
+      return Math.hypot((w.x2 - w.x1) * ROOM_W, (w.z2 - w.z1) * ROOM_D);
+    }
+    /** Snap a normalized point to the metre grid, clamped to the room. */
+    function snapWallPt(nx, nz) {
+      var mx = Math.round((nx * ROOM_W) / WALL_GRID_M) * WALL_GRID_M;
+      var mz = Math.round((nz * ROOM_D) / WALL_GRID_M) * WALL_GRID_M;
+
+      return {
+        x: Math.max(0, Math.min(1, mx / ROOM_W)),
+        z: Math.max(0, Math.min(1, mz / ROOM_D)),
+      };
+    }
+    /** Square a dragged end against its fixed partner when it is nearly aligned. */
+    function axisSnap(moving, fixed) {
+      if (Math.abs((moving.x - fixed.x) * ROOM_W) < WALL_AXIS_M) moving.x = fixed.x;
+      if (Math.abs((moving.z - fixed.z) * ROOM_D) < WALL_AXIS_M) moving.z = fixed.z;
+
+      return moving;
+    }
+
+    function redrawWalls() {
+      wallLayer.destroyChildren();
+      WALLS.forEach(function (w, i) {
+        // In add mode the stage needs the clicks, so the handles stand down.
+        var live = !wallAdding;
+        var line = new Konva.Line({
+          points: [w.x1 * W, w.z1 * H, w.x2 * W, w.z2 * H],
+          stroke: '#495057', strokeWidth: 7, lineCap: 'round',
+          listening: live, draggable: live, hitStrokeWidth: 16,
+        });
+        var label = new Konva.Text({
+          text: wallLenM(w).toFixed(2) + ' m', fontSize: 11, fill: '#0d6efd',
+          listening: false, padding: 2,
+        });
+        var ends = [];
+
+        function place() {
+          line.points([w.x1 * W, w.z1 * H, w.x2 * W, w.z2 * H]);
+          ends[0].position({ x: w.x1 * W, y: w.z1 * H });
+          ends[1].position({ x: w.x2 * W, y: w.z2 * H });
+          label.text(wallLenM(w).toFixed(2) + ' m');
+          label.position({ x: (w.x1 + w.x2) / 2 * W + 8, y: (w.z1 + w.z2) / 2 * H - 16 });
+        }
+
+        [0, 1].forEach(function (endIdx) {
+          var h = new Konva.Circle({
+            x: 0, y: 0,   // place() sets the real position once both ends exist
+            radius: 6, fill: '#0d6efd', stroke: '#fff', strokeWidth: 2,
+            draggable: live, listening: live,
+          });
+          h.on('dragmove', function () {
+            var p = snapWallPt(h.x() / W, h.y() / H);
+            var other = endIdx ? { x: w.x1, z: w.z1 } : { x: w.x2, z: w.z2 };
+            p = axisSnap(p, other);
+            if (endIdx) { w.x2 = p.x; w.z2 = p.z; } else { w.x1 = p.x; w.z1 = p.z; }
+            place(); wallLayer.batchDraw();
+          });
+          h.on('dragend', function () { saveWalls(); });
+          h.on('mouseenter', function () { stage.container().style.cursor = 'pointer'; });
+          h.on('mouseleave', function () { stage.container().style.cursor = wallAdding ? 'crosshair' : 'default'; });
+          ends.push(h);
+        });
+
+        // Whole-wall move. Konva reports the drag as an offset on the node, so the
+        // offset is folded back into the stored coordinates and the node reset.
+        line.on('dragmove', function () {
+          var dx = line.x() / W, dz = line.y() / H;
+          ends[0].position({ x: (w.x1 + dx) * W, y: (w.z1 + dz) * H });
+          ends[1].position({ x: (w.x2 + dx) * W, y: (w.z2 + dz) * H });
+          label.position({ x: ((w.x1 + w.x2) / 2 + dx) * W + 8, y: ((w.z1 + w.z2) / 2 + dz) * H - 16 });
+        });
+        line.on('dragend', function () {
+          var dx = line.x() / W, dz = line.y() / H;
+          var a = snapWallPt(w.x1 + dx, w.z1 + dz);
+          var b = snapWallPt(w.x2 + dx, w.z2 + dz);
+          w.x1 = a.x; w.z1 = a.z; w.x2 = b.x; w.z2 = b.z;
+          line.position({ x: 0, y: 0 });
+          place(); saveWalls();
+        });
+        line.on('mouseenter', function () { if (!wallAdding) stage.container().style.cursor = 'move'; });
+        line.on('mouseleave', function () { stage.container().style.cursor = wallAdding ? 'crosshair' : 'default'; });
+
+        wallLayer.add(line); wallLayer.add(label);
+        ends.forEach(function (h) { wallLayer.add(h); });
+        place();
+      });
+      wallLayer.draw();
+      renderWallList();
+    }
+    function renderWallList() {
+      var el = document.getElementById('wallList'); el.innerHTML = '';
+      WALLS.forEach(function (w, i) {
+        var row = document.createElement('div');
+        row.className = 'd-flex justify-content-between align-items-center mb-1';
+        row.innerHTML = '<span>{{ __('Wall') }} ' + (i + 1) +
+          ' <span class="text-muted small">' + wallLenM(w).toFixed(2) + ' m</span></span>';
+        var del = document.createElement('button');
+        del.type = 'button'; del.className = 'btn btn-sm btn-outline-danger py-0'; del.innerHTML = '<i class="fas fa-times"></i>';
+        del.addEventListener('click', function () { WALLS.splice(i, 1); saveWalls(); });
+        row.appendChild(del); el.appendChild(row);
+      });
+    }
+    function saveWalls() {
+      fetch(URLS.walls, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: JSON.stringify({ walls: WALLS }) })
+        .then(function (r) { return r.json(); }).then(function (d) { if (d.ok && d.walls) { WALLS = d.walls; } redrawWalls(); refreshWallOptions(); });
+    }
+    function refreshWallOptions() {
+      var sel = document.getElementById('selWall'); var cur = sel.value;
+      var opts = '<option value="">{{ __('Auto (nearest)') }}</option>';
+      if (SHAPE && SHAPE.length >= 3) {   // angled room: number each perimeter wall
+        for (var e = 0; e < SHAPE.length; e++) opts += '<option value="edge:' + e + '">{{ __('Wall') }} ' + (e + 1) + '</option>';
+      } else {
+        opts += '<option value="north">{{ __('Wall') }} 1</option><option value="south">{{ __('Wall') }} 2</option>' +
+          '<option value="west">{{ __('Wall') }} 3</option><option value="east">{{ __('Wall') }} 4</option>';
+      }
+      WALLS.forEach(function (w, i) {
+        opts += '<option value="' + w.id + '">{{ __('Interior') }} ' + (i + 1) + ' {{ __('(front)') }}</option>';
+        opts += '<option value="' + w.id + '|b">{{ __('Interior') }} ' + (i + 1) + ' {{ __('(back)') }}</option>';
+      });
+      sel.innerHTML = opts; sel.value = cur;
+      // Keep the wall-surfacing target list in step: a divider added now must be
+      // paintable now, not after a page reload (#1469).
+      if (window.refreshSurfaceTargets) window.refreshSurfaceTargets();
+    }
+    wallBtn.addEventListener('click', function () { setWallMode(!wallAdding); });
+    document.getElementById('selWall').addEventListener('change', function () {
+      if (!selected) return;
+      selected.setAttr('wallKey', this.value);
+      fetch(URLS.wall, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: JSON.stringify({ placement_id: selected.getAttr('placementId'), wall: this.value }) });
+    });
+    redrawWalls(); refreshWallOptions(); drawDoorMarkers();
+
+    // Save room size (width / depth / wall height).
+    var rdBtn = document.getElementById('rdSave');
+    if (rdBtn) rdBtn.addEventListener('click', function () {
+      var body = {
+        room_w: document.getElementById('rdW').value || null,
+        room_d: document.getElementById('rdD').value || null,
+        room_h: document.getElementById('rdH').value || null
+      };
+      rdBtn.disabled = true;
+      fetch(URLS.roomDims, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: JSON.stringify(body) })
+        .then(function (r) { return r.json(); }).then(function () { rdBtn.textContent = '{{ __('Saved') }}'; setTimeout(function () { rdBtn.textContent = '{{ __('Save room size') }}'; rdBtn.disabled = false; }, 1200); });
+    });
+
+    stage.on('click tap', function (e) {
+      if (window.__viewSpotMode && selected) {
+        var vp = stage.getPointerPosition(); if (!vp) return;
+        var vx = Math.max(0, Math.min(1, vp.x / W)), vy = Math.max(0, Math.min(1, vp.y / H));
+        selected.setAttr('viewX', vx); selected.setAttr('viewY', vy);
+        fetch(URLS.viewSpot, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: JSON.stringify({ placement_id: selected.getAttr('placementId'), view_x: vx, view_y: vy }) });
+        setViewSpotMode(false); drawViewSpots();
+        return;
+      }
+      if (wallAdding) {
+        var p = stage.getPointerPosition(); if (!p) return;
+        // heratio#1139: snap new walls to the same grid the drag handles use, so an
+        // added wall and a dragged one can land on identical coordinates.
+        var sp = snapWallPt(p.x / W, p.y / H);
+        if (!wallStart) { wallStart = { x: sp.x, z: sp.z }; }
+        else {
+          var wend = axisSnap({ x: sp.x, z: sp.z }, wallStart);
+          WALLS.push({ id: 'wall-' + Date.now(), x1: wallStart.x, z1: wallStart.z, x2: wend.x, z2: wend.z });
+          setWallMode(false); saveWalls();
+        }
+        return;
+      }
+      if (e.target === stage) clearSelect();
+    });
+
+    // ---- selected-object controls ----
+    document.querySelectorAll('#selControls [data-act]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        if (!selected) return;
+        var a = b.getAttribute('data-act');
+        if (a === 'rotL') selected.rotation(selected.rotation() - 15);
+        if (a === 'rotR') selected.rotation(selected.rotation() + 15);
+        // heratio#1139: clamps widened from 0.3-4 to match the numeric input's
+        // 0.1-5 range, and routed through applyScale so both controls stay in sync.
+        if (a === 'smaller') { applyScale(selected.scaleX() - 0.1); }
+        if (a === 'bigger') { applyScale(selected.scaleX() + 0.1); }
+        var hdrs = { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' };
+        if (a === 'spot') {   // #1174 cycle spotlight mode: off -> on approach -> always-on
+          var cur = (+selected.getAttr('spotlight')) || 0, m = (cur + 1) % 3;
+          selected.setAttr('spotlight', m); setSpotBtn(m);
+          fetch(URLS.spotlight, { method: 'POST', headers: hdrs, body: JSON.stringify({ placement_id: selected.getAttr('placementId'), mode: m }) });
+          return;
+        }
+        if (a === 'case') {   // toggle: show this item inside a glass display case
+          var con = !selected.getAttr('displayCase'); selected.setAttr('displayCase', con);
+          var cb = document.getElementById('caseBtn'); if (cb) { cb.classList.toggle('btn-info', con); cb.classList.toggle('btn-outline-info', !con); }
+          fetch(URLS.displayCase, { method: 'POST', headers: hdrs, body: JSON.stringify({ placement_id: selected.getAttr('placementId'), on: con }) });
+          return;
+        }
+        if (a === 'floor') {   // toggle: stand the 3D model directly on the floor (no pedestal)
+          var fon = !selected.getAttr('onFloor'); selected.setAttr('onFloor', fon);
+          var fb = document.getElementById('floorBtn'); if (fb) { fb.classList.toggle('btn-success', fon); fb.classList.toggle('btn-outline-success', !fon); }
+          fetch(URLS.onFloor, { method: 'POST', headers: hdrs, body: JSON.stringify({ placement_id: selected.getAttr('placementId'), on: fon }) });
+          return;
+        }
+        if (a === 'front' || a === 'back') {   // bring-to-front / send-to-back
+          var zmax = 0, zmin = 0; layer.find('.placement').forEach(function (n) { var z = n.getAttr('zOrder') || 0; if (z > zmax) zmax = z; if (z < zmin) zmin = z; });
+          var nz = (a === 'front') ? zmax + 1 : zmin - 1; selected.setAttr('zOrder', nz);
+          if (a === 'front') selected.moveToTop(); else selected.moveToBottom();
+          layer.draw();
+          fetch(URLS.zorder, { method: 'POST', headers: hdrs, body: JSON.stringify({ placement_id: selected.getAttr('placementId'), z: nz }) });
+          return;
+        }
+        layer.draw(); scheduleSave();
+      });
+    });
+    // Find the canvas node for a placement id (may not exist for off-canvas/unreachable objects).
+    function nodeForPlacement(id) {
+      var hit = null;
+      layer.find('.placement').forEach(function (n) { if (String(n.getAttr('placementId')) === String(id)) hit = n; });
+      return hit;
+    }
+    // Remove a placement by id - works even when there is NO canvas node for it (#1141).
+    function removePlacementById(id, row) {
+      if (id == null) return;
+      fetch(URLS.remove, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' },
+        body: JSON.stringify({ placement_id: id })
+      }).then(function (r) { return r.json(); }).then(function (d) {
+        if (!d.ok) return;
+        var node = nodeForPlacement(id);
+        if (node) { if (selected === node) clearSelect(); node.destroy(); layer.draw(); }
+        if (row && row.parentNode) row.parentNode.removeChild(row);
+        renderObjList();
+      });
+    }
+    function removePlacement(g) { if (g) removePlacementById(g.getAttr('placementId')); }
+    document.getElementById('btnRemove').addEventListener('click', function () { removePlacement(selected); });
+
+    // Viewing-spot: arm the mode (next plan click sets it), or clear back to auto.
+    (function () {
+      var setBtn = document.getElementById('viewSpotBtn'), clrBtn = document.getElementById('viewSpotClear');
+      if (setBtn) setBtn.addEventListener('click', function () { if (!selected) return; setViewSpotMode(!window.__viewSpotMode); });
+      if (clrBtn) clrBtn.addEventListener('click', function () {
+        if (!selected) return;
+        selected.setAttr('viewX', null); selected.setAttr('viewY', null);
+        fetch(URLS.viewSpot, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: JSON.stringify({ placement_id: selected.getAttr('placementId'), view_x: null, view_y: null }) });
+        setViewSpotMode(false); drawViewSpots();
+      });
+    })();
+
+    // Full list of EVERY placed object in this space, sourced from the server so it includes
+    // objects that are off-canvas, have no/out-of-range position, or otherwise can't be clicked
+    // on the canvas. Each row removes by placement id, independent of any canvas node (#1141).
+    function renderObjList() {
+      var el = document.getElementById('objList'), cnt = document.getElementById('objCount');
+      if (!el) return;
+      fetch(URLS.placements, { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var items = (d && d.placements) || [];
+          if (cnt) cnt.textContent = items.length;
+          if (!items.length) { el.innerHTML = '{{ __('None yet.') }}'; return; }
+          el.innerHTML = '';
+          items.forEach(function (p) {
+            var row = document.createElement('div');
+            row.className = 'd-flex justify-content-between align-items-center mb-1';
+            var name = document.createElement('a');
+            name.href = '#'; name.className = 'text-truncate me-2 text-decoration-none'; name.style.maxWidth = '170px';
+            var onCanvas = !!nodeForPlacement(p.id);
+            name.textContent = (p.title || ('#' + p.id)) + (onCanvas ? '' : ' ⚠');
+            name.title = onCanvas ? '{{ __('Select on canvas') }}' : '{{ __('Off-canvas / no position - use Remove') }}';
+            name.addEventListener('click', function (e) { e.preventDefault(); var n = nodeForPlacement(p.id); if (n) selectNode(n); });
+            var del = document.createElement('button');
+            del.type = 'button'; del.className = 'btn btn-sm btn-outline-danger py-0'; del.title = '{{ __('Remove from twin') }}';
+            del.innerHTML = '<i class="fas fa-times"></i>';
+            del.addEventListener('click', function () { removePlacementById(p.id, row); });
+            row.appendChild(name); row.appendChild(del); el.appendChild(row);
+          });
+        }).catch(function () { el.innerHTML = '<span class="text-danger">{{ __('Could not load list.') }}</span>'; });
+    }
+
+    // ---- edit size of the selected object ----
+    document.getElementById('selSize').addEventListener('change', function () {
+      if (!selected) return;
+      var v = Math.max(0, parseFloat(this.value) || 0);
+      selected.setAttr('sizeUnits', v);
+      fetch(URLS.size, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' },
+        body: JSON.stringify({ placement_id: selected.getAttr('placementId'), size_units_used: v })
+      });
+    });
+
+    // ---- edit 3D orientation (tilt) of the selected object ----
+    function saveTilt() {
+      if (!selected) return;
+      var xs = document.getElementById('tiltX').value;
+      var zs = document.getElementById('tiltZ').value;
+      var tx = xs === '' ? null : (parseFloat(xs) || 0);
+      var tz = zs === '' ? null : (parseFloat(zs) || 0);
+      selected.setAttr('tiltX', tx); selected.setAttr('tiltZ', tz);
+      fetch(URLS.tilt, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' },
+        body: JSON.stringify({ placement_id: selected.getAttr('placementId'), tilt_x: tx, tilt_z: tz })
+      });
+    }
+    document.getElementById('tiltX').addEventListener('change', saveTilt);
+    document.getElementById('tiltZ').addEventListener('change', saveTilt);
+    document.getElementById('tiltAuto').addEventListener('click', function () {
+      document.getElementById('tiltX').value = ''; document.getElementById('tiltZ').value = '';
+      saveTilt();
+    });
+
+    // ---- add object via search ----
+    if (typeof TomSelect !== 'undefined') {
+      new TomSelect('#objectSearch', {
+        valueField: 'id', labelField: 'name', searchField: ['name'],
+        placeholder: '{{ __('Type to search information objects...') }}',
+        maxItems: 1, maxOptions: 15,
+        load: function (q, cb) {
+          if (q.length < 2) return cb();
+          fetch(URLS.autocomplete + '?query=' + encodeURIComponent(q) + '&limit=15')
+            .then(function (r) { return r.json(); }).then(cb).catch(function () { cb(); });
+        },
+        render: { option: function (d, e) { return '<div>' + e(d.name) + ' <small class="text-muted">#' + e(d.id) + '</small></div>'; } },
+        onChange: function (val) {
+          if (!val) return;
+          var self = this;
+          var done = function () { self.clear(true); self.clearOptions(); };
+          if (mode === 'wall') {
+            // Hang on the current wall, stepping each new item along it so they don't stack.
+            var existing = wvLayer.find('.wvitem').length;
+            var u = 0.12 + (existing % 6) * 0.15;
+            var vv = 0.58 - (Math.floor(existing / 6) % 2) * 0.18;
+            fetch(URLS.wallPlace, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' },
+              body: JSON.stringify({ information_object_id: val, wall: wvWall, u: u, v: vv })
+            }).then(function (r) { return r.json(); }).then(function (d) {
+              if (d.ok) wvAddNode(d.placement);
+              done();
+            });
+            return;
+          }
+          fetch(URLS.place, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' },
+            body: JSON.stringify({ information_object_id: val, pos_x: 0.5, pos_y: 0.5, size_units_used: parseFloat(document.getElementById('initialSize').value) || 0 })
+          }).then(function (r) { return r.json(); }).then(function (d) {
+            if (d.ok) { var g = addNode(d.placement); layer.draw(); selectNode(g); renderObjList(); }
+            done();
+          });
+        }
+      });
+    }
+
+    // ---- Wall view (elevation editor): hang objects flat on a wall, no floor clutter ----
+    var mode = 'floor', WV_NODE = 70;
+    var wvWall = (SHAPE && SHAPE.length >= 3) ? 'edge:0' : 'north';
+    (function () {   // build the wall picker: numbered perimeter walls + interior dividers
+      var sel = document.getElementById('wvWall'), html = '';
+      if (SHAPE && SHAPE.length >= 3) {
+        for (var e = 0; e < SHAPE.length; e++) html += '<option value="edge:' + e + '">{{ __('Wall') }} ' + (e + 1) + '</option>';
+      } else {
+        html = '<option value="north">{{ __('Wall') }} 1</option><option value="south">{{ __('Wall') }} 2</option>' +
+          '<option value="west">{{ __('Wall') }} 3</option><option value="east">{{ __('Wall') }} 4</option>';
+      }
+      WALLS.forEach(function (w, i) {
+        html += '<option value="' + w.id + '">{{ __('Interior') }} ' + (i + 1) + ' {{ __('(front)') }}</option>';
+        html += '<option value="' + w.id + '|b">{{ __('Interior') }} ' + (i + 1) + ' {{ __('(back)') }}</option>';
+      });
+      sel.innerHTML = html; sel.value = wvWall;
+    })();
+    function setMode(m) {
+      mode = m;
+      var fb = document.getElementById('modeFloor'), wb = document.getElementById('modeWall');
+      fb.classList.toggle('btn-primary', m === 'floor'); fb.classList.toggle('btn-outline-primary', m !== 'floor');
+      wb.classList.toggle('btn-primary', m === 'wall'); wb.classList.toggle('btn-outline-primary', m !== 'wall');
+      document.getElementById('wvWall').classList.toggle('d-none', m !== 'wall');
+      if (_wvAddWin) { _wvAddWin.classList.toggle('d-none', m !== 'wall'); refreshAddWinBtn(); }
+      if (typeof closeWinEdit === 'function') closeWinEdit();
+      var floorOn = (m === 'floor');
+      bgLayer.visible(floorOn); wallLayer.visible(floorOn); doorLayer.visible(floorOn); layer.visible(floorOn); viewLayer.visible(floorOn); routeLayer.visible(floorOn); wvLayer.visible(!floorOn);
+      tr.nodes([]); clearSelect();
+      if (floorOn) { stage.draw(); drawTourRoute(); } else { buildWallView(); }
+    }
+    document.getElementById('modeFloor').addEventListener('click', function () { setMode('floor'); });
+    document.getElementById('modeWall').addEventListener('click', function () { setMode('wall'); });
+    document.getElementById('wvWall').addEventListener('change', function () { wvWall = this.value; refreshAddWinBtn(); if (typeof closeWinEdit === 'function') closeWinEdit(); buildWallView(); });
+
+    // Spread items that share (near) the same spot on the wall so they don't
+    // render on top of each other; persist the nudge so the walkthrough matches.
+    function wvDeOverlap(items) {
+      items.sort(function (a, b) { return (a.wall_u - b.wall_u) || (a.wall_v - b.wall_v); });
+      var gapU = (WV_NODE / (wvEW || W)) * 1.05;
+      for (var i = 1; i < items.length; i++) {
+        var prev = items[i - 1], cur = items[i];
+        if ((cur.wall_u - prev.wall_u) < gapU) {   // same column -> step it along the wall
+          cur.wall_u = Math.min(0.97, prev.wall_u + gapU);
+          fetch(URLS.wallPos, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' },
+            body: JSON.stringify({ placement_id: cur.id, u: cur.wall_u, v: cur.wall_v }) });
+        }
+      }
+    }
+    // The selected wall's real length (metres), so the elevation is to scale.
+    function wvWallLengthM() {
+      if (wvWall === 'north' || wvWall === 'south') return ROOM_W;
+      if (wvWall === 'west' || wvWall === 'east') return ROOM_D;
+      if (wvWall.indexOf && wvWall.indexOf('edge:') === 0 && SHAPE) {
+        var i = parseInt(wvWall.slice(5), 10), pa = SHAPE[i], pb = SHAPE[(i + 1) % SHAPE.length];
+        if (pa && pb) return Math.hypot((pb.x - pa.x) * ROOM_W, (pb.z - pa.z) * ROOM_D);
+      }
+      var baseW = (wvWall.indexOf && wvWall.slice(-2) === '|b') ? wvWall.slice(0, -2) : wvWall;
+      var w = WALLS.filter(function (ww) { return ww.id === baseW; })[0];
+      if (w) return Math.hypot((w.x2 - w.x1) * ROOM_W, (w.z2 - w.z1) * ROOM_D);
+      return ROOM_W;
+    }
+    // Which polygon edge does a door belong to + its fraction along that edge.
+    // Native edge doors carry {edge}. Legacy {wall:north/south/east/west} doors on a SHAPED
+    // room are mapped to the nearest perimeter edge so they still show in wall view (#1176).
+    function doorEdge(d) {
+      if (typeof d.edge === 'number') return { edge: d.edge, t: (d.pos == null ? 0.5 : d.pos) };
+      if (!(SHAPE && SHAPE.length >= 3)) return null;
+      var p = (d.pos == null ? 0.5 : d.pos), P;
+      if (d.wall === 'north') P = { x: p, z: 0 };
+      else if (d.wall === 'south') P = { x: p, z: 1 };
+      else if (d.wall === 'east') P = { x: 1, z: p };
+      else if (d.wall === 'west') P = { x: 0, z: p };
+      else return null;
+      var best = -1, bd = 1e9, bt = 0.5;
+      for (var i = 0; i < SHAPE.length; i++) {
+        var a = SHAPE[i], b = SHAPE[(i + 1) % SHAPE.length];
+        var dx = b.x - a.x, dz = b.z - a.z, L2 = dx * dx + dz * dz || 1;
+        var t = Math.max(0, Math.min(1, ((P.x - a.x) * dx + (P.z - a.z) * dz) / L2));
+        var dist = Math.hypot(P.x - (a.x + t * dx), P.z - (a.z + t * dz));
+        if (dist < bd) { bd = dist; best = i; bt = t; }
+      }
+      return { edge: best, t: bt };
+    }
+    function wvDoorsForWall() {
+      var edgeMode = (wvWall.indexOf && wvWall.indexOf('edge:') === 0);
+      if (!edgeMode) return allDoors().filter(function (d) { return d.wall === wvWall; });
+      return allDoors().map(function (d) {
+        var m = doorEdge(d); if (!m || ('edge:' + m.edge) !== wvWall) return null;
+        return { width: d.width, auto: d.auto, pos: m.t };   // pos = fraction along this edge
+      }).filter(Boolean);
+    }
+    // #1172 windows in Wall view: only perimeter / polygon-edge walls carry windows (not
+    // interior dividers). Match both named-wall and polygon-edge storage to the current wall.
+    function wvCanWindow() {
+      return wvWall === 'north' || wvWall === 'south' || wvWall === 'east' || wvWall === 'west'
+        || (wvWall.indexOf && wvWall.indexOf('edge:') === 0);
+    }
+    function wvWindowsForWall() {
+      return (WINDOWS || []).filter(function (w) {
+        return (w.wall && w.wall === wvWall) || (typeof w.edge === 'number' && ('edge:' + w.edge) === wvWall);
+      });
+    }
+    function persistWindows() {
+      setState('{{ __('Saving...') }}', false);
+      fetch(WINDOWS_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' },
+        body: JSON.stringify({ room_id: SPACE_ID, windows: WINDOWS }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { if (d && d.ok && d.windows) WINDOWS = d.windows; setState('{{ __('All changes saved') }}', true); })
+        .catch(function () { setState('{{ __('Save failed - retrying') }}', false); setTimeout(persistWindows, 2000); });
+    }
+    function addWindowToWall() {
+      if (!wvCanWindow()) { alert('{{ __('Windows go on a perimeter wall - pick Back/Front/Left/Right or a numbered wall.') }}'); return; }
+      var w = { pos: 0.5, width: 1.2, sill: 0.9, height: 1.3 };
+      if (wvWall.indexOf('edge:') === 0) w.edge = parseInt(wvWall.slice(5), 10); else w.wall = wvWall;   // #1172 polygon-edge vs named wall
+      WINDOWS.push(w); persistWindows(); buildWallView();
+    }
+    function refreshAddWinBtn() {
+      if (!_wvAddWin) return;
+      var ok = wvCanWindow();
+      _wvAddWin.disabled = !ok; _wvAddWin.classList.toggle('disabled', !ok);
+      _wvAddWin.title = ok ? '{{ __('Add a window to this wall - drag to position, double-click to remove') }}' : '{{ __('Windows go on perimeter walls, not interior dividers') }}';
+    }
+    var _wvAddWin = document.getElementById('wvAddWin');
+    if (_wvAddWin) _wvAddWin.addEventListener('click', addWindowToWall);
+    // #1172 click a window in Wall view to edit its width/sill/height or remove it.
+    var selectedWin = null, _winEdit = document.getElementById('winEdit');
+    function selectWindow(w) {
+      selectedWin = w; if (!_winEdit) return;
+      document.getElementById('winEditW').value = (w.width != null ? w.width : 1.2);
+      document.getElementById('winEditSill').value = (w.sill != null ? w.sill : 0.9);
+      document.getElementById('winEditH').value = (w.height != null ? w.height : 1.3);
+      _winEdit.classList.remove('d-none');
+    }
+    function closeWinEdit() { selectedWin = null; if (_winEdit) _winEdit.classList.add('d-none'); }
+    (function () {
+      var wE = document.getElementById('winEditW'), wS = document.getElementById('winEditSill'), wH = document.getElementById('winEditH');
+      function applyWin() {
+        if (!selectedWin) return;
+        selectedWin.width = Math.max(0.4, Math.min(6, parseFloat(wE.value) || 1.2));
+        selectedWin.sill = Math.max(0, Math.min(3, parseFloat(wS.value) || 0.9));
+        selectedWin.height = Math.max(0.3, Math.min(3.5, parseFloat(wH.value) || 1.3));
+        persistWindows(); buildWallView();
+      }
+      [wE, wS, wH].forEach(function (el) { if (el) el.addEventListener('change', applyWin); });
+      var del = document.getElementById('winEditDel');
+      if (del) del.addEventListener('click', function () {
+        if (!selectedWin) return;
+        var i = WINDOWS.indexOf(selectedWin); if (i >= 0) WINDOWS.splice(i, 1);
+        closeWinEdit(); persistWindows(); buildWallView();
+      });
+      var cl = document.getElementById('winEditClose');
+      if (cl) cl.addEventListener('click', closeWinEdit);
+    })();
+    var wvOX = 0, wvOY = 0, wvEW = 0, wvEH = 0, wvStepX = 0, wvStepY = 0;   // elevation rect (to-scale wall area) + 1m grid step
+    function buildWallView() {
+      wvLayer.destroyChildren();
+      var L = wvWallLengthM() || ROOM_W, Hm = ROOM_H || 4;
+      var availW = W - 20, availH = H - 44, aspect = L / Hm;
+      var ew = Math.min(availW, availH * aspect), eh = ew / aspect;
+      if (eh > availH) { eh = availH; ew = eh * aspect; }
+      wvOX = (W - ew) / 2; wvOY = 34 + (availH - eh) / 2; wvEW = ew; wvEH = eh;
+      wvLayer.add(new Konva.Rect({ x: 0, y: 0, width: W, height: H, fill: '#ced4da', listening: false }));                       // void
+      wvLayer.add(new Konva.Rect({ x: wvOX, y: wvOY, width: ew, height: eh, fill: '#f1f3f5', stroke: '#adb5bd', strokeWidth: 1, listening: false }));   // wall
+      // 1-metre grid across the wall, with metre marks, to align items.
+      var stepX = ew / L, stepY = eh / Hm; wvStepX = stepX; wvStepY = stepY;
+      for (var mx = 1; mx < L; mx++) { var gx = wvOX + mx * stepX; wvLayer.add(new Konva.Line({ points: [gx, wvOY, gx, wvOY + eh], stroke: '#dde1e6', strokeWidth: mx % 5 === 0 ? 1.5 : 1, listening: false })); }
+      for (var my = 1; my < Hm; my++) { var gy = wvOY + eh - my * stepY; wvLayer.add(new Konva.Line({ points: [wvOX, gy, wvOX + ew, gy], stroke: '#dde1e6', strokeWidth: my % 5 === 0 ? 1.5 : 1, listening: false })); wvLayer.add(new Konva.Text({ x: wvOX + 2, y: gy - 10, text: my + 'm', fontSize: 8, fill: '#aeb4bb', listening: false })); }
+      wvLayer.add(new Konva.Line({ points: [wvOX, wvOY + eh, wvOX + ew, wvOY + eh], stroke: '#868e96', strokeWidth: 4, listening: false }));            // floor
+      var doorH = Math.min(2.6, Hm - 0.3);                                                                                       // door openings
+      wvDoorsForWall().forEach(function (dd) {
+        var dcol = dd.auto ? '#0d6efd' : '#198754';   // auto-doorway (between rooms) = blue, manual door = green
+        var dwpx = (dd.width / L) * ew, dhpx = (doorH / Hm) * eh, dx = wvOX + (dd.pos == null ? 0.5 : dd.pos) * ew - dwpx / 2, dy = wvOY + eh - dhpx;
+        wvLayer.add(new Konva.Rect({ x: dx, y: dy, width: dwpx, height: dhpx, fill: dd.auto ? '#dce8fb' : '#cdd2d8', stroke: dcol, strokeWidth: 2, cornerRadius: 1, listening: false }));   // door panel (not see-through)
+        wvLayer.add(new Konva.Circle({ x: dx + dwpx - Math.min(7, dwpx * 0.18), y: dy + dhpx / 2, radius: 2.5, fill: dcol, listening: false }));   // handle
+        wvLayer.add(new Konva.Text({ x: dx, y: dy - 13, width: dwpx, align: 'center', text: dd.auto ? '{{ __('doorway') }}' : '{{ __('door') }}', fontSize: 9, fill: dcol, listening: false }));
+      });
+      // #1172 windows on this wall, at their sill/header height. Interactive in Wall view:
+      // drag horizontally to position, double-click to remove (persisted via WINDOWS_URL).
+      wvWindowsForWall().forEach(function (w) {
+        var wpx = (w.width / L) * ew, hY = (w.height || 1.3), sY = (w.sill || 0.9);
+        var wy = wvOY + eh - ((sY + hY) / Hm) * eh, wh = (hY / Hm) * eh;
+        var cx = wvOX + (w.pos == null ? 0.5 : w.pos) * ew;
+        var grp = new Konva.Group({
+          x: cx, y: wy, draggable: true,
+          dragBoundFunc: function (p) { return { x: Math.max(wvOX + wpx / 2, Math.min(wvOX + ew - wpx / 2, p.x)), y: wy }; }   // slide along the wall only
+        });
+        grp.add(new Konva.Rect({ x: -wpx / 2, y: 0, width: wpx, height: wh, fill: '#cfe6f5', stroke: '#3a7ca5', strokeWidth: 2, cornerRadius: 1 }));   // glass
+        grp.add(new Konva.Line({ points: [0, 0, 0, wh], stroke: '#3a7ca5', strokeWidth: 1, listening: false }));   // mullion
+        grp.add(new Konva.Text({ x: -wpx / 2, y: -13, width: wpx, align: 'center', text: '{{ __('window') }}', fontSize: 9, fill: '#3a7ca5', listening: false }));
+        grp.on('click tap', function (e) { e.cancelBubble = true; selectWindow(w); });   // open the editor (width/sill/height + remove)
+        grp.on('dragend', function () { w.pos = Math.max(0, Math.min(1, (grp.x() - wvOX) / ew)); persistWindows(); });
+        grp.on('dblclick dbltap', function (e) { e.cancelBubble = true; var i = WINDOWS.indexOf(w); if (i >= 0) { WINDOWS.splice(i, 1); if (selectedWin === w) closeWinEdit(); persistWindows(); buildWallView(); } });
+        wvLayer.add(grp);
+      });
+      var lbl = document.getElementById('wvWall').selectedOptions[0];
+      wvLayer.add(new Konva.Text({ x: 8, y: 8, text: (lbl ? lbl.text : '') + ' - ' + L.toFixed(1) + 'm x ' + Hm.toFixed(1) + 'm {{ __('high; drag to position, search to add') }}', fontSize: 11, fill: '#495057', listening: false }));
+      var loadingTxt = new Konva.Text({ x: 0, y: wvOY + eh / 2 - 10, width: W, align: 'center', text: '{{ __('Loading wall…') }}', fontSize: 16, fontStyle: 'bold', fill: '#6c757d', listening: false });
+      wvLayer.add(loadingTxt);
+      wvLayer.draw();
+      fetch(URLS.placements).then(function (r) { return r.json(); }).then(function (d) {
+        if (!d.ok) { loadingTxt.text('{{ __('Could not load wall.') }}'); wvLayer.draw(); return; }
+        var items = d.placements.filter(function (p) { return p.wall_or_zone === wvWall; });
+        // Items assigned to this wall via "Hang on wall" have no u/v yet - give
+        // them a starting spot along the wall and persist it so they show up.
+        var fresh = 0;
+        items.forEach(function (p) {
+          if (p.wall_u === null || p.wall_u === undefined) {
+            p.wall_u = 0.12 + (fresh % 6) * 0.15;
+            p.wall_v = (p.wall_v === null || p.wall_v === undefined) ? 0.55 : p.wall_v;
+            fresh++;
+            fetch(URLS.wallPos, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' },
+              body: JSON.stringify({ placement_id: p.id, u: p.wall_u, v: p.wall_v }) });
+          }
+        });
+        // #1140: do NOT force-separate items that share a spot - stacking is now intentional
+        // (new objects already get distinct default spots above; the walkthrough layers same-spot
+        // objects so they fan out and stay selectable). wvDeOverlap kept for reference, not called.
+        if (!items.length) { loadingTxt.text('{{ __('No objects on this wall yet - search to add.') }}'); wvLayer.draw(); return; }
+        var pending = items.length;
+        function ready() { pending--; if (pending <= 0) { loadingTxt.destroy(); wvLayer.draw(); } }
+        items.forEach(function (p) { wvAddNode(p, ready); });
+        wvLayer.draw();
+      }).catch(function () { loadingTxt.text('{{ __('Could not load wall.') }}'); wvLayer.draw(); });
+    }
+    function wvAddNode(p, onReady) {
+      var done = false, finish = function () { if (done) return; done = true; if (onReady) onReady(); };
+      var u = (p.wall_u != null) ? p.wall_u : 0.5, v = (p.wall_v != null) ? p.wall_v : 0.55;
+      var g = new Konva.Group({ x: wvOX + u * wvEW, y: wvOY + (1 - v) * wvEH, draggable: true, name: 'wvitem' });
+      g.setAttr('placementId', p.id);
+      var r = new Konva.Rect({ x: -WV_NODE / 2, y: -WV_NODE / 2, width: WV_NODE, height: WV_NODE, fill: '#fff', stroke: '#6c757d', strokeWidth: 1, cornerRadius: 3, shadowColor: '#000', shadowBlur: 5, shadowOpacity: 0.15 });
+      g.add(r);
+      if (p.thumb_url) {
+        var im = new Image();
+        im.onload = function () { var ki = new Konva.Image({ image: im, x: -WV_NODE / 2 + 2, y: -WV_NODE / 2 + 2, width: WV_NODE - 4, height: WV_NODE - 4 }); g.add(ki); r.moveToBottom(); wvLayer.draw(); finish(); };
+        im.onerror = function () { g.add(new Konva.Text({ text: '#' + p.information_object_id, x: -WV_NODE / 2, y: -6, width: WV_NODE, align: 'center', fontSize: 10, fill: '#999' })); wvLayer.draw(); finish(); };
+        im.src = p.thumb_url;
+      } else { g.add(new Konva.Text({ text: '#' + p.information_object_id, x: -WV_NODE / 2, y: -6, width: WV_NODE, align: 'center', fontSize: 10, fill: '#999' })); finish(); }
+      // Magnetic snap to the 1 m gridlines (so hung works line up), then clamp to the wall.
+      g.on('dragmove', function () {
+        var x = g.x(), y = g.y();
+        if (wvStepX > 0) { var gx = wvOX + Math.round((x - wvOX) / wvStepX) * wvStepX; if (Math.abs(gx - x) < wvStepX * 0.3) x = gx; }
+        if (wvStepY > 0) { var fy = wvOY + wvEH, gy = fy - Math.round((fy - y) / wvStepY) * wvStepY; if (Math.abs(gy - y) < wvStepY * 0.3) y = gy; }
+        g.x(Math.max(wvOX, Math.min(wvOX + wvEW, x)));
+        g.y(Math.max(wvOY, Math.min(wvOY + wvEH, y)));
+      });
+      g.on('dragend', function () {
+        var nu = Math.max(0, Math.min(1, (g.x() - wvOX) / (wvEW || 1))), nv = Math.max(0, Math.min(1, 1 - (g.y() - wvOY) / (wvEH || 1)));
+        fetch(URLS.wallPos, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: JSON.stringify({ placement_id: g.getAttr('placementId'), u: nu, v: nv }) });
+      });
+      wvLayer.add(g); wvLayer.draw();
+    }
+
+    // keep canvas usable on resize (re-anchor by normalized coords)
+    window.addEventListener('resize', function () {
+      var nw = Math.max(320, wrap.clientWidth || W);
+      if (Math.abs(nw - W) < 20) return;
+      var ratios = layer.find('.placement').map(function (g) { return { g: g, rx: g.x() / W, ry: g.y() / H }; });
+      W = nw; H = aspectH(W);
+      stage.width(W); stage.height(H);
+      ratios.forEach(function (o) { o.g.x(o.rx * W); o.g.y(o.ry * H); });
+      drawBackground(); redrawWalls(); drawDoorMarkers(); layer.draw();
+    });
+
+    // Seed demo sensor readings so the walkthrough's Live overlay has data.
+    (function () {
+      var b = document.getElementById('simLiveBtn'); if (!b) return;
+      b.addEventListener('click', function () {
+        b.disabled = true;
+        fetch(URLS.simLive, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: '{}' })
+          .then(function (r) { return r.json(); })
+          .then(function (d) { b.disabled = false; b.innerHTML = '<i class="fas fa-check me-1"></i>' + (d.ok ? '{{ __('Live data seeded') }}' : '{{ __('Failed') }}'); })
+          .catch(function () { b.disabled = false; });
+      });
+    })();
+
+    // Precompute AI recommendations via the gateway (may take a while for many objects).
+    (function () {
+      var b = document.getElementById('genRecBtn'); if (!b) return;
+      b.addEventListener('click', function () {
+        b.disabled = true; b.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>{{ __('Generating…') }}';
+        fetch(URLS.genRec, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: '{}' })
+          .then(function (r) { return r.json(); })
+          .then(function (d) { b.disabled = false; b.innerHTML = '<i class="fas fa-check me-1"></i>' + (d.ok ? (d.updated ? ('{{ __('AI recs') }}: +' + d.updated) : '{{ __('AI recs ready') }}') : '{{ __('Failed') }}'); loadRecs(); })
+          .catch(function () { b.disabled = false; b.innerHTML = '<i class="fas fa-wand-magic-sparkles me-1"></i>{{ __('AI recommendations') }}'; });
+      });
+    })();
+
+    // #1149 AI suggestion picker: all room suggestions, or the selected object's, with one-click add.
+    function addRecObject(io, row) {
+      fetch(URLS.place, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' },
+        body: JSON.stringify({ information_object_id: io, pos_x: 0.5, pos_y: 0.5, size_units_used: parseFloat(document.getElementById('initialSize').value) || 0 }) })
+        .then(function (r) { return r.json(); }).then(function (d) { if (d.ok) { var g = addNode(d.placement); layer.draw(); selectNode(g); renderObjList(); if (row) { row.style.opacity = '0.45'; } } });
+    }
+
+    // ---- #1277 federated twin: borrow a peer institution's object ----
+    (function wirePeerBorrow() {
+      var sel = document.getElementById('peerSel'), base = document.getElementById('peerBase'),
+          slug = document.getElementById('peerSlug'), fetchBtn = document.getElementById('peerFetchBtn'),
+          msg = document.getElementById('peerMsg'), list = document.getElementById('peerObjList');
+      if (!fetchBtn) return;   // card not rendered (no auth)
+
+      function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
+      function showMsg(t, cls) { msg.className = 'small mb-1 ' + (cls || 'text-muted'); msg.textContent = t || ''; }
+
+      // "Other (enter URL)" reveals a manual base-URL field; a named peer hides it.
+      function syncBaseField() { var v = sel.value; if (v === '') { base.classList.remove('d-none'); } else { base.classList.add('d-none'); } }
+      sel.addEventListener('change', syncBaseField); syncBaseField();
+
+      fetchBtn.addEventListener('click', function () {
+        var sceneSlug = (slug.value || '').trim();
+        if (!sceneSlug) { showMsg('{{ __('Enter the partner exhibition slug.') }}', 'text-danger'); return; }
+        var body = { scene_slug: sceneSlug };
+        if (sel.value === '') { body.base_url = (base.value || '').trim(); }
+        else { body.peer_id = sel.value; }
+        list.innerHTML = ''; showMsg('{{ __('Fetching ...') }}');
+        fetchBtn.disabled = true;
+        fetch(URLS.peerScene, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: JSON.stringify(body) })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            fetchBtn.disabled = false;
+            if (!d || !d.ok) { showMsg(d && d.error ? d.error : '{{ __('Could not reach that partner.') }}', 'text-danger'); return; }
+            var objs = d.objects || [];
+            // F3 federation twin (#1246): if require_verified is ON and the scene was
+            // unverified, the server withholds its objects + sends a notice.
+            if (d.notice && !objs.length) { showMsg(esc(d.notice), 'text-warning'); return; }
+            if (!objs.length) { showMsg('{{ __('That exhibition has no borrowable objects.') }}', 'text-warning'); return; }
+            // Scene-level trust line: green when the peer scene's signature verified, amber when not.
+            var trustCls = d.verified ? 'text-success' : 'text-warning';
+            var trustTxt = d.verified
+              ? '{{ __('Peer scene verified (signed) -') }} '
+              : '{{ __('Peer scene UNVERIFIED (unsigned) - borrowed objects will be flagged. ') }}';
+            showMsg(trustTxt + objs.length + ' {{ __('object(s) found - click to borrow:') }}', trustCls);
+            objs.forEach(function (o) {
+              var a = document.createElement('button');
+              a.type = 'button';
+              a.className = 'list-group-item list-group-item-action d-flex align-items-center gap-2 py-1 px-2';
+              var thumb = o.image_url ? '<img src="' + esc(o.image_url) + '" style="width:32px;height:32px;object-fit:cover;border-radius:3px;flex:0 0 auto;">' : '<span class="text-muted" style="width:32px;text-align:center;flex:0 0 auto;"><i class="fas fa-cube"></i></span>';
+              var trustBadge = o.verified
+                ? '<span class="badge bg-success-subtle text-success border border-success ms-auto" title="{{ __('Cryptographically verified peer object') }}"><i class="fas fa-shield-halved"></i></span>'
+                : '<span class="badge bg-warning-subtle text-warning-emphasis border border-warning ms-auto" title="{{ __('Unverified - the peer scene was not signed') }}"><i class="fas fa-triangle-exclamation"></i></span>';
+              a.innerHTML = thumb + '<span class="text-truncate">' + esc(o.title) + '</span>' + trustBadge;
+              a.addEventListener('click', function () { borrowObject(o, a); });
+              list.appendChild(a);
+            });
+          })
+          .catch(function () { fetchBtn.disabled = false; showMsg('{{ __('Could not reach that partner.') }}', 'text-danger'); });
+      });
+
+      function borrowObject(o, el) {
+        el.disabled = true; el.classList.add('disabled');
+        var peerId = (sel.value === '') ? '' : sel.value;
+        fetch(URLS.placeRemote, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' },
+          body: JSON.stringify({ remote_payload: JSON.stringify(o), remote_peer_id: peerId, remote_ref: o.ref || '' }) })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (d && d.ok) {
+              var g = addNode(d.placement); layer.draw(); selectNode(g);
+              el.innerHTML = '<i class="fas fa-check text-success me-1"></i>' + el.textContent;
+            } else {
+              el.disabled = false; el.classList.remove('disabled');
+              showMsg(d && d.error ? d.error : '{{ __('Could not borrow that object.') }}', 'text-danger');
+            }
+          })
+          .catch(function () { el.disabled = false; el.classList.remove('disabled'); showMsg('{{ __('Could not borrow that object.') }}', 'text-danger'); });
+      }
+    })();
+
+    function loadRecs() {
+      var el = document.getElementById('recList'); if (!el) return;
+      var io = (selected && selected.getAttr('ioId')) ? selected.getAttr('ioId') : 0;
+      var hdr = document.getElementById('recHdr');
+      el.innerHTML = '<div class="text-muted">{{ __('Loading…') }}</div>';
+      fetch(URLS.recommend + (io ? ('?io=' + io) : ''), { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); }).then(function (d) {
+          var items = (d && d.items) || [];
+          if (hdr) hdr.textContent = (io ? '{{ __('Suggestions for selection') }}' : '{{ __('AI suggestions') }}') + ' (' + items.length + ')';
+          if (!items.length) { el.innerHTML = '<div class="text-muted">' + (io ? '{{ __('No suggestions for this object.') }}' : '{{ __('No suggestions yet - run AI recommendations.') }}') + '</div>'; return; }
+          el.innerHTML = '';
+          items.forEach(function (it) {
+            var row = document.createElement('div'); row.className = 'd-flex align-items-start gap-2 mb-2 pb-1 border-bottom';
+            row.innerHTML = (it.thumb_url ? '<img src="' + it.thumb_url + '" style="width:34px;height:34px;object-fit:cover;border-radius:3px;flex:0 0 auto">' : '') +
+              '<div class="flex-grow-1" style="min-width:0"><div class="fw-bold text-truncate">' + (it.title || ('#' + it.io_id)) + '</div>' +
+              '<div class="text-muted" style="font-size:11px">' + (it.reason || '') + (it.source ? (' <span class="text-secondary">· {{ __('from') }} ' + it.source + '</span>') : '') + '</div></div>' +
+              '<button class="btn btn-sm btn-outline-success py-0 px-1 addrec" type="button" title="{{ __('Add to this room') }}"><i class="fas fa-plus"></i></button>';
+            row.querySelector('.addrec').addEventListener('click', function () { addRecObject(it.io_id, row); });
+            el.appendChild(row);
+          });
+        }).catch(function () { el.innerHTML = '<div class="text-danger">{{ __('Could not load suggestions.') }}</div>'; });
+    }
+    (function () { var rr = document.getElementById('recRefresh'); if (rr) rr.addEventListener('click', loadRecs); loadRecs(); })();
+
+    // ---- Wall painting: per-wall image OR apply to all walls, with a preview of what is loaded ----
+    (function () {
+      var WALL_IMAGES = @json($wallImages ?? new \stdClass);   // {edgeIndex: path}
+      var WALL_DEFAULT = @json($space->wall_image_path);        // all-walls default
+      var sel = document.getElementById('wpTarget'), prev = document.getElementById('wpPreview'),
+        nameEl = document.getElementById('wpName'), fileEl = document.getElementById('wpFile'),
+        upBtn = document.getElementById('wpUpload'), clrBtn = document.getElementById('wpClear');
+      if (!sel) return;
+      function fname(p) { return p ? p.split('/').pop() : ''; }
+      function ownPath(t) { return (t === 'all') ? WALL_DEFAULT : (WALL_IMAGES && WALL_IMAGES[t]); }
+      function effPath(t) { return ownPath(t) || WALL_DEFAULT || ''; }
+      function refresh() {
+        var t = sel.value, own = ownPath(t), p = effPath(t);
+        if (p) { prev.src = p; prev.style.display = 'inline-block'; } else { prev.style.display = 'none'; }
+        nameEl.textContent = own ? fname(own) : (p ? ('{{ __('using all-walls:') }} ' + fname(p)) : '{{ __('No painting on this wall') }}');
+      }
+      // Rebuildable so a divider added in this session appears without a reload:
+      // refreshWallOptions() calls this after saveWalls() returns (#1469).
+      function buildTargets() {
+        var keep = sel.value;
+        sel.innerHTML = '<option value="all">{{ __('All walls (default)') }}</option>';
+        var n = (typeof SHAPE !== 'undefined' && SHAPE && SHAPE.length >= 3) ? SHAPE.length : 4;
+        for (var i = 0; i < n; i++) { var o = document.createElement('option'); o.value = String(i); o.textContent = '{{ __('Wall') }} ' + (i + 1); sel.appendChild(o); }
+        // Interior dividers, each with a front and a back face. They are keyed by
+        // string id rather than edge index, which is why they could not be painted
+        // or papered before - the target could not be expressed here or stored.
+        // Same front/back convention as the placement dropdown.
+        var ws = (typeof WALLS !== 'undefined' && WALLS) ? WALLS : [];
+        ws.forEach(function (w, k) {
+          if (!w || !w.id) return;
+          [['', '{{ __('(front)') }}'], ['|b', '{{ __('(back)') }}']].forEach(function (f) {
+            var o = document.createElement('option');
+            o.value = w.id + f[0];
+            o.textContent = '{{ __('Interior') }} ' + (k + 1) + ' ' + f[1];
+            sel.appendChild(o);
+          });
+        });
+        sel.value = keep;
+        if (!sel.value) sel.value = 'all';
+      }
+      buildTargets();
+      window.refreshSurfaceTargets = buildTargets;
+      refresh();
+      sel.addEventListener('change', refresh);
+      upBtn.addEventListener('click', function () {
+        if (!fileEl.files || !fileEl.files[0]) { alert('{{ __('Choose an image first.') }}'); return; }
+        var fd = new FormData(); fd.append('wall_image', fileEl.files[0]);
+        var t = sel.value; if (t === 'all') fd.append('all', '1'); else fd.append('edge', t);
+        upBtn.disabled = true; upBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>{{ __('Uploading…') }}';
+        fetch('{{ route('exhibition-space.builder.wall-image', ['slug' => $space->slug]) }}', { method: 'POST', headers: { 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: fd })
+          .then(function (r) { return r.json(); }).then(function (d) {
+            upBtn.disabled = false; upBtn.innerHTML = '<i class="fas fa-upload me-1"></i>{{ __('Upload painting') }}';
+            if (!d.ok) { alert('{{ __('Upload failed.') }}'); return; }
+            if (d.all) WALL_DEFAULT = d.path; else { WALL_IMAGES = WALL_IMAGES || {}; WALL_IMAGES[String(d.edge)] = d.path; }
+            fileEl.value = ''; refresh();
+          }).catch(function () { upBtn.disabled = false; upBtn.innerHTML = '<i class="fas fa-upload me-1"></i>{{ __('Upload painting') }}'; alert('{{ __('Upload failed.') }}'); });
+      });
+      clrBtn.addEventListener('click', function () {
+        var t = sel.value, body = (t === 'all') ? 'all=1' : ('edge=' + encodeURIComponent(t));
+        fetch('{{ route('exhibition-space.builder.wall-image-clear', ['slug' => $space->slug]) }}', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: body })
+          .then(function (r) { return r.json(); }).then(function (d) {
+            if (!d.ok) return;
+            if (d.all) WALL_DEFAULT = null; else if (WALL_IMAGES) delete WALL_IMAGES[String(t)];
+            refresh();
+          });
+      });
+    })();
+
+    // ---- Wall colour: paint a solid colour per wall / all walls (reuses #wpTarget; applies when no wall image) ----
+    (function () {
+      var sel = document.getElementById('wpTarget'), custom = document.getElementById('wcCustom'),
+        applyBtn = document.getElementById('wcApply'), clrBtn = document.getElementById('wcClear');
+      if (!sel || !applyBtn) return;
+      var SAVE = '{{ route('exhibition-space.builder.wall-color', ['slug' => $space->slug]) }}';
+      var CLR = '{{ route('exhibition-space.builder.wall-color-clear', ['slug' => $space->slug]) }}';
+      var hdrs = { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' };
+      function targetBody() { var t = sel.value; return (t === 'all') ? 'all=1' : ('edge=' + encodeURIComponent(t)); }
+      function flash(btn, txt) { var o = btn.innerHTML; btn.innerHTML = txt; setTimeout(function () { btn.innerHTML = o; }, 1100); }
+      function save(hex) {
+        fetch(SAVE, { method: 'POST', headers: hdrs, body: 'color=' + encodeURIComponent(hex) + '&' + targetBody() })
+          .then(function (r) { return r.json(); }).then(function (d) { if (d.ok) flash(applyBtn, '<i class="fas fa-check me-1"></i>{{ __('Saved - view in 3D') }}'); else alert('{{ __('Could not save colour.') }}'); })
+          .catch(function () { alert('{{ __('Could not save colour.') }}'); });
+      }
+      document.querySelectorAll('#wcSwatches .wc-swatch').forEach(function (b) {
+        b.addEventListener('click', function () { var c = b.getAttribute('data-color'); if (custom) custom.value = c; save(c); });
+      });
+      applyBtn.addEventListener('click', function () { save(custom.value); });
+      clrBtn.addEventListener('click', function () {
+        fetch(CLR, { method: 'POST', headers: hdrs, body: targetBody() })
+          .then(function (r) { return r.json(); }).then(function (d) { if (d.ok) flash(clrBtn, '<i class="fas fa-check me-1"></i>{{ __('Cleared') }}'); });
+      });
+    })();
+
+    // ---- Floor image: stretch one picture over the whole floor (overrides marble/plan) ----
+    (function () {
+      var FLOOR_IMG = @json($space->floor_image_path);
+      var prev = document.getElementById('flPreview'), nameEl = document.getElementById('flName'),
+        fileEl = document.getElementById('flFile'), upBtn = document.getElementById('flUpload'),
+        clrBtn = document.getElementById('flClear');
+      if (!upBtn) return;
+      function fname(p) { return p ? p.split('/').pop() : ''; }
+      function refresh() {
+        if (FLOOR_IMG) { prev.src = FLOOR_IMG; prev.style.display = 'inline-block'; nameEl.textContent = fname(FLOOR_IMG); }
+        else { prev.style.display = 'none'; nameEl.textContent = '{{ __('No floor image (using marble/plan)') }}'; }
+      }
+      refresh();
+      upBtn.addEventListener('click', function () {
+        if (!fileEl.files || !fileEl.files[0]) { alert('{{ __('Choose an image first.') }}'); return; }
+        var fd = new FormData(); fd.append('floor_image', fileEl.files[0]);
+        upBtn.disabled = true; upBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>{{ __('Uploading…') }}';
+        fetch('{{ route('exhibition-space.builder.floor-image', ['slug' => $space->slug]) }}', { method: 'POST', headers: { 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: fd })
+          .then(function (r) { return r.json(); }).then(function (d) {
+            upBtn.disabled = false; upBtn.innerHTML = '<i class="fas fa-upload me-1"></i>{{ __('Upload floor image') }}';
+            if (!d.ok) { alert('{{ __('Upload failed.') }}'); return; }
+            FLOOR_IMG = d.path; fileEl.value = ''; refresh();
+          }).catch(function () { upBtn.disabled = false; upBtn.innerHTML = '<i class="fas fa-upload me-1"></i>{{ __('Upload floor image') }}'; alert('{{ __('Upload failed.') }}'); });
+      });
+      clrBtn.addEventListener('click', function () {
+        fetch('{{ route('exhibition-space.builder.floor-image-clear', ['slug' => $space->slug]) }}', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: '' })
+          .then(function (r) { return r.json(); }).then(function (d) { if (!d.ok) return; FLOOR_IMG = null; refresh(); });
+      });
+      // Tiling: grout-grid toggle + tile size (m). Sizes the marble tiles and the floor-image grout.
+      var groutEl = document.getElementById('flGrout'), tileEl = document.getElementById('flTile'), gmmEl = document.getElementById('flGroutMm');
+      var GROUT_URL = '{{ route('exhibition-space.builder.floor-grout', ['slug' => $space->slug]) }}';
+      function saveTiling() {
+        var body = 'on=' + (groutEl && groutEl.checked ? '1' : '0') + '&tile_m=' + encodeURIComponent(tileEl ? tileEl.value : 2) + '&grout_mm=' + encodeURIComponent(gmmEl ? gmmEl.value : 8);
+        fetch(GROUT_URL, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: body });
+      }
+      if (groutEl) groutEl.addEventListener('change', saveTiling);
+      if (tileEl) tileEl.addEventListener('change', saveTiling);
+      if (gmmEl) gmmEl.addEventListener('change', saveTiling);
+    })();
+
+    // ---- Photoreal capture (#1156): upload a scan shell + fit-scale + 360/Matterport embed ----
+    (function () {
+      var SCAN = @json($space->scan_shell_path);
+      var nameEl = document.getElementById('scName'), fileEl = document.getElementById('scFile'),
+        upBtn = document.getElementById('scUpload'), clrBtn = document.getElementById('scClear'),
+        scaleEl = document.getElementById('scScale'), embedEl = document.getElementById('scEmbed'),
+        metaBtn = document.getElementById('scMeta');
+      if (!upBtn) return;
+      function fname(p) { return p ? p.split('/').pop() : ''; }
+      function refresh() {
+        nameEl.textContent = SCAN ? fname(SCAN) : '{{ __('No scan shell (using built room)') }}';
+        nameEl.classList.toggle('text-success', !!SCAN);
+      }
+      refresh();
+      upBtn.addEventListener('click', function () {
+        if (!fileEl.files || !fileEl.files[0]) { alert('{{ __('Choose a scan file first.') }}'); return; }
+        var fd = new FormData(); fd.append('scan_shell', fileEl.files[0]);
+        upBtn.disabled = true; upBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>{{ __('Uploading…') }}';
+        fetch('{{ route('exhibition-space.builder.scan-shell', ['slug' => $space->slug]) }}', { method: 'POST', headers: { 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: fd })
+          .then(function (r) { return r.json(); }).then(function (d) {
+            upBtn.disabled = false; upBtn.innerHTML = '<i class="fas fa-upload me-1"></i>{{ __('Upload scan shell') }}';
+            if (!d.ok) { alert('{{ __('Upload failed.') }}'); return; }
+            SCAN = d.path; fileEl.value = ''; refresh();
+          }).catch(function () { upBtn.disabled = false; upBtn.innerHTML = '<i class="fas fa-upload me-1"></i>{{ __('Upload scan shell') }}'; alert('{{ __('Upload failed.') }}'); });
+      });
+      clrBtn.addEventListener('click', function () {
+        fetch('{{ route('exhibition-space.builder.scan-shell-clear', ['slug' => $space->slug]) }}', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: '' })
+          .then(function (r) { return r.json(); }).then(function (d) { if (!d.ok) return; SCAN = null; refresh(); });
+      });
+      function saveMeta() {
+        var body = 'scale=' + encodeURIComponent(scaleEl ? scaleEl.value : 1) + '&embed_url=' + encodeURIComponent(embedEl ? embedEl.value.trim() : '');
+        metaBtn.disabled = true;
+        fetch('{{ route('exhibition-space.builder.scan-meta', ['slug' => $space->slug]) }}', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: body })
+          .then(function (r) { return r.json(); }).then(function (d) { metaBtn.disabled = false; metaBtn.innerHTML = d && d.ok ? '<i class="fas fa-check me-1"></i>{{ __('Saved') }}' : '{{ __('Save scale & embed') }}'; setTimeout(function () { metaBtn.innerHTML = '{{ __('Save scale & embed') }}'; }, 1500); })
+          .catch(function () { metaBtn.disabled = false; alert('{{ __('Save failed (check the embed URL).') }}'); });
+      }
+      if (metaBtn) metaBtn.addEventListener('click', saveMeta);
+    })();
+
+    // ---- Furniture & fittings: add from the picker, drag the brown dot, double-click to remove ----
+    (function () {
+      var FURN = @json($furniture ?? []);
+      var cnt = document.getElementById('furnCount');
+      var ADD = '{{ route('exhibition-space.builder.furniture-add', ['slug' => $space->slug]) }}';
+      var MOVE = '{{ route('exhibition-space.builder.furniture-move', ['slug' => $space->slug]) }}';
+      var REM = '{{ route('exhibition-space.builder.furniture-remove', ['slug' => $space->slug]) }}';
+      var hdrs = { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' };
+      function updateCount() { if (cnt) cnt.textContent = layer.find('.furn').length; }
+      // Selection + size/height control (pillars take their height from scale).
+      var selPanel = document.getElementById('furnSel'), selKind = document.getElementById('furnSelKind'),
+        scaleEl = document.getElementById('furnScale'), scaleVal = document.getElementById('furnScaleVal'),
+        scaleLabel = document.getElementById('furnScaleLabel'), pillarHint = document.getElementById('furnPillarHint'),
+        rotEl = document.getElementById('furnRot'), rotVal = document.getElementById('furnRotVal'),
+        railRow = document.getElementById('furnRailRow'), segEl = document.getElementById('furnSegments');
+      var selected = null;
+      function isPillar(k) { return k === 'pillar-round' || k === 'pillar-square'; }
+      function persistSel() {
+        if (!selected) return; var it = selected.it;
+        fetch(MOVE, { method: 'POST', headers: hdrs, body: JSON.stringify({ id: it.id, fx: selected.node.x() / W, fy: selected.node.y() / H, scale: it.scale || 1, rot: it.rotation_deg || 0, segments: it.segments || 2 }) });
+      }
+      function selectFurn(it, node) {
+        selected = { it: it, node: node };
+        if (!selPanel) return;
+        selPanel.style.display = 'block';
+        selKind.textContent = it.kind;
+        scaleEl.value = it.scale || 1; scaleVal.textContent = (it.scale || 1).toFixed(1);
+        rotEl.value = it.rotation_deg || 0; rotVal.textContent = Math.round(it.rotation_deg || 0);
+        scaleLabel.textContent = isPillar(it.kind) ? '{{ __('Height') }}' : '{{ __('Size') }}';
+        pillarHint.style.display = isPillar(it.kind) ? 'block' : 'none';
+        if (railRow) railRow.style.display = (it.kind === 'railing') ? 'flex' : 'none';
+        if (segEl) segEl.value = it.segments || 2;
+        layer.find('.furn').forEach(function (n) { var c = n.findOne('Circle'); if (c) c.stroke('#fff'); });
+        var sc = node.findOne('Circle'); if (sc) sc.stroke('#0d6efd');
+        if (it.kind === 'railing') buildPoleHandles(it, node); else clearPoleHandles();
+        layer.draw();
+      }
+      if (scaleEl) {
+        scaleEl.addEventListener('input', function () { scaleVal.textContent = (+scaleEl.value).toFixed(1); });
+        scaleEl.addEventListener('change', function () { if (selected) { selected.it.scale = +scaleEl.value; persistSel(); } });
+      }
+      if (rotEl) {
+        rotEl.addEventListener('input', function () { rotVal.textContent = Math.round(+rotEl.value); });
+        rotEl.addEventListener('change', function () { if (selected) { selected.it.rotation_deg = +rotEl.value; persistSel(); } });
+      }
+      if (segEl) {
+        segEl.addEventListener('change', function () {
+          if (!selected) return; var it = selected.it, n = Math.max(2, Math.min(20, +segEl.value || 2)); segEl.value = n;
+          if (it.kind === 'railing') { it.poles = defaultPoles(n); it.segments = n; persistPoles(it); buildPoleHandles(it, selected.node); }
+          else { it.segments = n; persistSel(); }
+        });
+      }
+      // ---- Per-pole rope-railing layout: drag orange handles to place each post ----
+      var POLES = '{{ route('exhibition-space.builder.furniture-poles', ['slug' => $space->slug]) }}';
+      var poleHandles = [], addPoleBtn = document.getElementById('furnAddPole'), poleHint = document.getElementById('furnPoleHint');
+      function clearPoleHandles() { poleHandles.forEach(function (h) { h.destroy(); }); poleHandles = []; if (addPoleBtn) addPoleBtn.style.display = 'none'; if (poleHint) poleHint.style.display = 'none'; layer.draw(); }
+      function defaultPoles(n) { var a = [], span = 1.4, x0 = -(n - 1) * span / 2; for (var i = 0; i < n; i++) a.push({ x: +(x0 + i * span).toFixed(3), z: 0 }); return a; }
+      function persistPoles(it) { fetch(POLES, { method: 'POST', headers: hdrs, body: JSON.stringify({ id: it.id, poles: it.poles || [] }) }); }
+      function buildPoleHandles(it, node) {
+        clearPoleHandles();
+        if (it.kind !== 'railing') return;
+        if (!it.poles || it.poles.length < 2) it.poles = defaultPoles(Math.max(2, Math.min(20, it.segments || 2)));
+        if (addPoleBtn) addPoleBtn.style.display = 'block';
+        if (poleHint) poleHint.style.display = 'block';
+        it.poles.forEach(function (p, idx) {
+          var c = new Konva.Circle({ x: node.x() + (p.x / ROOM_W) * W, y: node.y() + (p.z / ROOM_D) * H, radius: 6, fill: '#fd7e14', stroke: '#fff', strokeWidth: 1.5, draggable: true, name: 'pole' });
+          c.on('dragmove', function () { it.poles[idx] = { x: +(((c.x() - node.x()) / W) * ROOM_W).toFixed(3), z: +(((c.y() - node.y()) / H) * ROOM_D).toFixed(3) }; });
+          c.on('dragend', function () { persistPoles(it); });
+          c.on('dblclick dbltap', function (e) { e.cancelBubble = true; if (it.poles.length <= 2) return; it.poles.splice(idx, 1); persistPoles(it); buildPoleHandles(it, node); });
+          layer.add(c); poleHandles.push(c);
+        });
+        layer.draw();
+      }
+      if (addPoleBtn) addPoleBtn.addEventListener('click', function () {
+        if (!selected || selected.it.kind !== 'railing') return; var it = selected.it;
+        var last = (it.poles && it.poles.length) ? it.poles[it.poles.length - 1] : { x: 0, z: 0 };
+        if (!it.poles) it.poles = [];
+        it.poles.push({ x: +(last.x + 1.0).toFixed(3), z: last.z }); persistPoles(it); buildPoleHandles(it, selected.node);
+      });
+      function addDot(it) {
+        var g = new Konva.Group({ x: (it.pos_x == null ? 0.5 : it.pos_x) * W, y: (it.pos_y == null ? 0.5 : it.pos_y) * H, draggable: true, name: 'furn' });
+        g.setAttr('furnId', it.id);
+        g.add(new Konva.Circle({ radius: 9, fill: '#8a5a2b', stroke: '#fff', strokeWidth: 2 }));
+        g.add(new Konva.Text({ text: (it.label || it.kind), fontSize: 10, fill: '#5a3a1b', x: 12, y: -5 }));
+        g.on('click tap', function (e) { e.cancelBubble = true; selectFurn(it, g); });
+        g.on('dragend', function () { selectFurn(it, g); persistSel(); });
+        g.on('dblclick dbltap', function (e) {
+          e.cancelBubble = true;
+          fetch(REM, { method: 'POST', headers: hdrs, body: JSON.stringify({ id: it.id }) }).then(function (r) { return r.json(); }).then(function (d) { if (d.ok) { g.destroy(); if (selected && selected.it.id === it.id) { selected = null; if (selPanel) selPanel.style.display = 'none'; clearPoleHandles(); } layer.draw(); updateCount(); } });
+        });
+        layer.add(g);
+      }
+      (FURN || []).forEach(addDot); layer.draw(); updateCount();
+      document.querySelectorAll('#furnPicker [data-furn]').forEach(function (b) {
+        b.addEventListener('click', function () {
+          fetch(ADD, { method: 'POST', headers: hdrs, body: JSON.stringify({ kind: b.getAttribute('data-furn'), fx: 0.5, fy: 0.5 }) })
+            .then(function (r) { return r.json(); }).then(function (d) { if (d.ok && d.item) { addDot(d.item); layer.draw(); updateCount(); } });
+        });
+      });
+
+      // ---- Custom furniture library: upload assets, click a tile to place a copy ----
+      var ASSETS = @json($furnitureAssets ?? []);
+      var UP = '{{ route('exhibition-space.builder.furniture-asset-upload', ['slug' => $space->slug]) }}';
+      var ADEL = '{{ route('exhibition-space.builder.furniture-asset-delete', ['slug' => $space->slug]) }}';
+      var lib = document.getElementById('furnLibrary');
+      function libTile(a) {
+        var t = document.createElement('div'); t.className = 'position-relative';
+        var b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-sm btn-outline-secondary'; b.title = a.description ? (a.label + ' - ' + a.description) : a.label;
+        b.innerHTML = (a.asset_kind === 'image' ? '<i class="fas fa-image me-1"></i>' : '<i class="fas fa-cube me-1"></i>') + (a.label.length > 14 ? (a.label.slice(0, 13) + '…') : a.label);
+        b.addEventListener('click', function () {
+          fetch(ADD, { method: 'POST', headers: hdrs, body: JSON.stringify({ asset_id: a.id, fx: 0.5, fy: 0.5 }) })
+            .then(function (r) { return r.json(); }).then(function (d) { if (d.ok && d.item) { addDot(d.item); layer.draw(); updateCount(); } });
+        });
+        var x = document.createElement('button'); x.type = 'button'; x.className = 'btn btn-sm btn-link text-danger p-0 position-absolute top-0 end-0'; x.style.fontSize = '10px'; x.innerHTML = '&times;'; x.title = '{{ __('Remove from library') }}';
+        x.addEventListener('click', function (e) {
+          e.stopPropagation(); if (!confirm('{{ __('Remove this from your library?') }}')) return;
+          fetch(ADEL, { method: 'POST', headers: hdrs, body: JSON.stringify({ id: a.id }) }).then(function (r) { return r.json(); }).then(function (d) { if (d.ok) t.remove(); });
+        });
+        t.appendChild(b); t.appendChild(x); return t;
+      }
+      if (lib) { ASSETS.forEach(function (a) { lib.appendChild(libTile(a)); }); }
+      (function () {
+        var f = document.getElementById('faFile'), lab = document.getElementById('faLabel'), desc = document.getElementById('faDesc'), up = document.getElementById('faUpload');
+        if (!up) return;
+        up.addEventListener('click', function () {
+          if (!f.files || !f.files[0]) { alert('{{ __('Choose a file first.') }}'); return; }
+          var fd = new FormData(); fd.append('asset', f.files[0]); if (lab.value) fd.append('label', lab.value); if (desc && desc.value) fd.append('description', desc.value);
+          up.disabled = true; up.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>{{ __('Uploading…') }}';
+          fetch(UP, { method: 'POST', headers: { 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: fd })
+            .then(function (r) { return r.json(); }).then(function (d) {
+              up.disabled = false; up.innerHTML = '<i class="fas fa-upload me-1"></i>{{ __('Upload to library') }}';
+              if (!d.ok) { alert('{{ __('Upload failed.') }}'); return; }
+              ASSETS.push(d.asset); if (lib) lib.appendChild(libTile(d.asset)); f.value = ''; lab.value = ''; if (desc) desc.value = '';
+            }).catch(function () { up.disabled = false; up.innerHTML = '<i class="fas fa-upload me-1"></i>{{ __('Upload to library') }}'; alert('{{ __('Upload failed.') }}'); });
+        });
+      })();
+    })();
+
+    // ---- Guided tours (audio) authoring (multiple named tours) ----
+    (function () {
+      var sel = document.getElementById('gtAddSel'), list = document.getElementById('gtList');
+      var tourSel = document.getElementById('gtTourSel'), nameInp = document.getElementById('gtTourName');
+      if (!sel || !list || !tourSel) return;
+      var TOURS = Array.isArray(GUIDED_TOUR) ? GUIDED_TOUR : [];
+      if (!TOURS.length) TOURS.push({ name: 'Tour 1', stops: [] });
+      var cur = 0;
+      // Title lookup spans BOTH this room (PLACEMENTS) and the whole building
+      // (TOUR_OBJECTS) so a stop's title resolves no matter which scope it was
+      // added from.
+      var ALL_OBJ = {};
+      (TOUR_OBJECTS || []).forEach(function (p) { ALL_OBJ[p.io_id] = p.title; });
+      (PLACEMENTS || []).forEach(function (p) { if (!ALL_OBJ[p.information_object_id]) ALL_OBJ[p.information_object_id] = p.title; });
+      function titleFor(io) { return ALL_OBJ[io] || ('#' + io); }
+      // Per-tour ROOM ORDER: map each object to its room so the curator can order
+      // whole room-blocks; the flat stop list is regrouped to match (the
+      // walkthrough plays stops in order, so this defines the room sequence).
+      var IO_ROOM = {};
+      (TOUR_OBJECTS || []).forEach(function (p) { if (p.io_id) IO_ROOM[p.io_id] = { id: (+p.room_id || 0), name: p.room_name || '' }; });
+      function roomOfStop(s) { return IO_ROOM[s.io_id] || { id: 0, name: '{{ __('(unknown room)') }}' }; }
+      function roomsInTour() {
+        var order = [], seen = {};
+        stops().forEach(function (s) { var r = roomOfStop(s); if (!seen[r.id]) { seen[r.id] = 1; order.push({ id: r.id, name: r.name }); } });
+        return order;
+      }
+      function applyRoomOrder(orderIds) {
+        var byRoom = {};
+        stops().forEach(function (s) { var k = roomOfStop(s).id; (byRoom[k] = byRoom[k] || []).push(s); });
+        var next = [];
+        orderIds.forEach(function (k) { (byRoom[k] || []).forEach(function (s) { next.push(s); }); delete byRoom[k]; });
+        Object.keys(byRoom).forEach(function (k) { byRoom[k].forEach(function (s) { next.push(s); }); });   // any stragglers
+        TOURS[cur].stops = next;
+      }
+      function renderRoomOrder() {
+        var el = document.getElementById('gtRoomOrder'); if (!el) return;
+        var rooms = roomsInTour();
+        if (rooms.length <= 1) { el.innerHTML = ''; return; }   // only meaningful across 2+ rooms
+        var html = '<div class="small fw-bold mt-2 mb-1"><i class="fas fa-shoe-prints me-1"></i>{{ __('Room order (the tour visits rooms top to bottom)') }}</div>';
+        rooms.forEach(function (r, i) {
+          html += '<div class="d-flex align-items-center justify-content-between border rounded px-2 py-1 mb-1">' +
+            '<span class="small text-truncate">' + (i + 1) + '. ' + (r.name || '').replace(/[<>&]/g, '') + '</span>' +
+            '<span class="text-nowrap"><button type="button" class="btn btn-sm btn-link p-0 me-1" data-rup="' + i + '">&uarr;</button>' +
+            '<button type="button" class="btn btn-sm btn-link p-0" data-rdown="' + i + '">&darr;</button></span></div>';
+        });
+        el.innerHTML = html;
+      }
+      (function () {
+        var el = document.getElementById('gtRoomOrder'); if (!el) return;
+        el.addEventListener('click', function (e) {
+          var up = e.target.getAttribute('data-rup'), dn = e.target.getAttribute('data-rdown');
+          if (up === null && dn === null) return;
+          var ids = roomsInTour().map(function (r) { return r.id; });
+          var idx = up !== null ? +up : +dn, swap = up !== null ? idx - 1 : idx + 1;
+          if (swap < 0 || swap >= ids.length) return;
+          var t = ids[idx]; ids[idx] = ids[swap]; ids[swap] = t;
+          applyRoomOrder(ids); render();
+        });
+      })();
+      // Picker pool, scoped (this room | whole building) and sorted A-Z by title.
+      var scopeSel = document.getElementById('gtScope');
+      function poolFor(scope) {
+        var arr = (scope === 'building')
+          ? (TOUR_OBJECTS || []).map(function (p) { return { io_id: p.io_id, title: p.title }; })
+          : (PLACEMENTS || []).map(function (p) { return { io_id: p.information_object_id, title: p.title }; });
+        var seen = {}, out = [];
+        arr.forEach(function (p) { if (p.io_id && !seen[p.io_id]) { seen[p.io_id] = 1; out.push(p); } });
+        out.sort(function (a, b) { return String(a.title || '').localeCompare(String(b.title || '')); });
+        return out;
+      }
+      function populatePicker() {
+        var scope = scopeSel ? scopeSel.value : 'room';
+        sel.innerHTML = '';
+        poolFor(scope).forEach(function (p) { var o = document.createElement('option'); o.value = p.io_id; o.textContent = (p.title || ('#' + p.io_id)); sel.appendChild(o); });
+      }
+      if (scopeSel) scopeSel.addEventListener('change', populatePicker);
+      populatePicker();
+      function esc(s) { return (s || '').replace(/[<>&]/g, ''); }
+      function renderTourSel() {
+        tourSel.innerHTML = '';
+        TOURS.forEach(function (t, i) { var o = document.createElement('option'); o.value = i; o.textContent = t.name || ('Tour ' + (i + 1)); if (i === cur) o.selected = true; tourSel.appendChild(o); });
+        if (nameInp) nameInp.value = (TOURS[cur] && TOURS[cur].name) || '';
+      }
+      function stops() { return TOURS[cur].stops; }
+      function render() {
+        renderTourSel();
+        list.innerHTML = '';
+        stops().forEach(function (s, i) {
+          var row = document.createElement('div'); row.className = 'border rounded p-2 mb-2'; row.draggable = true; row.dataset.idx = i; row.style.cursor = 'grab';
+          row.innerHTML = '<div class="d-flex justify-content-between"><strong><i class="fas fa-grip-vertical text-muted me-1" title="{{ __('Drag to reorder') }}"></i>' + (i + 1) + '. ' + esc(titleFor(s.io_id)) + '</strong>' +
+            '<span><button type="button" class="btn btn-sm btn-link p-0 me-1" data-up="' + i + '">&uarr;</button>' +
+            '<button type="button" class="btn btn-sm btn-link p-0 me-1" data-down="' + i + '">&darr;</button>' +
+            '<button type="button" class="btn btn-sm btn-link text-danger p-0" data-del="' + i + '">&times;</button></span></div>' +
+            '<textarea class="form-control form-control-sm mt-1" rows="2" data-narr="' + i + '" placeholder="{{ __('What the guide says...') }}"></textarea>' +
+            '<div class="input-group input-group-sm mt-1"><span class="input-group-text">{{ __('Dwell s') }}</span>' +
+            '<input type="number" class="form-control" min="2" max="60" value="' + (s.dwell || 6) + '" data-dwell="' + i + '">' +
+            '<button type="button" class="btn btn-outline-secondary" data-ai="' + i + '" title="{{ __('AI draft narration') }}"><i class="fas fa-wand-magic-sparkles"></i></button></div>' +
+            '<div class="input-group input-group-sm mt-1"><span class="input-group-text" title="{{ __('Pre-recorded narration clip (plays instead of text-to-speech)') }}"><i class="fas fa-microphone-lines"></i></span>' +
+            '<input type="file" accept="audio/*" class="form-control" data-audiofile="' + i + '">' +
+            (s.audio ? '<button type="button" class="btn btn-outline-danger" data-audiodel="' + i + '" title="{{ __('Remove audio clip') }}"><i class="fas fa-times"></i></button>' : '') +
+            '</div>' +
+            (s.audio ? '<div class="small text-success mt-1" data-audiostatus="' + i + '"><i class="fas fa-check me-1"></i>{{ __('Audio attached - plays instead of TTS') }}</div>' : '');
+          list.appendChild(row);
+          row.querySelector('[data-narr]').value = s.narration || '';
+        });
+        renderRoomOrder();
+        if (typeof window.__exhibDrawRoute === 'function') window.__exhibDrawRoute();   // keep the plan route line in sync
+      }
+      // Drag-to-reorder stops (in addition to the up/down buttons).
+      var dragFrom = null;
+      list.addEventListener('dragstart', function (e) {
+        var row = e.target.closest('[data-idx]'); if (!row) return;
+        dragFrom = +row.dataset.idx; if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+      });
+      list.addEventListener('dragover', function (e) { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; });
+      list.addEventListener('drop', function (e) {
+        e.preventDefault();
+        var row = e.target.closest('[data-idx]'); if (!row || dragFrom === null) { dragFrom = null; return; }
+        var to = +row.dataset.idx;
+        if (to !== dragFrom) { var st = stops(); var moved = st.splice(dragFrom, 1)[0]; st.splice(to, 0, moved); render(); }
+        dragFrom = null;
+      });
+      list.addEventListener('input', function (e) {
+        var n = e.target.getAttribute('data-narr'), d = e.target.getAttribute('data-dwell');
+        if (n !== null) stops()[+n].narration = e.target.value;
+        if (d !== null) stops()[+d].dwell = +e.target.value;
+      });
+      // Per-stop narration audio upload (file inputs fire 'change', not 'input').
+      list.addEventListener('change', function (e) {
+        var fi = e.target.getAttribute('data-audiofile');
+        if (fi === null || !e.target.files || !e.target.files[0]) return;
+        var idx = +fi, fd = new FormData(); fd.append('audio', e.target.files[0]);
+        var statusRow = list.querySelector('[data-audiostatus="' + idx + '"]');
+        if (statusRow) statusRow.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>{{ __('Uploading...') }}';
+        fetch(URLS.tourAudio, { method: 'POST', headers: { 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: fd })
+          .then(function (r) { return r.json(); })
+          .then(function (d) { if (d && d.ok && d.path) { stops()[idx].audio = d.path; render(); } else { alert('{{ __('Audio upload failed.') }}'); } })
+          .catch(function () { alert('{{ __('Audio upload failed.') }}'); });
+      });
+      list.addEventListener('click', function (e) {
+        var st = stops();
+        var up = e.target.getAttribute('data-up'), dn = e.target.getAttribute('data-down'), del = e.target.getAttribute('data-del'), ai = e.target.closest('[data-ai]');
+        var adel = e.target.closest('[data-audiodel]');
+        if (adel) { st[+adel.getAttribute('data-audiodel')].audio = ''; render(); return; }
+        if (del !== null) { st.splice(+del, 1); render(); }
+        else if (up !== null && +up > 0) { var t = st[+up]; st[+up] = st[+up - 1]; st[+up - 1] = t; render(); }
+        else if (dn !== null && +dn < st.length - 1) { var t2 = st[+dn]; st[+dn] = st[+dn + 1]; st[+dn + 1] = t2; render(); }
+        else if (ai) {
+          var idx = +ai.getAttribute('data-ai'), io = st[idx].io_id; ai.disabled = true;
+          fetch('/exhibition-space/object/' + io + '/describe', { headers: { 'Accept': 'application/json' } })
+            .then(function (r) { return r.json(); }).then(function (d) { if (d && d.description) { st[idx].narration = d.description; render(); } ai.disabled = false; })
+            .catch(function () { ai.disabled = false; });
+        }
+      });
+      tourSel.addEventListener('change', function () { cur = +tourSel.value || 0; render(); });
+      if (nameInp) nameInp.addEventListener('input', function () { TOURS[cur].name = nameInp.value; var o = tourSel.options[cur]; if (o) o.textContent = nameInp.value || ('Tour ' + (cur + 1)); });
+      document.getElementById('gtNewTourBtn').addEventListener('click', function () { TOURS.push({ name: 'Tour ' + (TOURS.length + 1), stops: [] }); cur = TOURS.length - 1; render(); });
+      document.getElementById('gtDelTourBtn').addEventListener('click', function () { if (TOURS.length <= 1) { TOURS[0] = { name: 'Tour 1', stops: [] }; } else { TOURS.splice(cur, 1); } cur = 0; render(); });
+      document.getElementById('gtAddBtn').addEventListener('click', function () {
+        var io = +sel.value; if (!io) return;
+        if (stops().some(function (s) { return s.io_id === io; })) { alert('{{ __('That object is already in this tour. Pick another from the list.') }}'); return; }
+        stops().push({ io_id: io, narration: '', dwell: 6 });
+        var used = {}; stops().forEach(function (s) { used[s.io_id] = 1; });   // jump the picker to the next unused object
+        for (var oi = 0; oi < sel.options.length; oi++) { if (!used[+sel.options[oi].value]) { sel.selectedIndex = oi; break; } }
+        render();
+      });
+      function saveTours() {
+        return fetch(URLS.guidedTour, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF, 'Accept': 'application/json' }, body: JSON.stringify({ tours: TOURS }) });
+      }
+      document.getElementById('gtSaveBtn').addEventListener('click', function () {
+        saveTours().then(function (r) { return r.json(); }).then(function () { var m = document.getElementById('gtSaveMsg'); m.textContent = ' {{ __('Saved') }}'; setTimeout(function () { m.textContent = ''; }, 2000); });
+      });
+      // Preview: save first so the walkthrough plays the latest edits, then open it + autoplay this tour.
+      var previewBtn = document.getElementById('gtPreviewBtn');
+      if (previewBtn) previewBtn.addEventListener('click', function () {
+        saveTours().then(function () { window.open(URLS.walkthrough + '?tour=' + cur, '_blank'); })
+          .catch(function () { window.open(URLS.walkthrough + '?tour=' + cur, '_blank'); });
+      });
+
+      // ---- Bridge to the plan canvas for visual route building (Pass 2) ----
+      // The Konva stage (separate scope) calls these via window to read the
+      // current tour's stops and to add a stop when an object is clicked in
+      // route mode; render() calls window.__exhibDrawRoute() to redraw the line.
+      window.__exhibStops = function () { return stops().map(function (s) { return s.io_id; }); };
+      window.__exhibAddStop = function (io) {
+        io = +io; if (!io) return;
+        if (stops().some(function (s) { return s.io_id === io; })) return;   // already a stop
+        stops().push({ io_id: io, narration: '', dwell: 6 });
+        render();
+      };
+      var routeChk = document.getElementById('gtRouteMode');
+      if (routeChk) routeChk.addEventListener('change', function () {
+        window.__exhibRouteMode = routeChk.checked;
+        if (typeof window.__exhibDrawRoute === 'function') window.__exhibDrawRoute();
+      });
+
+      render();
+    })();
+  })();
+  </script>
+@endsection

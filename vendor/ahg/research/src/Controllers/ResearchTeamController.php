@@ -1,0 +1,294 @@
+<?php
+
+/**
+ * ResearchTeamController - Heratio ahg-research
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace AhgResearch\Controllers;
+
+use AhgResearch\Concerns\AuthorizesProjectAccess;
+use AhgResearch\Concerns\LogsResearchActivity;
+use AhgResearch\Services\ResearchService;
+use AhgResearch\Services\ResearchTeamService;
+use Illuminate\Http\Request;
+use Illuminate\Routing\Controller;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Validation\ValidationException;
+use AhgResearch\Controllers\Concerns\RendersResearchSidebar;
+use AhgResearch\Controllers\Concerns\ResolvesResearchProject;
+use AhgResearch\Controllers\Concerns\ResolvesProjectContext;
+
+/**
+ * heratio#1222 - Research OS: Research Team & Collaborators register.
+ *
+ * List / create / edit / show / delete the people on a research project (name,
+ * role, affiliation, email, ORCID), show a per-project summary (counts by role,
+ * leads highlighted), and export the project's team as a machine-readable .json
+ * document. The ORCID is rendered as a link to https://orcid.org/{orcid} - never
+ * fetched. Role is informed by the international CRediT taxonomy; the detailed
+ * contribution stays free text.
+ *
+ * Self-contained: resolves project + researcher locally, mirroring
+ * ResearchFundingController, never edits getSidebarData. Every action is
+ * empty-state safe and degrades cleanly when the slice is not installed. This is
+ * the broader contributor register, NOT a replacement for the project owner.
+ */
+class ResearchTeamController extends Controller
+{
+    use ResolvesProjectContext;
+
+    use ResolvesResearchProject;
+
+    use RendersResearchSidebar;
+
+    use LogsResearchActivity;
+    use AuthorizesProjectAccess;
+
+    public function __construct(
+        private ResearchTeamService $team,
+        private ResearchService $research,
+    ) {}
+
+    /** Team members on a project + per-project summary. */
+    public function index(int $projectId)
+    {
+        if (! Auth::check()) {
+            return redirect()->route('login');
+        }
+        [$project] = $this->projectContext($projectId);
+
+        $members       = $this->team->listMembers($projectId);
+        $summary       = $this->team->summary($projectId);
+        $roleOptions   = $this->team->roleOptions();
+        $statusOptions = $this->team->statusOptions();
+
+        // Pre-compute each member's ORCID resolver URL for the list.
+        $orcidUrls = [];
+        foreach ($members as $m) {
+            $orcidUrls[$m['id']] = $m['orcid'] !== '' ? $this->team->orcidUrl($m['orcid']) : null;
+        }
+
+        return view('research::team.index', array_merge(
+            $this->sidebar('projects'),
+            compact('project', 'members', 'summary', 'roleOptions', 'statusOptions', 'orcidUrls')
+        ));
+    }
+
+    /** New-member form. */
+    public function create(int $projectId)
+    {
+        if (! Auth::check()) {
+            return redirect()->route('login');
+        }
+        [$project] = $this->projectContext($projectId);
+
+        $member        = null;
+        $roleOptions   = $this->team->roleOptions();
+        $statusOptions = $this->team->statusOptions();
+
+        return view('research::team.edit', array_merge(
+            $this->sidebar('projects'),
+            compact('project', 'member', 'roleOptions', 'statusOptions')
+        ));
+    }
+
+    /** Persist a new team member. */
+    public function store(Request $request, int $projectId)
+    {
+        if (! Auth::check()) {
+            return redirect()->route('login');
+        }
+        [$project, $researcher] = $this->projectContext($projectId);
+
+        $data = $this->validateMember($request);
+
+        $id = $this->team->createMember($projectId, $researcher ? (int) $researcher->id : null, $data);
+
+        if (! $id) {
+            return redirect()->route('research.team.index', $projectId)
+                ->with('error', 'Could not add the team member. Please try again.');
+        }
+
+        $this->logResearchActivity('create', 'team', (int) $id, $data['person_name'] ?? null, ['method' => 'ResearchTeamController@store'], $projectId);
+
+        return redirect()->route('research.team.show', [$projectId, $id])
+            ->with('success', 'Team member saved.');
+    }
+
+    /** Edit-member form. */
+    public function edit(int $projectId, int $memberId)
+    {
+        if (! Auth::check()) {
+            return redirect()->route('login');
+        }
+        [$project] = $this->projectContext($projectId);
+
+        $member = $this->team->getMember($memberId, $projectId);
+        if (! $member) {
+            return redirect()->route('research.team.index', $projectId)
+                ->with('error', 'Team member not found.');
+        }
+
+        $roleOptions   = $this->team->roleOptions();
+        $statusOptions = $this->team->statusOptions();
+
+        return view('research::team.edit', array_merge(
+            $this->sidebar('projects'),
+            compact('project', 'member', 'roleOptions', 'statusOptions')
+        ));
+    }
+
+    /** Persist edits to a team member. */
+    public function update(Request $request, int $projectId, int $memberId)
+    {
+        if (! Auth::check()) {
+            return redirect()->route('login');
+        }
+        $this->projectContext($projectId);
+
+        $existing = $this->team->getMember($memberId, $projectId);
+        if (! $existing) {
+            return redirect()->route('research.team.index', $projectId)
+                ->with('error', 'Team member not found.');
+        }
+
+        $data = $this->validateMember($request);
+
+        $ok = $this->team->updateMember($memberId, $projectId, $data);
+
+        if (! $ok) {
+            return redirect()->route('research.team.index', $projectId)
+                ->with('error', 'Could not save the team member.');
+        }
+
+        $this->logResearchActivity('update', 'team', $memberId, $data['person_name'] ?? null, ['method' => 'ResearchTeamController@update'], $projectId);
+
+        return redirect()->route('research.team.show', [$projectId, $memberId])
+            ->with('success', 'Team member saved.');
+    }
+
+    /** Read-only member detail. */
+    public function show(int $projectId, int $memberId)
+    {
+        if (! Auth::check()) {
+            return redirect()->route('login');
+        }
+        [$project] = $this->projectContext($projectId);
+
+        $member = $this->team->getMember($memberId, $projectId);
+        if (! $member) {
+            return redirect()->route('research.team.index', $projectId)
+                ->with('error', 'Team member not found.');
+        }
+
+        $roleOptions   = $this->team->roleOptions();
+        $statusOptions = $this->team->statusOptions();
+        $orcidUrl      = $member['orcid'] !== '' ? $this->team->orcidUrl($member['orcid']) : null;
+
+        return view('research::team.show', array_merge(
+            $this->sidebar('projects'),
+            compact('project', 'member', 'roleOptions', 'statusOptions', 'orcidUrl')
+        ));
+    }
+
+    /** Delete a team member. */
+    public function destroy(int $projectId, int $memberId)
+    {
+        if (! Auth::check()) {
+            return redirect()->route('login');
+        }
+        $this->projectContext($projectId);
+
+        $ok = $this->team->deleteMember($memberId, $projectId);
+
+        if ($ok) {
+            $this->logResearchActivity('delete', 'team', $memberId, null, ['method' => 'ResearchTeamController@destroy'], $projectId);
+        }
+
+        return redirect()->route('research.team.index', $projectId)
+            ->with($ok ? 'success' : 'error', $ok ? 'Team member removed.' : 'Could not remove the member.');
+    }
+
+    /**
+     * Machine-readable export of the project's team. Returns a downloadable JSON
+     * document - each member with role, affiliation, ORCID (bare iD + resolvable
+     * URL) and contribution, plus a summary with counts by role and the leads.
+     */
+    public function exportJson(int $projectId)
+    {
+        if (! Auth::check()) {
+            return response()->json(['error' => 'Authentication required.'], 401);
+        }
+        [$project] = $this->projectContext($projectId);
+
+        $members = $this->team->listMembers($projectId);
+        $payload = $this->team->buildExport($members, $project);
+
+        $filename = 'research-team-project-' . $projectId . '.json';
+
+        return response()->json($payload, 200, [
+            'Content-Disposition' => 'attachment; filename="' . $filename . '"',
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    }
+
+    // ---------------------------------------------------------------------
+    // Validation
+    // ---------------------------------------------------------------------
+
+    /** @return array<string,mixed> */
+    private function validateMember(Request $request): array
+    {
+        $data = $request->validate([
+            'person_name'       => 'required|string|max:512',
+            'role'              => 'required|string|max:32',
+            'affiliation'       => 'nullable|string|max:512',
+            'email'             => 'nullable|email|max:255',
+            'orcid'             => 'nullable|string|max:64',
+            'is_lead'           => 'nullable|boolean',
+            'contribution_note' => 'nullable|string|max:65000',
+            'start_date'        => 'nullable|date',
+            'end_date'          => 'nullable|date|after_or_equal:start_date',
+            'status'            => 'required|string|max:32',
+        ]);
+
+        // ORCID is validated by format only - never by an external lookup. A blank
+        // value is allowed; a non-blank value must normalise to a canonical iD.
+        if (! $this->team->isValidOrcid($data['orcid'] ?? null)) {
+            throw ValidationException::withMessages([
+                'orcid' => __('Enter a valid ORCID iD in the form 0000-0000-0000-0000 (the last character may be X), or leave it blank.'),
+            ]);
+        }
+
+        $data['is_lead'] = $request->boolean('is_lead');
+
+        return $data;
+    }
+
+    // ---------------------------------------------------------------------
+    // Helpers (self-contained; getSidebarData is NOT used or edited)
+    // ---------------------------------------------------------------------
+
+
+
+}

@@ -1,0 +1,141 @@
+{{--
+  Copyright (C) 2026 Johan Pieterse
+  Plain Sailing Information Systems
+  Email: johan@plainsailingisystems.co.za
+
+  This file is part of Heratio.
+
+  Heratio is free software: you can redistribute it and/or modify
+  it under the terms of the GNU Affero General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+--}}
+@extends('theme::layouts.1col')
+
+@section('title', 'Edit Processing Activity')
+
+@section('content')
+<div class="container-fluid">
+    <div class="row mb-4">
+        <div class="col">
+            <nav aria-label="{{ __('breadcrumb') }}">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{{ route('ahgcdpa.index') }}">CDPA</a></li>
+                    <li class="breadcrumb-item"><a href="{{ route('ahgcdpa.processing') }}">{{ __('Processing') }}</a></li>
+                    <li class="breadcrumb-item active">{{ __('Edit Activity') }}</li>
+                </ol>
+            </nav>
+            <h1><i class="fas fa-cogs me-2"></i>{{ __('Edit Processing Activity') }}</h1>
+        </div>
+    </div>
+
+    <form method="post" class="row g-4" autocomplete="off">
+        @csrf
+        <div class="col-lg-8">
+            <div class="card mb-4">
+                <div class="card-header"><h5 class="mb-0">{{ __('Activity Details') }}</h5></div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-8">
+                            <label class="form-label">{{ __('Activity Name') }} <span class="text-danger">*</span></label>
+                            <input type="text" name="name" class="form-control" autocomplete="off" value="{{ $activity->name ?? '' }}" required>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">{{ __('Category') }}</label>
+                            <select name="category" class="form-select">
+                                <option value="">{{ __('Select...') }}</option>
+                                <option value="hr" {{ ($activity->category ?? '') === 'hr' ? 'selected' : '' }}>{{ __('HR/Employment') }}</option>
+                                <option value="customer" {{ ($activity->category ?? '') === 'customer' ? 'selected' : '' }}>{{ __('Customer Data') }}</option>
+                                <option value="marketing" {{ ($activity->category ?? '') === 'marketing' ? 'selected' : '' }}>{{ __('Marketing') }}</option>
+                                <option value="research" {{ ($activity->category ?? '') === 'research' ? 'selected' : '' }}>{{ __('Research') }}</option>
+                                <option value="operations" {{ ($activity->category ?? '') === 'operations' ? 'selected' : '' }}>{{ __('Operations') }}</option>
+                                <option value="archive" {{ ($activity->category ?? '') === 'archive' ? 'selected' : '' }}>{{ __('Archives') }}</option>
+                                <option value="other" {{ ($activity->category ?? '') === 'other' ? 'selected' : '' }}>{{ __('Other') }}</option>
+                            </select>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">{{ __('Data Types Processed') }}</label>
+                            <input type="text" name="data_types" class="form-control" value="{{ $activity->data_types ?? '' }}">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">{{ __('Purpose of Processing') }} <span class="text-danger">*</span></label>
+                            <textarea name="purpose" class="form-control" rows="3" required>{{ $activity->purpose ?? '' }}</textarea>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">{{ __('Legal Basis') }} <span class="text-danger">*</span></label>
+                            <select name="legal_basis" class="form-select" required>
+                                <option value="">{{ __('Select...') }}</option>
+                                <option value="consent" {{ ($activity->legal_basis ?? '') === 'consent' ? 'selected' : '' }}>{{ __('Consent') }}</option>
+                                <option value="contract" {{ ($activity->legal_basis ?? '') === 'contract' ? 'selected' : '' }}>{{ __('Contractual Necessity') }}</option>
+                                <option value="legal_obligation" {{ ($activity->legal_basis ?? '') === 'legal_obligation' ? 'selected' : '' }}>{{ __('Legal Obligation') }}</option>
+                                <option value="vital_interest" {{ ($activity->legal_basis ?? '') === 'vital_interest' ? 'selected' : '' }}>{{ __('Vital Interest') }}</option>
+                                <option value="public_interest" {{ ($activity->legal_basis ?? '') === 'public_interest' ? 'selected' : '' }}>{{ __('Public Interest') }}</option>
+                                <option value="legitimate_interest" {{ ($activity->legal_basis ?? '') === 'legitimate_interest' ? 'selected' : '' }}>{{ __('Legitimate Interest') }}</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">{{ __('Retention Period') }}</label>
+                            <input type="text" name="retention_period" class="form-control" value="{{ $activity->retention_period ?? '' }}">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mb-4">
+                <div class="card-header"><h5 class="mb-0">{{ __('Storage & Security') }}</h5></div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">{{ __('Storage Location') }}</label>
+                            <input type="text" name="storage_location" class="form-control" value="{{ $activity->storage_location ?? '' }}">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">{{ __('Security Safeguards') }}</label>
+                            <textarea name="safeguards" class="form-control" rows="2">{{ $activity->safeguards ?? '' }}</textarea>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><h5 class="mb-0">{{ __('Special Categories') }}</h5></div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="cross_border" id="cross_border" {{ ($activity->cross_border ?? false) ? 'checked' : '' }}>
+                                <label class="form-check-label" for="cross_border">{{ __('Cross-border transfer') }}</label>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="children_data" id="children_data" {{ ($activity->children_data ?? false) ? 'checked' : '' }}>
+                                <label class="form-check-label" for="children_data">{{ __("Children's data") }}</label>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="biometric_data" id="biometric_data" {{ ($activity->biometric_data ?? false) ? 'checked' : '' }}>
+                                <label class="form-check-label" for="biometric_data">{{ __('Biometric data') }}</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-4">
+            <div class="card">
+                <div class="card-body d-grid gap-2">
+                    <button type="submit" class="btn btn-primary btn-lg">
+                        <i class="fas fa-save me-2"></i>{{ __('Save Changes') }}
+                    </button>
+                    <a href="{{ route('ahgcdpa.processing') }}" class="btn btn-outline-secondary">
+                        {{ __('Cancel') }}
+                    </a>
+                </div>
+            </div>
+        </div>
+    </form>
+</div>
+@endsection

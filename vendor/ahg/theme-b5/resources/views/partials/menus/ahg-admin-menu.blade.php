@@ -1,0 +1,275 @@
+@php
+  $plugins = $themeData['enabledPluginMap'] ?? [];
+
+  // Pending-count badges for menu items
+  $pendingResearchers = 0;
+  $pendingBookings = 0;
+  $pendingReview = 0;
+  $pendingDuplicates = 0;
+  $pendingDoi = 0;
+  try {
+      if (\Illuminate\Support\Facades\Schema::hasTable('research_researcher')) {
+          $pendingResearchers = \Illuminate\Support\Facades\DB::table('research_researcher')->where('status', 'pending')->count();
+      }
+  } catch (\Throwable $e) {}
+  try {
+      if (\Illuminate\Support\Facades\Schema::hasTable('research_booking')) {
+          $pendingBookings = \Illuminate\Support\Facades\DB::table('research_booking')->where('status', 'pending')->count();
+      }
+  } catch (\Throwable $e) {}
+  try {
+      if (\Illuminate\Support\Facades\Schema::hasTable('researcher_submission')) {
+          $pendingReview = \Illuminate\Support\Facades\DB::table('researcher_submission')->whereIn('status', ['submitted', 'under_review'])->count();
+      }
+  } catch (\Throwable $e) {}
+  try {
+      if (\Illuminate\Support\Facades\Schema::hasTable('ahg_duplicate_detection')) {
+          $pendingDuplicates = \Illuminate\Support\Facades\DB::table('ahg_duplicate_detection')->where('status', 'pending')->count();
+      }
+  } catch (\Throwable $e) {}
+  try {
+      if (\Illuminate\Support\Facades\Schema::hasTable('ahg_doi_queue')) {
+          $pendingDoi = \Illuminate\Support\Facades\DB::table('ahg_doi_queue')->where('status', 'pending')->count();
+      }
+  } catch (\Throwable $e) {}
+@endphp
+
+{{-- AHG Plugins menu (admin only) --}}
+<li class="nav-item dropdown d-flex flex-column">
+  <a class="nav-link dropdown-toggle d-flex align-items-center p-0" href="#" id="ahg-admin-menu" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+    <i class="fas fa-2x fa-fw fa-cubes px-0 px-lg-2 py-2" data-bs-toggle="tooltip" data-bs-placement="bottom" data-bs-custom-class="d-none d-lg-block" title="{{ __('AHG Plugins') }}" aria-hidden="true"></i>
+    <span class="d-lg-none mx-1" aria-hidden="true">{{ __('AHG Plugins') }}</span>
+    <span class="visually-hidden">{{ __('AHG Plugins') }}</span>
+  </a>
+  <ul class="dropdown-menu dropdown-menu-end mb-2" aria-labelledby="ahg-admin-menu" style="max-height: 80vh; overflow-y: auto;">
+    <li><h6 class="dropdown-header">{{ __('AHG Plugins') }}</h6></li>
+
+    {{-- Settings --}}
+    <li><a class="dropdown-item" href="{{ route('settings.index') }}"><i class="fas fa-cog me-2"></i>{{ __('AHG Settings') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('dropdown.index') }}"><i class="fas fa-list me-2"></i>{{ __('Dropdown Manager') }}</a></li>
+
+    {{-- Articles / Blog (demo site only) --}}
+    @php
+      $blogEnabled = (config('heratio.homepage_mode')
+          ?: (in_array(request()->getHost(), ['heratio.org', 'www.heratio.org', 'heratio.theahg.co.za'], true) ? 'marketing' : 'institutional')) === 'marketing';
+    @endphp
+    @if($blogEnabled)
+      <li><a class="dropdown-item" href="{{ route('admin.articles.index') }}"><i class="fas fa-newspaper me-2"></i>{{ __('Articles / Blog') }}</a></li>
+    @endif
+
+    {{-- Translation --}}
+    @php
+      $pendingDrafts = 0;
+      try {
+          if (\Illuminate\Support\Facades\Schema::hasTable('ahg_translation_draft')) {
+              $pendingDrafts = \Illuminate\Support\Facades\DB::table('ahg_translation_draft')->where('status', 'draft')->count();
+          }
+      } catch (\Throwable $e) {}
+    @endphp
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Translation') }}</h6></li>
+    <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="{{ route('ahgtranslation.drafts') }}">
+      <span><i class="fas fa-language me-2"></i>{{ __('Translation drafts') }}</span>
+      @if($pendingDrafts > 0)
+        <span class="badge bg-warning text-dark rounded-pill">{{ $pendingDrafts }}</span>
+      @endif
+    </a></li>
+    <li><a class="dropdown-item" href="{{ route('ahgtranslation.languages') }}"><i class="fas fa-globe me-2"></i>{{ __('Languages') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('ahgtranslation.strings') }}"><i class="fas fa-pen-fancy me-2"></i>{{ __('UI strings') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('ahgtranslation.settings') }}"><i class="fas fa-cog me-2"></i>{{ __('Translation settings') }}</a></li>
+
+    {{-- Security --}}
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Security') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ route('acl.clearances') }}"><i class="fas fa-user-lock me-2"></i>{{ __('Clearances') }}</a></li>
+
+    {{-- Research --}}
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Research') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ url('/research/dashboard') }}"><i class="fas fa-book-reader me-2"></i>{{ __('Dashboard') }}</a></li>
+    @if(Route::has('research.copilot'))
+      <li><a class="dropdown-item" href="{{ route('research.copilot') }}"><i class="fas fa-user-graduate me-2"></i>{{ __('Research Copilot') }}</a></li>
+    @endif
+    <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="{{ url('/research/researchers') }}">
+      <span><i class="fas fa-user-graduate me-2"></i>{{ __('Researchers') }}</span>
+      @if($pendingResearchers > 0)
+        <span class="badge bg-warning text-dark rounded-pill">{{ $pendingResearchers }}</span>
+      @endif
+    </a></li>
+    <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="{{ url('/research/bookings') }}">
+      <span><i class="fas fa-calendar-check me-2"></i>{{ __('Bookings') }}</span>
+      @if($pendingBookings > 0)
+        <span class="badge bg-danger rounded-pill">{{ $pendingBookings }}</span>
+      @endif
+    </a></li>
+    <li><a class="dropdown-item" href="{{ url('/research/rooms') }}"><i class="fas fa-book-reader me-2"></i>{{ __('Rooms') }}</a></li>
+
+    {{-- Researcher Submissions --}}
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Researcher Submissions') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ route('researcher.dashboard') }}"><i class="fas fa-tachometer-alt me-2"></i>{{ __('Dashboard') }}</a></li>
+    <li><a class="dropdown-item d-flex justify-content-between align-items-center" href="{{ route('researcher.pending') }}">
+      <span><i class="fas fa-clock me-2"></i>{{ __('Pending Review') }}</span>
+      @if($pendingReview > 0)
+        <span class="badge bg-warning text-dark rounded-pill">{{ $pendingReview }}</span>
+      @endif
+    </a></li>
+    <li><a class="dropdown-item" href="{{ route('researcher.import') }}"><i class="fas fa-file-import me-2"></i>{{ __('Import Exchange') }}</a></li>
+
+    {{-- Access --}}
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Access') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ route('acl.access-requests') }}"><i class="fas fa-key me-2"></i>{{ __('Requests') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('acl.approvers') }}"><i class="fas fa-user-check me-2"></i>{{ __('Approvers') }}</a></li>
+
+    {{-- Audit --}}
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Audit') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ route('audit.statistics') }}"><i class="fas fa-chart-bar me-2"></i>{{ __('Statistics') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('acl.audit-log') }}"><i class="fas fa-history me-2"></i>{{ __('Logs') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('audit.settings') }}"><i class="fas fa-cog me-2"></i>{{ __('Settings') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('settings.error-log') }}"><i class="fas fa-exclamation-triangle me-2"></i>{{ __('Error Log') }}</a></li>
+
+    {{-- RiC (gated by ahgRicExplorerPlugin) --}}
+    @if(\AhgCore\Services\MenuService::isPluginEnabled('ahgRicExplorerPlugin'))
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('RiC') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ route('ric.index') }}"><i class="fas fa-sitemap me-2"></i>{{ __('RiC Dashboard') }}</a></li>
+    @if(Route::has('ric.connections'))
+    <li><a class="dropdown-item" href="{{ route('ric.connections') }}"><i class="fas fa-diagram-project me-2"></i>{{ __('Cross-collection Connections') }}</a></li>
+    @endif
+    @if(Route::has('ric.explorer'))
+    <li><a class="dropdown-item" href="{{ route('ric.explorer') }}"><i class="fas fa-project-diagram me-2"></i>{{ __('Graph Explorer') }}</a></li>
+    @endif
+    @if(Route::has('ric.places.browse') || Route::has('ric.activities.browse') || Route::has('ric.rules.browse') || Route::has('ric.instantiations.browse'))
+    <li><h6 class="dropdown-header small text-muted ps-3">{{ __('RiC Entities') }}</h6></li>
+    @if(Route::has('ric.places.browse'))
+    <li><a class="dropdown-item" href="{{ route('ric.places.browse') }}"><i class="fas fa-map-marker-alt me-2"></i>{{ __('Places') }}</a></li>
+    @endif
+    @if(Route::has('ric.activities.browse'))
+    <li><a class="dropdown-item" href="{{ route('ric.activities.browse') }}"><i class="fas fa-running me-2"></i>{{ __('Activities') }}</a></li>
+    @endif
+    @if(Route::has('ric.rules.browse'))
+    <li><a class="dropdown-item" href="{{ route('ric.rules.browse') }}"><i class="fas fa-gavel me-2"></i>{{ __('Mandates & Rules') }}</a></li>
+    @endif
+    @if(Route::has('ric.instantiations.browse'))
+    <li><a class="dropdown-item" href="{{ route('ric.instantiations.browse') }}"><i class="fas fa-copy me-2"></i>{{ __('Instantiations') }}</a></li>
+    @endif
+    @endif
+    <li><a class="dropdown-item" href="{{ route('ric.import') }}"><i class="fas fa-file-import me-2"></i>{{ __('RDF Import (TTL/JSON-LD/RDF-XML)') }}</a></li>
+    @endif
+
+    {{-- Data Quality (Data Migration gated by ahgDataMigrationPlugin; Dedupe always shown) --}}
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Data Quality') }}</h6></li>
+    @if(\AhgCore\Services\MenuService::isPluginEnabled('ahgDataMigrationPlugin'))
+    <li><a class="dropdown-item" href="{{ route('data-migration.index') }}"><i class="fas fa-exchange-alt me-2"></i>{{ __('Data Migration') }}</a></li>
+    @endif
+    <li><a class="dropdown-item" href="{{ route('dedupe.index') }}"><i class="fas fa-clone me-2"></i>{{ __('Duplicate Detection') }}</a></li>
+
+    {{-- Data Entry --}}
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Data Entry') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ url('/admin/formTemplates') }}"><i class="fas fa-wpforms me-2"></i>{{ __('Form Templates') }}</a></li>
+
+    {{-- Media --}}
+    @if(Route::has('pointclouds.index'))
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Media') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ route('pointclouds.index') }}"><i class="fas fa-cubes me-2"></i>{{ __('Point clouds') }}</a></li>
+    @endif
+    {{-- Gaussian splats have no standalone manager: they upload as digital objects (Link digital object) and render on the record. --}}
+
+    {{-- DOI Management --}}
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('DOI Management') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ route('doi.index') }}"><i class="fas fa-fingerprint me-2"></i>{{ __('DOI Dashboard') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('doi.queue') }}"><i class="fas fa-stream me-2"></i>{{ __('Minting Queue') }}</a></li>
+
+    {{-- Heritage (gated by ahgHeritageAccountingPlugin) --}}
+    @if(\AhgCore\Services\MenuService::isPluginEnabled('ahgHeritageAccountingPlugin'))
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Heritage') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ route('heritage.admin') }}"><i class="fas fa-landmark me-2"></i>{{ __('Admin') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('heritage.analytics') }}"><i class="fas fa-chart-line me-2"></i>{{ __('Analytics') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('heritage.custodian') }}"><i class="fas fa-hands me-2"></i>{{ __('Custodian') }}</a></li>
+    @endif
+
+    {{-- Storage (gated by ahg_strongroom table existence - ahg-storage-manage feature) --}}
+    @php
+      $hasStrongrooms = false;
+      try {
+          $hasStrongrooms = \Illuminate\Support\Facades\Schema::hasTable('ahg_strongroom');
+      } catch (\Throwable $e) {}
+    @endphp
+    @if($hasStrongrooms)
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Storage') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ route('strongroom.browse') }}"><i class="fas fa-warehouse me-2"></i>{{ __('Strongrooms') }}</a></li>
+    {{-- heratio#1514 - hierarchical storage locations (same package; gated on its own table) --}}
+    @if(\Illuminate\Support\Facades\Schema::hasTable('ahg_storage_location'))
+    <li><a class="dropdown-item" href="{{ route('storagelocation.browse') }}"><i class="fas fa-sitemap me-2"></i>{{ __('Storage locations') }}</a></li>
+    @endif
+    @endif
+
+    {{-- heratio#146 - front-of-house exhibition spaces (gated by ahg_exhibition_space table) --}}
+    @php
+      $hasExhibitionSpace = false;
+      try {
+          $hasExhibitionSpace = \Illuminate\Support\Facades\Schema::hasTable('ahg_exhibition_space');
+      } catch (\Throwable $e) {}
+    @endphp
+    @if($hasExhibitionSpace)
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Exhibition spaces') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ route('exhibition-space.browse') }}"><i class="fas fa-palette me-2"></i>{{ __('Exhibition spaces') }}</a></li>
+    @if(Route::has('exhibition-space.generate'))
+      <li><a class="dropdown-item" href="{{ route('exhibition-space.generate') }}"><i class="fas fa-wand-magic-sparkles me-2"></i>{{ __('AI Exhibition Designer') }}</a></li>
+    @endif
+    @if(Route::has('stories.index'))
+      <li><a class="dropdown-item" href="{{ route('stories.index') }}"><i class="fas fa-feather-pointed me-2"></i>{{ __('Story Generator') }}</a></li>
+    @endif
+    @if(Route::has('ahgprivacy.autopilot'))
+      <li><a class="dropdown-item" href="{{ route('ahgprivacy.autopilot') }}"><i class="fas fa-robot me-2"></i>{{ __('Compliance Autopilot') }}</a></li>
+    @endif
+    @endif
+
+    {{-- Artwork placement (#1459) - staff requests to place works in offices/shared spaces. --}}
+    @if(Route::has('artwork-request.review'))
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Artwork placement') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ route('artwork-request.review') }}"><i class="fas fa-clipboard-check me-2"></i>{{ __('Review queue') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('artwork-request.placements') }}"><i class="fas fa-map-marker-alt me-2"></i>{{ __('Out on campus') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('artwork-request.approvers') }}"><i class="fas fa-user-check me-2"></i>{{ __('Approvers') }}</a></li>
+    @endif
+
+    {{-- Workflow (gated by ahg_workflow table existence - ahg-workflow feature, heratio#143) --}}
+    @php
+      $hasWorkflow = false;
+      $hasSpectrumCompliance = false;
+      try {
+          $hasWorkflow = \Illuminate\Support\Facades\Schema::hasTable('ahg_workflow');
+          $hasSpectrumCompliance = \Illuminate\Support\Facades\Schema::hasTable('ahg_spectrum_object_compliance');
+      } catch (\Throwable $e) {}
+    @endphp
+    @if($hasWorkflow)
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Workflow') }}</h6></li>
+    <li><a class="dropdown-item" href="{{ route('workflow.dashboard') }}"><i class="fas fa-tachometer-alt me-2"></i>{{ __('Dashboard') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('workflow.admin') }}"><i class="fas fa-cogs me-2"></i>{{ __('Workflows & diagrams') }}</a></li>
+    @if($hasSpectrumCompliance && ($spectrumEnabled ?? false))
+    <li><a class="dropdown-item" href="{{ route('workflow.spectrum.dashboard') }}"><i class="fas fa-university me-2"></i>{{ __('Museum procedure compliance') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('workflow.spectrum.chain') }}"><i class="fas fa-link me-2"></i>{{ __('Museum procedure chain rules') }}</a></li>
+    @endif
+    @endif
+
+    {{-- Maintenance (Backup/Restore gated by ahgBackupPlugin; Jobs always shown) --}}
+    <li><hr class="dropdown-divider"></li>
+    <li><h6 class="dropdown-header">{{ __('Maintenance') }}</h6></li>
+    @if(\AhgCore\Services\MenuService::isPluginEnabled('ahgBackupPlugin'))
+    <li><a class="dropdown-item" href="{{ route('backup.index') }}"><i class="fas fa-download me-2"></i>{{ __('Backup') }}</a></li>
+    <li><a class="dropdown-item" href="{{ route('backup.restore') }}"><i class="fas fa-upload me-2"></i>{{ __('Restore') }}</a></li>
+    @endif
+    <li><a class="dropdown-item" href="{{ route('job.browse') }}"><i class="fas fa-tasks me-2"></i>{{ __('Jobs') }}</a></li>
+  </ul>
+</li>

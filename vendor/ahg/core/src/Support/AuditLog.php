@@ -1,0 +1,212 @@
+<?php
+
+/**
+ * AuditLog - capture before/after diffs from service-layer update() calls
+ * so the audit-log row written by app/Http/Middleware/AuditLog.php carries
+ * a real field-level diff instead of just `{path: ...}`.
+ *
+ * Pattern (in any service::update()):
+ *
+ *   $before = $this->snapshot($id);
+ *   // … existing update work …
+ *   $after  = $this->snapshot($id);
+ *   \AhgCore\Support\AuditLog::captureEdit($id, 'information_object', $before, $after);
+ *
+ * The helper computes which keys changed, picks just those keys out of
+ * the two arrays, and stashes the result on the active request via
+ * `audit.diff` attribute. The middleware reads that attribute when it
+ * builds its row and merges {changed_fields, before, after} into details.
+ *
+ * If no request is bound (CLI / queue context), the helper writes a
+ * stand-alone row directly into security_audit_log so the diff is still
+ * captured.
+ *
+ * Copyright (C) 2026 Johan Pieterse / Plain Sailing Information Systems
+ * Licensed under the GNU AGPL v3.
+ */
+
+namespace AhgCore\Support;
+
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+
+class AuditLog
+{
+    public static function captureEdit(int $objectId, string $objectType, array $before, array $after): void
+    {
+        $changed = self::diffFields($before, $after);
+        if (empty($changed)) {
+            return;
+        }
+
+        $payload = [
+            'changed_fields' => array_values($changed),
+            'before' => self::pickKeys($before, $changed),
+            'after' => self::pickKeys($after, $changed),
+        ];
+
+        self::stash($objectId, $objectType, $payload);
+    }
+
+    /**
+     * Record the snapshot of a newly-created entity. There's no "before"
+     * (the row didn't exist), so the payload carries `after` only and the
+     * audit row's action stays as whatever the middleware classified it
+     * (typically 'create' on POST / 'api_POST' on /api/* paths).
+     */
+    public static function captureCreate(int $objectId, string $objectType, array $after): void
+    {
+        $payload = [
+            'after' => $after,
+            'created' => true,
+        ];
+        self::stash($objectId, $objectType, $payload);
+    }
+
+    /**
+     * Record the snapshot of an entity about to be deleted. Call this
+     * BEFORE the delete fires - once the row is gone the snapshot is
+     * unrecoverable. Payload carries `before` only.
+     */
+    public static function captureDelete(int $objectId, string $objectType, array $before): void
+    {
+        $payload = [
+            'before' => $before,
+            'deleted' => true,
+        ];
+        self::stash($objectId, $objectType, $payload);
+    }
+
+    /**
+     * Generic mutation capture for sub-entity inserts/updates/deletes that
+     * don't have a clean before/after shape (most simple inserts where
+     * "before" is null). Caller supplies the action label + payload.
+     *
+     * Examples (sub-entity flows):
+     *   captureMutation($eventId, 'event', 'create', ['data' => $row]);
+     *   captureMutation($attachmentId, 'accession_attachment', 'delete', ['data' => $row]);
+     *
+     * The middleware merges the payload into its row; the audit-log view's
+     * raw-payload disclosure renders it. No diff table for these - that's
+     * fine, the {action: …, data: …} surface tells the auditor what changed.
+     */
+    public static function captureMutation(int $objectId, string $objectType, string $action, array $payload): void
+    {
+        $payload = array_merge(['mutation_action' => $action], $payload);
+        self::stash($objectId, $objectType, $payload);
+    }
+
+    /**
+     * Like captureMutation but always writes its own dedicated audit row
+     * via writeDirect(), instead of stashing onto the request. Use this
+     * for sub-entity edits that fire in the SAME request as a primary
+     * service::update() - the primary already stashes onto request
+     * attributes, and a second stash would silently overwrite it. With
+     * this variant the primary service's diff stays intact AND the sub-
+     * entity edit gets its own audit row.
+     *
+     * Examples:
+     *   Inside ActorController::update() after the maintaining-repository
+     *   relation swap fires post-ActorService::update():
+     *       captureSecondaryMutation($actorId, 'actor', 'maintaining_repository_change', ['data' => […]]);
+     *
+     * Tradeoff: captureSecondaryMutation rows are written whether or not
+     * a request is bound, and don't pick up the IP / user-agent / sensitive-
+     * field masking the audit middleware adds (writeDirect sets those to
+     * null) - fine for sub-entity context where the parent row already
+     * carries that metadata.
+     */
+    public static function captureSecondaryMutation(int $objectId, string $objectType, string $action, array $payload): void
+    {
+        $payload = array_merge(['mutation_action' => $action], $payload);
+        self::writeDirect($objectId, $objectType, $payload);
+    }
+
+    /**
+     * Internal: stash payload onto request attributes (read by the audit
+     * middleware) or write directly when no request is bound.
+     */
+    private static function stash(int $objectId, string $objectType, array $payload): void
+    {
+        // Outside an HTTP request there is no AuditLog middleware to flush the
+        // stash, so stashing would silently discard the diff. The old guard only
+        // caught `app('request')` THROWING, which it does not do in console or
+        // queue context - Laravel hands back a synthetic request there, the
+        // attributes were set on it, and nobody ever read them. Every edit made
+        // by an artisan command, a queued job or a seeder therefore lost its
+        // before/after. Write those straight through instead.
+        if (app()->runningInConsole()) {
+            self::writeDirect($objectId, $objectType, $payload);
+
+            return;
+        }
+
+        try {
+            $req = app('request');
+            $req->attributes->set('audit.diff', $payload);
+            $req->attributes->set('audit.object_id', $objectId);
+            $req->attributes->set('audit.object_type', $objectType);
+        } catch (\Throwable $e) {
+            self::writeDirect($objectId, $objectType, $payload);
+        }
+    }
+
+    private static function diffFields(array $before, array $after): array
+    {
+        $changed = [];
+        $keys = array_unique(array_merge(array_keys($before), array_keys($after)));
+        foreach ($keys as $k) {
+            $b = $before[$k] ?? null;
+            $a = $after[$k] ?? null;
+            // Normalise both sides to strings for comparison so '5' and 5
+            // count as equal, but distinct array shapes stay distinct.
+            if (is_array($b)) {
+                $b = json_encode($b);
+            }
+            if (is_array($a)) {
+                $a = json_encode($a);
+            }
+            if ((string) $b !== (string) $a) {
+                $changed[] = $k;
+            }
+        }
+
+        return $changed;
+    }
+
+    private static function pickKeys(array $arr, array $keys): array
+    {
+        $out = [];
+        foreach ($keys as $k) {
+            if (array_key_exists($k, $arr)) {
+                $out[$k] = $arr[$k];
+            }
+        }
+
+        return $out;
+    }
+
+    private static function writeDirect(int $objectId, string $objectType, array $payload): void
+    {
+        if (! Schema::hasTable('security_audit_log')) {
+            return;
+        }
+        $userId = auth()->id();
+        $userName = $userId ? DB::table('user')->where('id', $userId)->value('username') : null;
+        $action = ! empty($payload['mutation_action']) ? (string) $payload['mutation_action']
+                : (! empty($payload['created']) ? 'create'
+                : (! empty($payload['deleted']) ? 'delete' : 'update'));
+        DB::table('security_audit_log')->insert([
+            'object_id' => $objectId,
+            'object_type' => $objectType,
+            'user_id' => $userId,
+            'user_name' => $userName,
+            'action' => $action,
+            'action_category' => 'admin',
+            'details' => json_encode($payload),
+            'ip_address' => null,
+            'user_agent' => null,
+            'created_at' => now(),
+        ]);
+    }
+}

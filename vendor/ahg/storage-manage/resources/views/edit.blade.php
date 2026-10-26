@@ -1,0 +1,377 @@
+@extends('theme::layouts.1col')
+
+@section('title', ($storage ? 'Edit' : 'Create') . ' physical storage')
+
+@section('content')
+  <div class="multiline-header d-flex flex-column mb-3">
+    <h1 class="mb-0">{{ $storage ? 'Edit' : 'Create' }} physical storage</h1>
+    @if($storage)
+      <span class="small">{{ $storage->name }}</span>
+    @endif
+  </div>
+  @if($errors->any())
+    <div class="alert alert-danger"><ul class="mb-0">@foreach($errors->all() as $e)<li>{{ $e }}</li>@endforeach</ul></div>
+  @endif
+
+  <form method="POST" action="{{ $storage ? route('physicalobject.update', $storage->slug) : route('physicalobject.store') }}">
+    @csrf
+
+    <div class="row">
+      <div class="col-md-8">
+
+        {{-- Basic Information --}}
+        <div class="card mb-4">
+          <div class="card-header" style="background:var(--ahg-primary);color:#fff">
+            <h5 class="mb-0"><i class="fas fa-warehouse me-2"></i>{{ __('Basic Information') }}</h5>
+          </div>
+          <div class="card-body">
+            <div class="row">
+              <div class="col-md-6">
+                <div class="mb-3">
+                  <label for="name" class="form-label">{{ __('Name') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+                  <input type="text" name="name" id="name" class="form-control" required
+                         value="{{ old('name', $storage->name ?? '') }}">
+                </div>
+              </div>
+              <div class="col-md-6">
+                <div class="mb-3">
+                  <label for="type_id" class="form-label">{{ __('Type') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <select name="type_id" id="type_id" class="form-select">
+                    <option value="">{{ __('Select...') }}</option>
+                    @foreach($typeChoices as $tid => $tname)
+                      <option value="{{ $tid }}" {{ old('type_id', $storage->type_id ?? '') == $tid ? 'selected' : '' }}>{{ $tname }}</option>
+                    @endforeach
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div class="mb-3">
+              <label for="location" class="form-label">{{ __('Location (legacy)') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="text" name="location" id="location" class="form-control"
+                     value="{{ old('location', $storage->location ?? '') }}"
+                     placeholder="{{ __('Use extended location fields below instead') }}">
+              <small class="text-muted">{{ __('For backwards compatibility. Use the detailed fields below.') }}</small>
+            </div>
+          </div>
+        </div>
+
+        {{-- Extended Location. heratio#1545 - Building ... Shelf come from the
+             storage location tree when the box is placed there, else from the
+             flat fields; on save they place the box in the tree. --}}
+        @php $loc = $storageLevels ?? null; $loc = $loc !== null ? $loc : $extendedData; @endphp
+        <div class="card mb-4">
+          <div class="card-header bg-success text-white">
+            <h5 class="mb-0"><i class="fas fa-map-marker-alt me-2"></i>{{ __('Location Details') }}</h5>
+          </div>
+          <div class="card-body">
+            <div class="row">
+              <div class="col-md-4">
+                <div class="mb-3">
+                  <label for="building" class="form-label">{{ __('Building') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="text" name="building" id="building" class="form-control"
+                         value="{{ old('building', $loc['building'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="mb-3">
+                  <label for="floor" class="form-label">{{ __('Floor') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="text" name="floor" id="floor" class="form-control"
+                         value="{{ old('floor', $loc['floor'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="mb-3">
+                  <label for="room" class="form-label">{{ __('Room') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="text" name="room" id="room" class="form-control"
+                         value="{{ old('room', $loc['room'] ?? '') }}">
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-md-3">
+                <div class="mb-3">
+                  <label for="aisle" class="form-label">{{ __('Aisle') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="text" name="aisle" id="aisle" class="form-control"
+                         value="{{ old('aisle', $loc['aisle'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="mb-3">
+                  <label for="bay" class="form-label">{{ __('Bay') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="text" name="bay" id="bay" class="form-control"
+                         value="{{ old('bay', $loc['bay'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="mb-3">
+                  <label for="rack" class="form-label">{{ __('Rack') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="text" name="rack" id="rack" class="form-control"
+                         value="{{ old('rack', $loc['rack'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="mb-3">
+                  <label for="shelf" class="form-label">{{ __('Shelf') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="text" name="shelf" id="shelf" class="form-control"
+                         value="{{ old('shelf', $loc['shelf'] ?? '') }}">
+                </div>
+              </div>
+            </div>
+            @if($placementAvailable ?? false)
+              <div class="mb-3">@include('ahg-storage-manage::_location-pickers')</div>
+            @endif
+            <div class="row">
+              <div class="col-md-4">
+                <div class="mb-3">
+                  <label for="position" class="form-label">{{ __('Position') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="text" name="position" id="position" class="form-control"
+                         value="{{ old('position', $extendedData['position'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="mb-3">
+                  <label for="barcode" class="form-label">{{ __('Barcode') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="text" name="barcode" id="barcode" class="form-control"
+                         value="{{ old('barcode', $extendedData['barcode'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="mb-3">
+                  <label for="reference_code" class="form-label">{{ __('Reference Code') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="text" name="reference_code" id="reference_code" class="form-control"
+                         value="{{ old('reference_code', $extendedData['reference_code'] ?? '') }}">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {{-- Dimensions --}}
+        <div class="card mb-4">
+          <div class="card-header">
+            <h5 class="mb-0"><i class="fas fa-ruler-combined me-2"></i>{{ __('Dimensions (cm)') }}</h5>
+          </div>
+          <div class="card-body">
+            <div class="row">
+              <div class="col-md-4">
+                <div class="mb-3">
+                  <label for="width" class="form-label">{{ __('Width') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="number" step="0.01" name="width" id="width" class="form-control"
+                         value="{{ old('width', $extendedData['width'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="mb-3">
+                  <label for="height" class="form-label">{{ __('Height') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="number" step="0.01" name="height" id="height" class="form-control"
+                         value="{{ old('height', $extendedData['height'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="mb-3">
+                  <label for="depth" class="form-label">{{ __('Depth') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="number" step="0.01" name="depth" id="depth" class="form-control"
+                         value="{{ old('depth', $extendedData['depth'] ?? '') }}">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {{-- Capacity Tracking --}}
+        <div class="card mb-4">
+          <div class="card-header bg-info text-white">
+            <h5 class="mb-0"><i class="fas fa-boxes me-2"></i>{{ __('Capacity Tracking') }}</h5>
+          </div>
+          <div class="card-body">
+            <div class="row">
+              <div class="col-md-4">
+                <div class="mb-3">
+                  <label for="total_capacity" class="form-label">{{ __('Total Capacity') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="number" name="total_capacity" id="total_capacity" class="form-control"
+                         value="{{ old('total_capacity', $extendedData['total_capacity'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="mb-3">
+                  <label for="used_capacity" class="form-label">{{ __('Used Capacity') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="number" name="used_capacity" id="used_capacity" class="form-control"
+                         value="{{ old('used_capacity', $extendedData['used_capacity'] ?? 0) }}">
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="mb-3">
+                  <label for="capacity_unit" class="form-label">{{ __('Capacity Unit') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <select name="capacity_unit" id="capacity_unit" class="form-select">
+                    <option value="">{{ __('Select...') }}</option>
+                    <option value="boxes" @selected(old('capacity_unit', $extendedData['capacity_unit'] ?? '') === 'boxes')>{{ __('Boxes') }}</option>
+                    <option value="files" @selected(old('capacity_unit', $extendedData['capacity_unit'] ?? '') === 'files')>{{ __('Files') }}</option>
+                    <option value="folders" @selected(old('capacity_unit', $extendedData['capacity_unit'] ?? '') === 'folders')>{{ __('Folders') }}</option>
+                    <option value="items" @selected(old('capacity_unit', $extendedData['capacity_unit'] ?? '') === 'items')>{{ __('Items') }}</option>
+                    <option value="volumes" @selected(old('capacity_unit', $extendedData['capacity_unit'] ?? '') === 'volumes')>{{ __('Volumes') }}</option>
+                    <option value="metres" @selected(old('capacity_unit', $extendedData['capacity_unit'] ?? '') === 'metres')>{{ __('Linear metres') }}</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            @if(!empty($extendedData['total_capacity']))
+              @php
+                $used = (int)($extendedData['used_capacity'] ?? 0);
+                $total = (int)$extendedData['total_capacity'];
+                $percent = $total > 0 ? round(($used / $total) * 100) : 0;
+                $barClass = $percent >= 90 ? 'bg-danger' : ($percent >= 70 ? 'bg-warning' : 'bg-success');
+              @endphp
+              <div class="mb-3">
+                <label class="form-label">{{ __('Capacity Usage') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <div class="progress" style="height:25px">
+                  <div class="progress-bar {{ $barClass }}" role="progressbar" style="width:{{ $percent }}%">
+                    {{ $used }} / {{ $total }} ({{ $percent }}%)
+                  </div>
+                </div>
+              </div>
+            @endif
+            <hr>
+            <div class="row">
+              <div class="col-md-6">
+                <div class="mb-3">
+                  <label for="total_linear_metres" class="form-label">{{ __('Total Linear Metres') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="number" step="0.01" name="total_linear_metres" id="total_linear_metres" class="form-control"
+                         value="{{ old('total_linear_metres', $extendedData['total_linear_metres'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-md-6">
+                <div class="mb-3">
+                  <label for="used_linear_metres" class="form-label">{{ __('Used Linear Metres') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="number" step="0.01" name="used_linear_metres" id="used_linear_metres" class="form-control"
+                         value="{{ old('used_linear_metres', $extendedData['used_linear_metres'] ?? 0) }}">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="col-md-4">
+
+        {{-- Status --}}
+        <div class="card mb-4">
+          <div class="card-header">
+            <h5 class="mb-0"><i class="fas fa-toggle-on me-2"></i>{{ __('Status') }}</h5>
+          </div>
+          <div class="card-body">
+            <div class="mb-3">
+              <label for="status" class="form-label">{{ __('Status') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <select name="status" id="status" class="form-select">
+                <option value="active" @selected(old('status', $extendedData['status'] ?? 'active') === 'active')>{{ __('Active') }}</option>
+                <option value="full" @selected(old('status', $extendedData['status'] ?? '') === 'full')>{{ __('Full') }}</option>
+                <option value="maintenance" @selected(old('status', $extendedData['status'] ?? '') === 'maintenance')>{{ __('Under Maintenance') }}</option>
+                <option value="decommissioned" @selected(old('status', $extendedData['status'] ?? '') === 'decommissioned')>{{ __('Decommissioned') }}</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        {{-- Environmental --}}
+        <div class="card mb-4">
+          <div class="card-header">
+            <h5 class="mb-0"><i class="fas fa-thermometer-half me-2"></i>{{ __('Environmental') }}</h5>
+          </div>
+          <div class="card-body">
+            <div class="mb-3 form-check">
+              <input type="checkbox" name="climate_controlled" value="1" class="form-check-input" id="climate_controlled"
+                     @checked(!empty(old('climate_controlled', $extendedData['climate_controlled'] ?? '')))>
+              <label class="form-check-label" for="climate_controlled">{{ __('Climate Controlled') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+            </div>
+            <div class="row">
+              <div class="col-6">
+                <div class="mb-3">
+                  <label for="temperature_min" class="form-label">{{ __('Temp Min (°C)') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="number" step="0.1" name="temperature_min" id="temperature_min" class="form-control"
+                         value="{{ old('temperature_min', $extendedData['temperature_min'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-6">
+                <div class="mb-3">
+                  <label for="temperature_max" class="form-label">{{ __('Temp Max (°C)') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="number" step="0.1" name="temperature_max" id="temperature_max" class="form-control"
+                         value="{{ old('temperature_max', $extendedData['temperature_max'] ?? '') }}">
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-6">
+                <div class="mb-3">
+                  <label for="humidity_min" class="form-label">{{ __('Humidity Min (%)') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="number" step="0.1" name="humidity_min" id="humidity_min" class="form-control"
+                         value="{{ old('humidity_min', $extendedData['humidity_min'] ?? '') }}">
+                </div>
+              </div>
+              <div class="col-6">
+                <div class="mb-3">
+                  <label for="humidity_max" class="form-label">{{ __('Humidity Max (%)') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="number" step="0.1" name="humidity_max" id="humidity_max" class="form-control"
+                         value="{{ old('humidity_max', $extendedData['humidity_max'] ?? '') }}">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {{-- Security --}}
+        <div class="card mb-4">
+          <div class="card-header">
+            <h5 class="mb-0"><i class="fas fa-lock me-2"></i>{{ __('Security') }}</h5>
+          </div>
+          <div class="card-body">
+            <div class="mb-3">
+              <label for="security_level" class="form-label">{{ __('Security Level') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <select name="security_level" id="security_level" class="form-select">
+                <option value="">{{ __('Select...') }}</option>
+                <option value="public" @selected(old('security_level', $extendedData['security_level'] ?? '') === 'public')>{{ __('Public') }}</option>
+                <option value="restricted" @selected(old('security_level', $extendedData['security_level'] ?? '') === 'restricted')>{{ __('Restricted') }}</option>
+                <option value="confidential" @selected(old('security_level', $extendedData['security_level'] ?? '') === 'confidential')>{{ __('Confidential') }}</option>
+                <option value="secure" @selected(old('security_level', $extendedData['security_level'] ?? '') === 'secure')>{{ __('Secure') }}</option>
+                <option value="vault" @selected(old('security_level', $extendedData['security_level'] ?? '') === 'vault')>{{ __('Vault') }}</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label for="access_restrictions" class="form-label">{{ __('Access Restrictions') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea name="access_restrictions" id="access_restrictions" class="form-control" rows="3">{{ old('access_restrictions', $extendedData['access_restrictions'] ?? '') }}</textarea>
+            </div>
+          </div>
+        </div>
+
+        {{-- Notes --}}
+        <div class="card mb-4">
+          <div class="card-header">
+            <h5 class="mb-0"><i class="fas fa-sticky-note me-2"></i>{{ __('Notes') }}</h5>
+          </div>
+          <div class="card-body">
+            <div class="mb-3">
+              <label for="notes" class="form-label">{{ __('Notes') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea name="notes" id="notes" class="form-control" rows="4">{{ old('notes', $extendedData['notes'] ?? '') }}</textarea>
+            </div>
+          </div>
+        </div>
+
+        {{-- heratio#1545 - strongrooms are rooms in the storage location tree
+             (Building ... Shelf above); the separate strongroom block is gone. --}}
+
+      </div>
+    </div>
+
+    <section class="actions mb-3">
+      <ul class="actions mb-1 nav gap-2">
+        @if($storage)
+          <li><a href="{{ route('physicalobject.show', $storage->slug) }}" class="btn atom-btn-outline-light" role="button">{{ __('Cancel') }}</a></li>
+          <li><input class="btn atom-btn-outline-success" type="submit" value="Save"></li>
+        @else
+          <li><a href="{{ route('physicalobject.browse') }}" class="btn atom-btn-outline-light" role="button">{{ __('Cancel') }}</a></li>
+          <li><input class="btn atom-btn-outline-success" type="submit" value="Create"></li>
+        @endif
+        <li><a href="{{ route('physicalobject.browse') }}" class="btn atom-btn-outline-light" role="button"><i class="fas fa-list me-1"></i>{{ __('Browse physical objects') }}</a></li>
+      </ul>
+    </section>
+  </form>
+@endsection

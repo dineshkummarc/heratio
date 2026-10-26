@@ -1,0 +1,114 @@
+{{--
+  Copyright (C) 2026 Johan Pieterse
+  Plain Sailing Information Systems
+  Email: johan@plainsailingisystems.co.za
+
+  This file is part of Heratio.
+
+  Heratio is free software: you can redistribute it and/or modify
+  it under the terms of the GNU Affero General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+--}}
+@extends('theme::layouts.1col')
+
+@section('title', 'Edit Asset')
+
+@section('content')
+@php
+    $asset = $asset ?? (object) [];
+    $categories = $categories ?? collect();
+@endphp
+<div class="container-fluid">
+    <div class="row mb-4">
+        <div class="col">
+            <nav aria-label="{{ __('breadcrumb') }}">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{{ route('ipsas.index') }}">IPSAS</a></li>
+                    <li class="breadcrumb-item"><a href="{{ route('ipsas.assets') }}">{{ __('Assets') }}</a></li>
+                    <li class="breadcrumb-item"><a href="{{ route('ipsas.asset.view', ['id' => $asset->id ?? 0]) }}">{{ $asset->asset_number ?? 'Asset' }}</a></li>
+                    <li class="breadcrumb-item active">{{ __('Edit') }}</li>
+                </ol>
+            </nav>
+            <h1><i class="fas fa-edit me-2"></i>{{ __('Edit Asset') }}</h1>
+        </div>
+    </div>
+
+    <form method="post" class="row g-4">
+        @csrf
+        <div class="col-lg-8">
+            <div class="card mb-4">
+                <div class="card-header"><h5 class="mb-0">{{ __('Asset Details') }}</h5></div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-12">
+                            <label class="form-label">{{ __('Title') }} <span class="text-danger">*</span></label>
+                            <input type="text" name="title" class="form-control" required value="{{ $asset->title ?? '' }}">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">{{ __('Description') }}</label>
+                            <textarea name="description" class="form-control" rows="3">{{ $asset->description ?? '' }}</textarea>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">{{ __('Location') }}</label>
+                            <input type="text" name="location" class="form-control" value="{{ $asset->location ?? '' }}">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">{{ __('Status') }}</label>
+                            <select name="status" class="form-select">
+                                <option value="active" {{ 'active' === ($asset->status ?? '') ? 'selected' : '' }}>{{ __('Active') }}</option>
+                                <option value="on_loan" {{ 'on_loan' === ($asset->status ?? '') ? 'selected' : '' }}>{{ __('On Loan') }}</option>
+                                <option value="in_storage" {{ 'in_storage' === ($asset->status ?? '') ? 'selected' : '' }}>{{ __('In Storage') }}</option>
+                                <option value="under_conservation" {{ 'under_conservation' === ($asset->status ?? '') ? 'selected' : '' }}>{{ __('Under Conservation') }}</option>
+                                <option value="disposed" {{ 'disposed' === ($asset->status ?? '') ? 'selected' : '' }}>{{ __('Disposed') }}</option>
+                                <option value="lost" {{ 'lost' === ($asset->status ?? '') ? 'selected' : '' }}>{{ __('Lost') }}</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mb-4">
+                <div class="card-header"><h5 class="mb-0">{{ __('Condition & Risk') }}</h5></div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">{{ __('Condition Rating') }}</label>
+                            <select name="condition_rating" class="form-select">
+                                <option value="excellent" {{ 'excellent' === ($asset->condition_rating ?? '') ? 'selected' : '' }}>{{ __('Excellent') }}</option>
+                                <option value="good" {{ 'good' === ($asset->condition_rating ?? '') ? 'selected' : '' }}>{{ __('Good') }}</option>
+                                <option value="fair" {{ 'fair' === ($asset->condition_rating ?? '') ? 'selected' : '' }}>{{ __('Fair') }}</option>
+                                <option value="poor" {{ 'poor' === ($asset->condition_rating ?? '') ? 'selected' : '' }}>{{ __('Poor') }}</option>
+                                <option value="critical" {{ 'critical' === ($asset->condition_rating ?? '') ? 'selected' : '' }}>{{ __('Critical') }}</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">{{ __('Risk Level') }}</label>
+                            <select name="risk_level" class="form-select">
+                                <option value="">{{ __('Not Assessed') }}</option>
+                                <option value="low" {{ 'low' === ($asset->risk_level ?? '') ? 'selected' : '' }}>{{ __('Low') }}</option>
+                                <option value="medium" {{ 'medium' === ($asset->risk_level ?? '') ? 'selected' : '' }}>{{ __('Medium') }}</option>
+                                <option value="high" {{ 'high' === ($asset->risk_level ?? '') ? 'selected' : '' }}>{{ __('High') }}</option>
+                                <option value="critical" {{ 'critical' === ($asset->risk_level ?? '') ? 'selected' : '' }}>{{ __('Critical') }}</option>
+                            </select>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">{{ __('Risk Notes') }}</label>
+                            <textarea name="risk_notes" class="form-control" rows="2">{{ $asset->risk_notes ?? '' }}</textarea>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-4">
+            <div class="card">
+                <div class="card-body d-grid gap-2">
+                    <button type="submit" class="btn btn-primary btn-lg"><i class="fas fa-save me-2"></i>{{ __('Save Changes') }}</button>
+                    <a href="{{ route('ipsas.asset.view', ['id' => $asset->id ?? 0]) }}" class="btn btn-outline-secondary">{{ __('Cancel') }}</a>
+                </div>
+            </div>
+        </div>
+    </form>
+</div>
+@endsection

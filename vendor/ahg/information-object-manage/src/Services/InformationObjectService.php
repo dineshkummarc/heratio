@@ -1,0 +1,929 @@
+<?php
+
+/**
+ * InformationObjectService - Service for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+
+
+namespace AhgInformationObjectManage\Services;
+
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+
+/**
+ * InformationObjectService - core CRUD operations for information objects.
+ *
+ * Migrated from InformationObjectCrudService in the ahgInformationObjectManagePlugin.
+ * Provides methods that the ImportJob and other services need without duplicating
+ * the inline queries in InformationObjectController.
+ */
+class InformationObjectService
+{
+    // Publication status type
+    const STATUS_TYPE_PUBLICATION = 158;
+    const STATUS_DRAFT = 159;
+    const STATUS_PUBLISHED = 160;
+
+    // Event type IDs
+    const EVENT_TYPE_CREATION = 111;
+
+    // Name access point relation type
+    const RELATION_NAME_ACCESS_POINT = 161;
+
+    // Taxonomy IDs
+    const TAXONOMY_LEVELS_OF_DESCRIPTION = 34;
+    const TAXONOMY_SUBJECT_ACCESS_POINTS = 35;
+    const TAXONOMY_PLACE_ACCESS_POINTS = 42;
+    const TAXONOMY_GENRE_ACCESS_POINTS = 78;
+
+    // Root information object
+    const ROOT_ID = 1;
+
+    /**
+     * i18n field list (snake_case, matching information_object_i18n columns).
+     */
+    protected static array $i18nFields = [
+        'title', 'alternate_title', 'edition', 'extent_and_medium',
+        'archival_history', 'acquisition', 'scope_and_content',
+        'appraisal', 'accruals', 'arrangement', 'access_conditions',
+        'reproduction_conditions', 'physical_characteristics',
+        'finding_aids', 'location_of_originals', 'location_of_copies',
+        'related_units_of_description', 'institution_responsible_identifier',
+        'rules', 'sources', 'revision_history',
+    ];
+
+    /**
+     * camelCase -> snake_case field map for incoming data with camelCase keys.
+     */
+    protected static array $camelToSnakeMap = [
+        'title' => 'title',
+        'alternateTitle' => 'alternate_title',
+        'edition' => 'edition',
+        'extentAndMedium' => 'extent_and_medium',
+        'archivalHistory' => 'archival_history',
+        'acquisition' => 'acquisition',
+        'scopeAndContent' => 'scope_and_content',
+        'appraisal' => 'appraisal',
+        'accruals' => 'accruals',
+        'arrangement' => 'arrangement',
+        'accessConditions' => 'access_conditions',
+        'reproductionConditions' => 'reproduction_conditions',
+        'physicalCharacteristics' => 'physical_characteristics',
+        'findingAids' => 'finding_aids',
+        'locationOfOriginals' => 'location_of_originals',
+        'locationOfCopies' => 'location_of_copies',
+        'relatedUnitsOfDescription' => 'related_units_of_description',
+        'institutionResponsibleIdentifier' => 'institution_responsible_identifier',
+        'rules' => 'rules',
+        'sources' => 'sources',
+        'revisionHistory' => 'revision_history',
+    ];
+
+    // ─── Read ────────────────────────────────────────────────────────
+
+    /**
+     * Get an information object by slug with core data.
+     *
+     * @return object|null  The IO record with i18n fields, slug, and object timestamps.
+     */
+    public static function getBySlug(string $slug, ?string $culture = null): ?object
+    {
+        $culture = $culture ?: app()->getLocale();
+        $fallback = config('app.fallback_locale', 'en');
+
+        return DB::table('information_object')
+            ->leftJoin('information_object_i18n as ioi_cur', function ($j) use ($culture) {
+                $j->on('ioi_cur.id', '=', 'information_object.id')
+                    ->where('ioi_cur.culture', '=', $culture);
+            })
+            ->leftJoin('information_object_i18n as ioi_fb', function ($j) use ($fallback) {
+                $j->on('ioi_fb.id', '=', 'information_object.id')
+                    ->where('ioi_fb.culture', '=', $fallback);
+            })
+            ->join('object', 'information_object.id', '=', 'object.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->select(self::buildSelectColumns())
+            ->first();
+    }
+
+    /**
+     * Get an information object by ID with core data.
+     *
+     * @return object|null  The IO record with i18n fields, slug, and object timestamps.
+     */
+    public static function getById(int $id, ?string $culture = null): ?object
+    {
+        $culture = $culture ?: app()->getLocale();
+        $fallback = config('app.fallback_locale', 'en');
+
+        $row = DB::table('information_object')
+            ->leftJoin('information_object_i18n as ioi_cur', function ($j) use ($culture) {
+                $j->on('ioi_cur.id', '=', 'information_object.id')
+                    ->where('ioi_cur.culture', '=', $culture);
+            })
+            ->leftJoin('information_object_i18n as ioi_fb', function ($j) use ($fallback) {
+                $j->on('ioi_fb.id', '=', 'information_object.id')
+                    ->where('ioi_fb.culture', '=', $fallback);
+            })
+            ->join('object', 'information_object.id', '=', 'object.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('information_object.id', $id)
+            ->select(self::buildSelectColumns())
+            ->first();
+
+        // #74 encryption_field_access_restrictions: decrypt the two
+        // registered columns at the central read site so every downstream
+        // consumer (controllers, blades, exporters) gets plaintext without
+        // each having to call EncryptionService themselves. decrypt() is
+        // idempotent for plaintext - returns the input unchanged when
+        // isCiphertext returns false - so this runs safely whether the
+        // operator has the category on or off.
+        if ($row !== null) {
+            $enc = new \AhgCore\Services\EncryptionService();
+            foreach (['access_conditions', 'reproduction_conditions'] as $col) {
+                if (property_exists($row, $col) && $row->{$col} !== null && $row->{$col} !== '') {
+                    $row->{$col} = $enc->decrypt(
+                        \AhgCore\Services\EncryptionService::CATEGORY_ACCESS_RESTRICTIONS,
+                        (string) $row->{$col},
+                        'information_object_i18n', $col, $id
+                    );
+                }
+            }
+        }
+
+        return $row;
+    }
+
+    // ─── Create ──────────────────────────────────────────────────────
+
+    /**
+     * Create a new information object.
+     *
+     * Data keys may be either snake_case (matching DB columns) or camelCase
+     * (matching the field map from InformationObjectCrudService).
+     *
+     * Required: 'title' (or nothing - defaults to 'Untitled')
+     * Optional: 'parent_id'/'parentId', 'identifier', 'level_of_description_id'/'levelOfDescriptionId',
+     *           'repository_id'/'repositoryId', all i18n fields, etc.
+     *
+     * @return int  The new object ID.
+     */
+    public static function create(array $data, ?string $culture = null): int
+    {
+        $culture = $culture ?: app()->getLocale();
+        $data = self::normalizeKeys($data);
+
+        $newId = DB::transaction(function () use ($data, $culture) {
+            $parentId = (int) ($data['parent_id'] ?? self::ROOT_ID);
+
+            // 1. Determine nested set position (last child of parent)
+            $parent = DB::table('information_object')
+                ->where('id', $parentId)
+                ->select('lft', 'rgt')
+                ->first();
+
+            if (!$parent) {
+                throw new \RuntimeException("Parent information object ID {$parentId} not found.");
+            }
+
+            $newLft = $parent->rgt;
+            $newRgt = $parent->rgt + 1;
+
+            // Shift existing nested set values to make room
+            DB::table('information_object')
+                ->where('rgt', '>=', $parent->rgt)
+                ->increment('rgt', 2);
+
+            DB::table('information_object')
+                ->where('lft', '>', $parent->rgt)
+                ->increment('lft', 2);
+
+            // 2. Insert object record
+            $objectId = DB::table('object')->insertGetId([
+                'class_name' => 'QubitInformationObject',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            // 3. Insert information_object record
+            // Sector identifier auto-generation (#89): when the operator
+            // hasn't supplied an identifier and the sector mask is enabled,
+            // SectorIdentifierService::next renders one from the configured
+            // mask + atomically increments the counter. When the mask is
+            // disabled or no sector resolves, returns null and we keep the
+            // legacy null/operator-supplied behaviour.
+            $resolvedIdentifier = $data['identifier'] ?? null;
+            if (empty($resolvedIdentifier)) {
+                // settings.inherit_code_informationobject (#80): when on, a
+                // child IO inherits the parent's identifier as a prefix and
+                // appends a sibling sequence number ("PARENT-1", "PARENT-2")
+                // so archival hierarchies surface the lineage in the code
+                // itself. Falls back to the sector-mask path when the
+                // parent has no identifier or the setting is off.
+                if ($parentId !== self::ROOT_ID
+                    && \AhgCore\Support\GlobalSettings::inheritCodeInformationObject()
+                ) {
+                    $parentIdent = DB::table('information_object')
+                        ->where('id', $parentId)
+                        ->value('identifier');
+                    if (!empty($parentIdent)) {
+                        $siblingSeq = DB::table('information_object')
+                            ->where('parent_id', $parentId)
+                            ->count() + 1;
+                        $resolvedIdentifier = $parentIdent . '-' . $siblingSeq;
+                    }
+                }
+
+                if (empty($resolvedIdentifier)) {
+                    $sectorCode = \AhgCore\Services\SectorIdentifierService::resolveSector($data['source_standard'] ?? null);
+                    $generated = \AhgCore\Services\SectorIdentifierService::next($sectorCode);
+                    if ($generated !== null) {
+                        $resolvedIdentifier = $generated;
+                    }
+                }
+            }
+            $ioInsert = [
+                'id' => $objectId,
+                'identifier' => $resolvedIdentifier,
+                'level_of_description_id' => !empty($data['level_of_description_id']) ? (int) $data['level_of_description_id'] : null,
+                'collection_type_id' => !empty($data['collection_type_id']) ? (int) $data['collection_type_id'] : null,
+                'repository_id' => !empty($data['repository_id']) ? (int) $data['repository_id'] : null,
+                'parent_id' => $parentId,
+                'description_status_id' => !empty($data['description_status_id']) ? (int) $data['description_status_id'] : null,
+                'description_detail_id' => !empty($data['description_detail_id']) ? (int) $data['description_detail_id'] : null,
+                'description_identifier' => $data['description_identifier'] ?? null,
+                'source_standard' => $data['source_standard'] ?? null,
+                'display_standard_id' => !empty($data['display_standard_id']) ? (int) $data['display_standard_id'] : null,
+                'lft' => $newLft,
+                'rgt' => $newRgt,
+                'source_culture' => $culture,
+            ];
+            if (array_key_exists('icip_sensitivity', $data) && $data['icip_sensitivity'] !== '') {
+                $ioInsert['icip_sensitivity'] = $data['icip_sensitivity'];
+            }
+            DB::table('information_object')->insert($ioInsert);
+
+            // #1333 dual-write: maintain the closure tree alongside lft/rgt
+            // (transactional with the insert). No-op until the closure tables
+            // exist; lft/rgt stay authoritative until reads are swapped.
+            app(\AhgCore\Services\ClosureMaintenanceService::class)
+                ->addNode('information_object', (int) $objectId, (int) $parentId);
+
+            // 4. Insert i18n record
+            $i18nData = ['id' => $objectId, 'culture' => $culture];
+            foreach (self::$i18nFields as $field) {
+                $i18nData[$field] = $data[$field] ?? null;
+            }
+            // #1309: scope_and_content is rendered raw in browse/search snippets; sanitize on save.
+            $i18nData['scope_and_content'] = \AhgCore\Support\HtmlSanitizer::clean($i18nData['scope_and_content'] ?? null);
+            DB::table('information_object_i18n')->insert($i18nData);
+
+            // 5. Generate slug. permissive_slug_creation controls whether
+            // Unicode + non-ASCII characters survive the slug transform.
+            // - false (default): Str::slug() ASCII-normalises (matches AtoM's
+            //   strict mode + Laravel default).
+            // - true: a softer transform that lowercases + replaces only
+            //   whitespace + control chars with hyphens, so Unicode letter
+            //   characters are preserved (matches AtoM's permissive mode for
+            //   institutions that surface non-Latin titles publicly).
+            $title = $data['title'] ?? 'untitled';
+            if (\AhgCore\Support\GlobalSettings::permissiveSlugCreation()) {
+                $baseSlug = trim(preg_replace('/\s+/u', '-', mb_strtolower($title)), '-');
+                $baseSlug = preg_replace('/[\x00-\x1F\x7F]+/', '', $baseSlug);
+            } else {
+                $baseSlug = Str::slug($title);
+            }
+            if (empty($baseSlug)) {
+                $baseSlug = 'untitled';
+            }
+            $slug = $baseSlug;
+            $counter = 1;
+            while (DB::table('slug')->where('slug', $slug)->exists()) {
+                $slug = $baseSlug . '-' . $counter;
+                $counter++;
+            }
+            DB::table('slug')->insert([
+                'object_id' => $objectId,
+                'slug' => $slug,
+            ]);
+
+            // 6. Publication status (closure was already written above, next to
+            // the information_object insert, so it stays inside this
+            // transaction). See finalizeCreation() for why both matter.
+            self::ensurePublicationStatus($objectId, $data['publication_status_id'] ?? null);
+
+            return $objectId;
+        });
+
+        \AhgCore\Support\AuditLog::captureCreate((int) $newId, 'information_object', self::auditSnapshot((int) $newId, $culture));
+        return (int) $newId;
+    }
+
+    // ─── Finish creating an information object (#1461, #1462) ────────
+
+    /**
+     * Finish creating an information object: publication status + closure node.
+     *
+     * Thin delegates to AhgCore\Services\RecordCreationService, which holds the
+     * single implementation (see #1461 / #1462 for why both writes matter, and
+     * why the canonical version lives in ahg-core - importers and sector
+     * packages call it without depending on this package).
+     */
+    public static function finalizeCreation(int $objectId, ?int $parentId = null, ?int $publicationStatusId = null): void
+    {
+        \AhgCore\Services\RecordCreationService::finalizeInformationObject($objectId, $parentId, $publicationStatusId);
+    }
+
+    public static function ensurePublicationStatus(int $objectId, ?int $publicationStatusId = null): int
+    {
+        return \AhgCore\Services\RecordCreationService::ensurePublicationStatus($objectId, $publicationStatusId);
+    }
+
+    public static function ensureClosureNode(int $objectId, ?int $parentId): void
+    {
+        \AhgCore\Services\RecordCreationService::ensureClosureNode($objectId, $parentId);
+    }
+
+    // ─── Update ──────────────────────────────────────────────────────
+
+    /**
+     * Update an existing information object.
+     *
+     * Only the provided keys are updated; missing keys are left unchanged.
+     * Data keys may be either snake_case or camelCase.
+     */
+    /**
+     * heratio#1536. A hash of everything a person edits on a description: the
+     * record, every culture's text (encrypted columns decrypted, since their
+     * ciphertext changes on every write), publication status, slug, events,
+     * notes, access points, relations, properties and other names.
+     *
+     * Row ids, serial numbers, timestamps and the editing user are left out on
+     * purpose: the edit form deletes and re-inserts its sub-entities on every
+     * save, so they change even when nothing a reader would see did.
+     */
+    public static function contentFingerprint(int $id): string
+    {
+        $strip = fn ($rows, array $drop) => collect($rows)->map(function ($r) use ($drop) {
+            $r = (array) $r;
+            foreach ($drop as $k) {
+                unset($r[$k]);
+            }
+            ksort($r);
+
+            return $r;
+        })->sortBy(fn ($r) => json_encode($r))->values()->all();
+        $i18n = fn (string $table, $ids) => DB::table($table)->whereIn('id', collect($ids)->all())->get()
+            ->groupBy('id')->map(fn ($rows) => $strip($rows, ['id']))->all();
+        $withI18n = function (string $table, string $i18nTable, $rows, array $drop) use ($strip, $i18n) {
+            $rows = collect($rows);
+            $text = $i18n($i18nTable, $rows->pluck('id'));
+
+            return $strip($rows->map(function ($r) use ($text) {
+                $r = (array) $r;
+                $r['_i18n'] = $text[$r['id']] ?? [];
+
+                return $r;
+            }), $drop);
+        };
+
+        $enc = new \AhgCore\Services\EncryptionService();
+        $text = DB::table('information_object_i18n')->where('id', $id)->get()->map(function ($r) use ($enc, $id) {
+            foreach (['access_conditions', 'reproduction_conditions'] as $col) {
+                if (isset($r->{$col})) {
+                    $r->{$col} = $enc->decrypt(\AhgCore\Services\EncryptionService::CATEGORY_ACCESS_RESTRICTIONS, $r->{$col}, 'information_object_i18n', $col, $id);
+                }
+            }
+
+            return $r;
+        });
+
+        $parts = [
+            'io' => $strip([DB::table('information_object')->where('id', $id)->first() ?? []], ['id', 'lft', 'rgt']),
+            'i18n' => $strip($text, ['id']),
+            'status' => $strip(DB::table('status')->where('object_id', $id)->get(), ['id', 'object_id', 'serial_number']),
+            'slug' => DB::table('slug')->where('object_id', $id)->value('slug'),
+            'events' => $withI18n('event', 'event_i18n', DB::table('event')->where('object_id', $id)->get(), ['id', 'object_id']),
+            'notes' => $withI18n('note', 'note_i18n', DB::table('note')->where('object_id', $id)->get(), ['id', 'object_id', 'serial_number', 'user_id']),
+            'terms' => $strip(DB::table('object_term_relation')->where('object_id', $id)->get(), ['id', 'object_id']),
+            'relations' => $strip(DB::table('relation')->where(fn ($q) => $q->where('subject_id', $id)->orWhere('object_id', $id))->get(), ['id']),
+            'properties' => $withI18n('property', 'property_i18n', DB::table('property')->where('object_id', $id)->get(), ['id', 'object_id', 'serial_number']),
+            'other_names' => $withI18n('other_name', 'other_name_i18n', DB::table('other_name')->where('object_id', $id)->get(), ['id', 'object_id', 'serial_number']),
+            'custom_fields' => $strip(DB::table('custom_field_value')->where('object_id', $id)->get(), ['id', 'object_id', 'created_at', 'updated_at']), // #1530
+            // Sector metadata is description content too (#1549): museum and
+            // gallery CCO fields, library item and its creators, subjects and
+            // shelf location, DAM IPTC metadata.
+            'museum' => self::hasTableMemo('museum_metadata')
+                ? $strip(DB::table('museum_metadata')->where('object_id', $id)->get(), ['id', 'object_id', 'created_at', 'updated_at']) : [],
+            'library' => self::hasTableMemo('library_item') ? (function () use ($id, $strip) {
+                $items = DB::table('library_item')->where('information_object_id', $id)->get();
+                $itemIds = $items->pluck('id')->all();
+                $side = fn (string $t) => self::hasTableMemo($t) && $itemIds
+                    ? $strip(DB::table($t)->whereIn('library_item_id', $itemIds)->get(), ['id', 'library_item_id', 'created_at', 'updated_at']) : [];
+
+                return [
+                    'item' => $strip($items, ['id', 'information_object_id', 'created_at', 'updated_at']),
+                    'creators' => $side('library_item_creator'),
+                    'subjects' => $side('library_item_subject'),
+                ];
+            })() : [],
+            'location' => self::hasTableMemo('information_object_physical_location')
+                ? $strip(DB::table('information_object_physical_location')->where('information_object_id', $id)->get(), ['id', 'information_object_id', 'created_at', 'updated_at']) : [],
+            'dam' => self::hasTableMemo('dam_iptc_metadata')
+                ? $strip(DB::table('dam_iptc_metadata')->where('object_id', $id)->get(), ['id', 'object_id', 'created_at', 'updated_at']) : [],
+        ];
+
+        return sha1(json_encode($parts));
+    }
+
+    /** Table existence, memoised per connection and database (fingerprints run on every save). */
+    private static function hasTableMemo(string $table): bool
+    {
+        static $seen = [];
+        $conn = DB::connection();
+        $key = $conn->getName().'|'.$conn->getDatabaseName().'|'.$table;
+
+        return $seen[$key] ??= \Illuminate\Support\Facades\Schema::hasTable($table);
+    }
+
+    /**
+     * Move "last modified" (object.updated_at) only if the description's
+     * content really changed since $before was taken (heratio#1536). A save
+     * that changes nothing must not bump the date that OAI-PMH datestamps and
+     * harvest deltas are built from.
+     */
+    public static function touchIfChanged(int $id, string $before): bool
+    {
+        if (self::contentFingerprint($id) === $before) {
+            return false;
+        }
+        DB::table('object')->where('id', $id)->update(['updated_at' => now()]);
+
+        return true;
+    }
+
+    /**
+     * Flat snapshot of IO-update fields for the security_audit_log
+     * before/after diff. Captures the structural columns + the i18n
+     * narrative fields most edits touch. See packages/ahg-core/src/Support/AuditLog.php.
+     * Public so InformationObjectController::update can reuse it - the
+     * controller writes the IO directly rather than calling
+     * InformationObjectService::update, so it needs to take its own
+     * snapshot to feed AuditLog::captureEdit.
+     */
+    public static function auditSnapshot(int $id, string $culture): array
+    {
+        $io = (array) (DB::table('information_object')->where('id', $id)
+            ->select('identifier', 'level_of_description_id', 'collection_type_id', 'repository_id',
+                'description_status_id', 'description_detail_id', 'description_identifier',
+                'source_standard', 'display_standard_id', 'icip_sensitivity', 'parent_id')
+            ->first() ?? []);
+        $i18n = (array) (DB::table('information_object_i18n')->where('id', $id)
+            ->where('culture', $culture)
+            ->select('title', 'alternate_title', 'extent_and_medium', 'scope_and_content',
+                'archival_history', 'acquisition', 'access_conditions', 'reproduction_conditions',
+                'physical_characteristics', 'arrangement', 'appraisal', 'accruals', 'finding_aids',
+                'location_of_originals', 'location_of_copies', 'related_units_of_description',
+                'rules', 'sources', 'revision_history', 'institution_responsible_identifier')
+            ->first() ?? []);
+
+        // Sub-entity counts so the main IO captureEdit also surfaces
+        // delete-then-insert changes inside the same update() request:
+        // "events: 3 → 5", "subject access points: 12 → 11", etc. Cheap
+        // counts (no payload bloat); auditor sees that something changed
+        // in each sub-entity bucket without needing per-row diffs.
+        $counts = [
+            'count_events' => DB::table('event')->where('object_id', $id)->count(),
+            'count_notes' => DB::table('note')->where('object_id', $id)->count(),
+            'count_subject_access_points' => DB::table('object_term_relation as otr')
+                ->join('term', 'term.id', '=', 'otr.term_id')
+                ->where('otr.object_id', $id)->where('term.taxonomy_id', 35)->count(),
+            'count_place_access_points' => DB::table('object_term_relation as otr')
+                ->join('term', 'term.id', '=', 'otr.term_id')
+                ->where('otr.object_id', $id)->where('term.taxonomy_id', 42)->count(),
+            'count_genre_access_points' => DB::table('object_term_relation as otr')
+                ->join('term', 'term.id', '=', 'otr.term_id')
+                ->where('otr.object_id', $id)->where('term.taxonomy_id', 78)->count(),
+            'count_name_access_points' => DB::table('relation')
+                ->where('subject_id', $id)->where('type_id', 161)->count(),
+            'count_alternative_identifiers' => DB::table('property')
+                ->where('object_id', $id)->where('name', 'alternativeIdentifiers')->count(),
+            'count_children' => DB::table('information_object')->where('parent_id', $id)->count(),
+        ];
+
+        return array_merge($io, $i18n, $counts);
+    }
+
+    public static function update(int $id, array $data, ?string $culture = null): void
+    {
+        $culture = $culture ?: app()->getLocale();
+        $data = self::normalizeKeys($data);
+
+        // #121/#122: spectrum publish-guard. When publication_status_id is
+        // being transitioned to PUBLISHED, ask the spectrum module whether
+        // any of its require_* settings block. Throws DomainException with
+        // operator-readable reasons when blocked so the caller (controller
+        // / API) can surface a flash error rather than failing silently.
+        // Cheap when both spectrum_require_valuation + spectrum_require_insurance
+        // are off (the guard returns early without DB lookups).
+        if (
+            array_key_exists('publication_status_id', $data)
+            && (int) ($data['publication_status_id'] ?? 0) === self::STATUS_PUBLISHED
+            && class_exists(\AhgSpectrum\Services\SpectrumPublishGuardService::class)
+        ) {
+            $reasons = (new \AhgSpectrum\Services\SpectrumPublishGuardService())->canPublish($id);
+            if (!empty($reasons)) {
+                throw new \DomainException(implode("\n", $reasons));
+            }
+        }
+
+        $auditBefore = self::auditSnapshot($id, $culture);
+        $fingerprintBefore = self::contentFingerprint($id);
+
+        DB::transaction(function () use ($id, $data, $culture, $fingerprintBefore) {
+            // 1. Update structural fields on information_object
+            $structuralFields = [
+                'identifier', 'level_of_description_id', 'collection_type_id',
+                'repository_id', 'description_status_id', 'description_detail_id',
+                'description_identifier', 'source_standard', 'display_standard_id',
+                'icip_sensitivity',
+            ];
+
+            $ioUpdate = [];
+            foreach ($structuralFields as $field) {
+                if (array_key_exists($field, $data)) {
+                    // ICIP cultural-sensitivity URI is preserved as-is when empty → null,
+                    // unlike other structural fields which use ?: null.
+                    if ($field === 'icip_sensitivity') {
+                        $ioUpdate[$field] = ($data[$field] === '' ? null : $data[$field]);
+                    } else {
+                        $ioUpdate[$field] = $data[$field] ?: null;
+                    }
+                }
+            }
+
+            if (!empty($ioUpdate)) {
+                DB::table('information_object')->where('id', $id)->update($ioUpdate);
+            }
+
+            // 2. Update i18n fields
+            $i18nUpdate = [];
+            foreach (self::$i18nFields as $field) {
+                if (array_key_exists($field, $data)) {
+                    $i18nUpdate[$field] = $data[$field];
+                }
+            }
+            // #1309: scope_and_content is rendered raw in browse/search snippets; sanitize on save.
+            if (array_key_exists('scope_and_content', $i18nUpdate)) {
+                $i18nUpdate['scope_and_content'] = \AhgCore\Support\HtmlSanitizer::clean($i18nUpdate['scope_and_content']);
+            }
+
+            // #74 encryption_field_access_restrictions: encrypt the two
+            // registered columns before INSERT/UPDATE so the daily bulk-apply
+            // safety-net doesn't have to retrofit them. encrypt() no-ops to
+            // plaintext when the category is off / encryption_enabled is
+            // off, so the column round-trips cleanly either way.
+            if (!empty($i18nUpdate)) {
+                $enc = new \AhgCore\Services\EncryptionService();
+                foreach (['access_conditions', 'reproduction_conditions'] as $col) {
+                    if (array_key_exists($col, $i18nUpdate)) {
+                        $i18nUpdate[$col] = $enc->encrypt(
+                            \AhgCore\Services\EncryptionService::CATEGORY_ACCESS_RESTRICTIONS,
+                            $i18nUpdate[$col],
+                            'information_object_i18n', $col, $id
+                        );
+                    }
+                }
+            }
+
+            if (!empty($i18nUpdate)) {
+                $exists = DB::table('information_object_i18n')
+                    ->where('id', $id)
+                    ->where('culture', $culture)
+                    ->exists();
+
+                if ($exists) {
+                    DB::table('information_object_i18n')
+                        ->where('id', $id)
+                        ->where('culture', $culture)
+                        ->update($i18nUpdate);
+                } else {
+                    DB::table('information_object_i18n')->insert(
+                        array_merge($i18nUpdate, ['id' => $id, 'culture' => $culture])
+                    );
+                }
+            }
+
+            // 3. Update publication status if provided
+            if (array_key_exists('publication_status_id', $data)) {
+                DB::table('status')
+                    ->where('object_id', $id)
+                    ->where('type_id', self::STATUS_TYPE_PUBLICATION)
+                    ->delete();
+
+                DB::table('status')->insert([
+                    // #1470: status.id must be an object id, not one from status's
+                    // own AUTO_INCREMENT counter.
+                    'id' => \AhgCore\Support\StatusRow::allocateId(),
+                    'object_id' => $id,
+                    'type_id' => self::STATUS_TYPE_PUBLICATION,
+                    'status_id' => (int) ($data['publication_status_id'] ?: self::STATUS_DRAFT),
+                    'serial_number' => 0,
+                ]);
+            }
+
+            // 4. Touch the object, only if something actually changed (#1536)
+            self::touchIfChanged($id, $fingerprintBefore);
+        });
+
+        $auditAfter = self::auditSnapshot($id, $culture);
+        \AhgCore\Support\AuditLog::captureEdit($id, 'information_object', $auditBefore, $auditAfter);
+    }
+
+    // ─── Delete ──────────────────────────────────────────────────────
+
+    /**
+     * Move a description, with its whole subtree, to be the last child of
+     * another (heratio#1533). One implementation for the tree drag-and-drop,
+     * the Move page and the dedupe merge: the nested set (signed-shift), the
+     * closure tree and sibling order, an audit entry, then one ES ancestor
+     * delta for the subtree. Callers check that the target is not inside the
+     * moved subtree and is not already the parent.
+     */
+    public static function moveUnder(int $id, int $newParentId): void
+    {
+        $node = DB::table('information_object')->where('id', $id)->select('id', 'lft', 'rgt', 'parent_id')->first();
+        if (! $node || ! DB::table('information_object')->where('id', $newParentId)->exists()) {
+            throw new \InvalidArgumentException("moveUnder: unknown record {$id} or parent {$newParentId}");
+        }
+
+        $hierarchy = app(\AhgCore\Services\HierarchyQueryService::class);
+        $oldAncestors = $hierarchy->ancestorIds('information_object', $id);
+
+        DB::transaction(function () use ($node, $id, $newParentId) {
+            if ($node->lft !== null && $node->rgt !== null && $node->lft > 0 && $node->rgt > 0) {
+                $width = $node->rgt - $node->lft + 1;
+                // 1) Mark the moving subtree by negating it, 2) close its gap,
+                // 3) open one at the new parent's rgt, 4) restore it there.
+                DB::table('information_object')->where('lft', '>=', $node->lft)->where('rgt', '<=', $node->rgt)
+                    ->update(['lft' => DB::raw('lft * -1'), 'rgt' => DB::raw('rgt * -1')]);
+                DB::table('information_object')->where('lft', '>', $node->rgt)->decrement('lft', $width);
+                DB::table('information_object')->where('rgt', '>', $node->rgt)->decrement('rgt', $width);
+
+                $insertAt = (int) DB::table('information_object')->where('id', $newParentId)->value('rgt');
+                DB::table('information_object')->where('lft', '>=', $insertAt)->increment('lft', $width);
+                DB::table('information_object')->where('rgt', '>=', $insertAt)->increment('rgt', $width);
+
+                $offset = $insertAt - $node->lft;
+                DB::table('information_object')->where('lft', '<', 0)
+                    ->update(['lft' => DB::raw('(lft * -1) + '.$offset), 'rgt' => DB::raw('(rgt * -1) + '.$offset)]);
+            }
+
+            DB::table('information_object')->where('id', $id)->update(['parent_id' => $newParentId]);
+
+            \AhgCore\Support\AuditLog::captureMutation($id, 'information_object', 'move', [
+                'data' => ['old_parent_id' => (int) $node->parent_id, 'new_parent_id' => $newParentId],
+            ]);
+
+            $closure = app(\AhgCore\Services\ClosureMaintenanceService::class);
+            $closure->moveNode('information_object', $id, $newParentId);
+            $closure->resyncSiblingOrder('information_object', $node->parent_id !== null ? (int) $node->parent_id : null);
+            $closure->resyncSiblingOrder('information_object', $newParentId);
+        });
+
+        // Best-effort: repoint the subtree's `ancestors` in ES; never fails the move.
+        try {
+            app(\AhgSearch\Services\ElasticsearchService::class)
+                ->updateSubtreeAncestorsOnMove($id, $oldAncestors, $hierarchy->ancestorIds('information_object', $id));
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('moveUnder: ES ancestor update failed', ['id' => $id, 'error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Delete an information object and all its descendants.
+     *
+     * Handles: nested set cleanup, i18n, slug, object, status, events, notes,
+     * term relations, property records.
+     */
+    public static function delete(int $id): void
+    {
+        \AhgCore\Support\AuditLog::captureDelete($id, 'information_object', self::auditSnapshot($id, app()->getLocale()));
+
+        DB::transaction(function () use ($id) {
+            $record = DB::table('information_object')
+                ->where('id', $id)
+                ->select('lft', 'rgt')
+                ->first();
+
+            if (!$record) {
+                return;
+            }
+
+            $width = $record->rgt - $record->lft + 1;
+
+            // Collect all descendant IDs (incl. self). Closure when built (also
+            // catches null-lft orphans the nested-set range misses), else lft/rgt.
+            // heratio#1333 read-swap; the gap-close below stays nested-set.
+            $descendantIds = app(\AhgCore\Services\HierarchyQueryService::class)
+                ->descendantIds('information_object', (int) $id, true);
+
+            if (empty($descendantIds)) {
+                return;
+            }
+
+            // Delete events and event_i18n for descendants
+            $eventIds = DB::table('event')
+                ->whereIn('object_id', $descendantIds)
+                ->pluck('id')
+                ->toArray();
+            if (!empty($eventIds)) {
+                DB::table('event_i18n')->whereIn('id', $eventIds)->delete();
+                DB::table('event')->whereIn('id', $eventIds)->delete();
+                DB::table('object')->whereIn('id', $eventIds)->delete();
+            }
+
+            // Delete notes and note_i18n for descendants
+            $noteIds = DB::table('note')
+                ->whereIn('object_id', $descendantIds)
+                ->pluck('id')
+                ->toArray();
+            if (!empty($noteIds)) {
+                DB::table('note_i18n')->whereIn('id', $noteIds)->delete();
+                DB::table('note')->whereIn('id', $noteIds)->delete();
+                DB::table('object')->whereIn('id', $noteIds)->delete();
+            }
+
+            // Delete term relations (access points)
+            DB::table('object_term_relation')
+                ->whereIn('object_id', $descendantIds)
+                ->delete();
+
+            // Delete relations (name access points, rights, etc.)
+            DB::table('relation')
+                ->where(function ($q) use ($descendantIds) {
+                    $q->whereIn('subject_id', $descendantIds)
+                        ->orWhereIn('object_id', $descendantIds);
+                })
+                ->delete();
+
+            // Delete status records
+            DB::table('status')
+                ->whereIn('object_id', $descendantIds)
+                ->delete();
+
+            // Delete property records
+            $propertyIds = DB::table('property')
+                ->whereIn('object_id', $descendantIds)
+                ->pluck('id')
+                ->toArray();
+            if (!empty($propertyIds)) {
+                DB::table('property_i18n')->whereIn('id', $propertyIds)->delete();
+                DB::table('property')->whereIn('object_id', $descendantIds)->delete();
+            }
+
+            // Custom field values (heratio#1530)
+            DB::table('custom_field_value')->whereIn('object_id', $descendantIds)->delete();
+
+            // Delete digital objects
+            try {
+                $doIds = DB::table('digital_object')
+                    ->whereIn('object_id', $descendantIds)
+                    ->pluck('id')
+                    ->toArray();
+                if (!empty($doIds)) {
+                    DB::table('digital_object')->whereIn('id', $doIds)->delete();
+                    DB::table('object')->whereIn('id', $doIds)->delete();
+                }
+            } catch (\Exception $e) {
+                // digital_object table may not exist in all installs
+            }
+
+            // Delete i18n rows
+            DB::table('information_object_i18n')
+                ->whereIn('id', $descendantIds)
+                ->delete();
+
+            // Delete information_object rows
+            DB::table('information_object')
+                ->whereIn('id', $descendantIds)
+                ->delete();
+
+            // Delete slug + object rows
+            DB::table('slug')
+                ->whereIn('object_id', $descendantIds)
+                ->delete();
+
+            DB::table('object')
+                ->whereIn('id', $descendantIds)
+                ->delete();
+
+            // #1333 dual-write: closure rows for the deleted subtree cascade via
+            // the ON DELETE CASCADE FK; clear the FK-less sibling sidecar.
+            if (\Illuminate\Support\Facades\Schema::hasTable('ahg_node_sibling_order')) {
+                DB::table('ahg_node_sibling_order')
+                    ->where('entity', 'information_object')
+                    ->whereIn('node_id', $descendantIds)
+                    ->delete();
+            }
+
+            // Close the gap in the nested set
+            DB::table('information_object')
+                ->where('lft', '>', $record->rgt)
+                ->decrement('lft', $width);
+
+            DB::table('information_object')
+                ->where('rgt', '>', $record->rgt)
+                ->decrement('rgt', $width);
+        });
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────────
+
+    /**
+     * Normalize data keys from camelCase to snake_case.
+     */
+    protected static function normalizeKeys(array $data): array
+    {
+        $normalized = [];
+        foreach ($data as $key => $value) {
+            // Check if it's a known camelCase key
+            if (isset(self::$camelToSnakeMap[$key])) {
+                $normalized[self::$camelToSnakeMap[$key]] = $value;
+            } else {
+                // Convert camelCase structural keys
+                $snakeKey = match ($key) {
+                    'parentId' => 'parent_id',
+                    'levelOfDescriptionId' => 'level_of_description_id',
+                    'collectionTypeId' => 'collection_type_id',
+                    'repositoryId' => 'repository_id',
+                    'descriptionStatusId' => 'description_status_id',
+                    'descriptionDetailId' => 'description_detail_id',
+                    'descriptionIdentifier' => 'description_identifier',
+                    'sourceStandard' => 'source_standard',
+                    'displayStandardId' => 'display_standard_id',
+                    'publicationStatusId' => 'publication_status_id',
+                    default => $key,
+                };
+                $normalized[$snakeKey] = $value;
+            }
+        }
+        return $normalized;
+    }
+
+    /**
+     * Build the standard SELECT column list for IO queries.
+     */
+    protected static function buildSelectColumns(): array
+    {
+        $columns = [
+            'information_object.id',
+            'information_object.identifier',
+            'information_object.oai_local_identifier',
+            'information_object.level_of_description_id',
+            'information_object.collection_type_id',
+            'information_object.repository_id',
+            'information_object.parent_id',
+            'information_object.description_status_id',
+            'information_object.description_detail_id',
+            'information_object.description_identifier',
+            'information_object.source_standard',
+            'information_object.display_standard_id',
+            'information_object.lft',
+            'information_object.rgt',
+            'information_object.source_culture',
+            'information_object.icip_sensitivity',
+        ];
+
+        foreach (self::$i18nFields as $field) {
+            $columns[] = DB::raw("COALESCE(ioi_cur.{$field}, ioi_fb.{$field}) AS {$field}");
+        }
+
+        $columns[] = 'object.created_at';
+        $columns[] = 'object.updated_at';
+        $columns[] = 'slug.slug';
+
+        return $columns;
+    }
+}

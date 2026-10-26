@@ -1,0 +1,227 @@
+@extends('theme::layouts.2col')
+
+@section('title', $taxonomyName ? $taxonomyName . ' - Terms' : 'Terms')
+@section('body-class', 'taxonomy index')
+
+@section('sidebar')
+  <h2 class="d-grid">
+    <button class="btn btn-lg atom-btn-white text-wrap" type="button" data-bs-toggle="collapse" data-bs-target="#collapse-treeview" aria-expanded="true" aria-controls="collapse-treeview">
+      Browse {{ $taxonomyName ?? 'Terms' }}:
+    </button>
+  </h2>
+  <div class="collapse show" id="collapse-treeview">
+    <div class="tab-content mb-3" id="treeview-content">
+      <div class="tab-pane fade show active" id="treeview" role="tabpanel" aria-labelledby="treeview-tab">
+        <ul class="list-group rounded-0">
+          @foreach($treeTerms as $tt)
+            <li class="list-group-item" data-content="{{ $tt->name }}">
+              <span class="text text-truncate"><a href="{{ route('term.show', $tt->slug) }}" title="{{ $tt->name }}">{{ $tt->name }}</a></span>
+            </li>
+          @endforeach
+        </ul>
+      </div>
+    </div>
+  </div>
+@endsection
+
+@section('title-block')
+  <div class="multiline-header d-flex align-items-center mb-3">
+    <i class="fas fa-3x {{ $icon ?? 'fa-tag' }} me-3" aria-hidden="true"></i>
+    <div class="d-flex flex-column">
+      <h1 class="mb-0" aria-describedby="heading-label">
+        @if($pager->getNbResults())
+          Showing {{ number_format($pager->getNbResults()) }} results
+        @else
+          No results found
+        @endif
+      </h1>
+      <span class="small" id="heading-label">{{ $taxonomyName ?? 'Terms' }}</span>
+    </div>
+  </div>
+@endsection
+
+@section('before-content')
+
+    {{-- Search bar with field selector + sort (matching AtoM exactly) --}}
+    <div class="d-flex flex-wrap gap-2 mb-3">
+      <form id="inline-search" method="get" action="{{ route('term.browse') }}" class="d-flex" role="search" aria-label="{{ $taxonomyName }}">
+        <input type="hidden" name="taxonomy" value="{{ $taxonomyId }}">
+        {{-- #743 browseTerm filters: persist parent + scope-note across searches --}}
+        @if(! empty($parentFilter))
+          <input type="hidden" name="parent" value="{{ $parentFilter }}">
+        @endif
+        @if(! empty($scopeNoteOnly))
+          <input type="hidden" name="scopeNoteOnly" value="1">
+        @endif
+        <div class="input-group flex-nowrap">
+          {{-- Search field selector --}}
+          <button class="btn btn-sm atom-btn-white dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside">
+            <i class="fas fa-cog" aria-hidden="true"></i>
+            <span class="visually-hidden">{{ __('Search options') }}</span>
+          </button>
+          <div class="dropdown-menu mt-2">
+            <div class="px-3 py-2">
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="subqueryField" id="qf-all" value="allLabels" {{ (request('subqueryField', 'allLabels') === 'allLabels') ? 'checked' : '' }}>
+                <label class="form-check-label" for="qf-all">{{ __('All labels') }}</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="subqueryField" id="qf-preferred" value="preferredLabel" {{ request('subqueryField') === 'preferredLabel' ? 'checked' : '' }}>
+                <label class="form-check-label" for="qf-preferred">{{ __('Preferred label') }}</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="subqueryField" id="qf-usefor" value="useForLabels" {{ request('subqueryField') === 'useForLabels' ? 'checked' : '' }}>
+                <label class="form-check-label" for="qf-usefor">"Use for" labels</label>
+              </div>
+            </div>
+          </div>
+          {{-- Search input --}}
+          <input class="form-control form-control-sm" type="search" name="subquery" value="{{ request('subquery') }}" placeholder="Search {{ strtolower($taxonomyName ?? 'terms') }}" aria-label="Search {{ strtolower($taxonomyName ?? 'terms') }}">
+          {{-- Reset button (only when search active) --}}
+          @if(request('subquery'))
+            <a href="{{ route('term.browse', ['taxonomy' => $taxonomyId]) }}" class="btn btn-sm atom-btn-white d-flex align-items-center" role="button">
+              <i class="fas fa-undo" aria-hidden="true"></i>
+              <span class="visually-hidden">{{ __('Reset search') }}</span>
+            </a>
+          @endif
+          {{-- Search submit --}}
+          <button class="btn btn-sm atom-btn-white" type="submit">
+            <i class="fas fa-search" aria-hidden="true"></i>
+            <span class="visually-hidden">{{ __('Search') }}</span>
+          </button>
+        </div>
+      </form>
+
+      <div class="d-flex flex-wrap gap-2 ms-auto">
+        @php
+          $activeSort = request('sort', 'alphabetic');
+          $activeDir = request('sortDir', 'asc');
+        @endphp
+        <div class="dropdown d-inline-block">
+          <button class="btn btn-sm atom-btn-white dropdown-toggle text-wrap" type="button" id="sort-button" data-bs-toggle="dropdown" aria-expanded="false">
+            Sort by: {{ $sortOptions[$activeSort] ?? 'Name' }}
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end mt-2" aria-labelledby="sort-button">
+            @foreach($sortOptions as $key => $label)
+              <li><a class="dropdown-item {{ $activeSort === $key ? 'active' : '' }}" href="{{ request()->fullUrlWithQuery(['sort' => $key, 'page' => 1]) }}">{{ $label }}</a></li>
+            @endforeach
+          </ul>
+        </div>
+        <div class="dropdown d-inline-block">
+          <button class="btn btn-sm atom-btn-white dropdown-toggle text-wrap" type="button" id="sortdir-button" data-bs-toggle="dropdown" aria-expanded="false">
+            Direction: {{ $activeDir === 'desc' ? 'Descending' : 'Ascending' }}
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end mt-2" aria-labelledby="sortdir-button">
+            <li><a class="dropdown-item {{ $activeDir === 'asc' ? 'active' : '' }}" href="{{ request()->fullUrlWithQuery(['sortDir' => 'asc', 'page' => 1]) }}"><i class="fas fa-sort-alpha-down me-1"></i>{{ __('Ascending') }}</a></li>
+            <li><a class="dropdown-item {{ $activeDir === 'desc' ? 'active' : '' }}" href="{{ request()->fullUrlWithQuery(['sortDir' => 'desc', 'page' => 1]) }}"><i class="fas fa-sort-alpha-up me-1"></i>{{ __('Descending') }}</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    {{-- #743 browseTerm filters: parent term + scope-note toggle. The parent
+         dropdown is populated from the same $treeTerms list the sidebar uses
+         so the operator can pick any top-level term as a sub-tree scope. --}}
+    <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+      <form id="browse-term-filters" method="get" action="{{ route('term.browse') }}" class="d-flex flex-wrap gap-2 align-items-center">
+        <input type="hidden" name="taxonomy" value="{{ $taxonomyId }}">
+        @if(request('subquery'))
+          <input type="hidden" name="subquery" value="{{ request('subquery') }}">
+        @endif
+
+        <label for="filter-parent" class="form-label small mb-0">{{ __('Parent term') }}</label>
+        <select id="filter-parent" name="parent" class="form-select form-select-sm" style="max-width:18rem;">
+          <option value="">{{ __('Any') }}</option>
+          @foreach($treeTerms as $tt)
+            <option value="{{ $tt->id }}" {{ (string)($parentFilter ?? '') === (string)$tt->id ? 'selected' : '' }}>{{ $tt->name }}</option>
+          @endforeach
+        </select>
+
+        <div class="form-check ms-2">
+          <input class="form-check-input" type="checkbox" name="scopeNoteOnly" id="filter-scope" value="1" {{ ! empty($scopeNoteOnly) ? 'checked' : '' }}>
+          <label class="form-check-label small" for="filter-scope">{{ __('Has scope note') }}</label>
+        </div>
+
+        <button type="submit" class="btn btn-sm atom-btn-white">{{ __('Apply') }}</button>
+
+        @if(! empty($parentFilter) || ! empty($scopeNoteOnly))
+          <a class="btn btn-sm atom-btn-white" href="{{ route('term.browse', ['taxonomy' => $taxonomyId]) }}">
+            <i class="fas fa-times me-1" aria-hidden="true"></i>{{ __('Clear filters') }}
+          </a>
+        @endif
+
+        @if(!empty($taxonomyId))
+        <a class="btn btn-sm atom-btn-white ms-auto" href="{{ route('term.treeView', ['taxonomyId' => $taxonomyId]) }}">
+          <i class="fas fa-sitemap me-1" aria-hidden="true"></i>{{ __('Tree view') }}
+        </a>
+        @endif
+      </form>
+    </div>
+@endsection
+
+@section('content')
+
+    @if($pager->getNbResults())
+      <div class="table-responsive mb-3">
+        <table class="table table-bordered mb-0">
+          <thead>
+            <tr>
+              <th>{{ $taxonomyName ?? 'Term' }} term</th>
+              <th>{{ __('Scope note') }}</th>
+              <th class="text-end">{{ config('app.ui_label_informationobject', 'Archival description') }} count</th>
+              <th class="text-end">{{ config('app.ui_label_actor', 'Authority record') }} count</th>
+            </tr>
+          </thead>
+          <tbody>
+            @foreach($enrichedResults as $doc)
+              <tr>
+                <td>
+                  <a href="{{ route('term.show', $doc['slug']) }}" @if($doc['isProtected'] ?? false) class="text-muted" @endif>
+                    {{ $doc['name'] ?: '[Untitled]' }}
+                  </a>
+                  @if($doc['isProtected'] ?? false)
+                    <i class="fas fa-lock text-muted ms-1" style="font-size:.7em;" title="{{ __('Protected term') }}"></i>
+                  @endif
+                  @if(($doc['descendantCount'] ?? 0) > 0)
+                    <span class="text-muted">({{ $doc['descendantCount'] }})</span>
+                  @endif
+                  @if(!empty($doc['useFor']))
+                    <p class="small text-muted mb-0">
+                      Use for: {{ implode(', ', $doc['useFor']) }}
+                    </p>
+                  @endif
+                </td>
+                <td>
+                  @if(!empty($doc['scopeNotes']))
+                    @if(count($doc['scopeNotes']) === 1)
+                      {{ $doc['scopeNotes'][0] }}
+                    @else
+                      <ul class="mb-0 ps-3">
+                        @foreach($doc['scopeNotes'] as $note)
+                          <li>{{ $note }}</li>
+                        @endforeach
+                      </ul>
+                    @endif
+                  @endif
+                </td>
+                <td class="text-end">{{ number_format($doc['ioCount'] ?? 0) }}</td>
+                <td class="text-end">{{ number_format($doc['actorCount'] ?? 0) }}</td>
+              </tr>
+            @endforeach
+          </tbody>
+        </table>
+      </div>
+    @endif
+@endsection
+
+@section('after-content')
+  @include('ahg-core::components.pager', ['pager' => $pager])
+
+  @auth
+    @if(\AhgCore\Services\AclService::check(null, 'create'))
+    <section class="actions mb-3">
+      <a href="{{ route('term.create', ['taxonomy' => $taxonomyId]) }}" class="btn atom-btn-outline-light">{{ __('Add new') }}</a>
+    </section>
+    @endif
+  @endauth
+@endsection

@@ -1,0 +1,99 @@
+<?php
+
+namespace AhgCore\Commands;
+
+use AhgCore\Services\CronSchedulerService;
+use Illuminate\Console\Command;
+
+class CronRunCommand extends Command
+{
+    protected $signature = 'ahg:cron-run
+        {--slug= : Run a specific job by slug}
+        {--dry-run : List due jobs without running them}';
+
+    protected $description = 'Run due cron schedules from the database';
+
+    public function handle(CronSchedulerService $service): int
+    {
+        $slug = $this->option('slug');
+        $dryRun = $this->option('dry-run');
+
+        if ($slug) {
+            return $this->runBySlug($service, $slug, $dryRun);
+        }
+
+        $due = $service->getDueSchedules();
+
+        if ($due->isEmpty()) {
+            $this->info('No schedules due.');
+
+            return self::SUCCESS;
+        }
+
+        if ($dryRun) {
+            $this->info("Due schedules ({$due->count()}):");
+            $rows = $due->map(fn ($s) => [$s->slug, $s->artisan_command, $s->cron_expression, $s->next_run_at]);
+            $this->table(['Slug', 'Command', 'Cron', 'Next Run'], $rows->toArray());
+
+            return self::SUCCESS;
+        }
+
+        $this->info("Running {$due->count()} due schedule(s)...");
+        $results = $service->runDueSchedules();
+
+        foreach ($results as $r) {
+            // CronSchedulerService::runDueSchedules returns 2 result shapes:
+            // (a) full row from runSingle() with id/slug/status/duration_ms/next_run
+            // (b) skipped/deferred row with only status + reason
+            // The skipped shape was crashing this loop with "Undefined array
+            // key duration_ms" once schedule:run actually started firing
+            // every minute (the cron infra fix in v1.52.41). Tolerate both.
+            $status = $r['status'] ?? 'unknown';
+            $icon = $status === 'success' ? '<info>OK</info>'
+                  : ($status === 'skipped' || $status === 'deferred' ? '<comment>SKIP</comment>' : '<error>FAIL</error>');
+            $label = $r['slug'] ?? $r['reason'] ?? '(unknown)';
+            $duration = isset($r['duration_ms']) ? "({$r['duration_ms']}ms)" : '';
+            $pending = $status === 'failed' && ! ($r['confirmed'] ?? true) ? ' - first failure, reported if the next run fails too' : '';
+            $this->line(trim("  [{$icon}] {$label} {$duration}{$pending}"));
+        }
+
+        // A frequent job's first failure waits one run for confirmation, so a
+        // momentary blip does not fail the runner (see CronSchedulerService::isFrequent).
+        // It is still recorded as failed in cron_schedule and ahg_cron_run.
+        $failed = collect($results)->where('status', 'failed')->filter(fn ($r) => $r['confirmed'] ?? true)->count();
+        if ($failed > 0) {
+            $this->warn("{$failed} job(s) failed.");
+
+            return self::FAILURE;
+        }
+
+        return self::SUCCESS;
+    }
+
+    protected function runBySlug(CronSchedulerService $service, string $slug, bool $dryRun): int
+    {
+        $schedule = \Illuminate\Support\Facades\DB::table('cron_schedule')
+            ->where('slug', $slug)
+            ->first();
+
+        if (! $schedule) {
+            $this->error("Schedule not found: {$slug}");
+
+            return self::FAILURE;
+        }
+
+        if ($dryRun) {
+            $this->info("Would run: {$schedule->artisan_command} (cron: {$schedule->cron_expression})");
+
+            return self::SUCCESS;
+        }
+
+        $this->info("Running: {$schedule->slug} ({$schedule->artisan_command})");
+        $result = $service->runSingle($schedule);
+
+        $icon = $result['status'] === 'success' ? 'OK' : 'FAIL';
+        $this->line("[{$icon}] {$result['slug']} ({$result['duration_ms']}ms) - next run: {$result['next_run']}");
+
+        return $result['status'] === 'success' ? self::SUCCESS : self::FAILURE;
+    }
+}

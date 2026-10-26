@@ -1,0 +1,203 @@
+{{--
+  Virtual return - public surface for the repatriation engine (heratio#1207)
+
+  Renders one repatriation claim as a respectful "virtual return": the object
+  shown in its ORIGIN context (place of origin, claimant community, documented
+  evidence) so it can be re-encountered in its own context even when no physical
+  return has happened. A link to the object's own record (where any digital
+  surrogate / 3D viewer lives) is offered ONLY when the underlying record is
+  published. Sensitive subject matter: factual, non-partisan copy; the status is
+  presented as where a dialogue stands, never a legal outcome. The standing
+  disclaimer is always visible. International, jurisdiction-neutral.
+
+  Copyright (C) 2026 Johan Pieterse
+  Plain Sailing Information Systems
+  AGPL-3.0-or-later
+--}}
+
+@extends('theme::layouts.1col')
+
+@php
+    $sm = $claim['status_meta'] ?? ['label' => $claim['claim_status'] ?? 'registered', 'level' => 'secondary', 'help' => ''];
+    $itemTitle = ($item['title'] ?? null) ?: ($claim['item_title'] ?? null) ?: (__('Record').' #'.($claim['item_ref'] ?? ''));
+    $recordUrl = $item['url'] ?? null; // present only for published items
+@endphp
+
+@section('title', __('Virtual return').': '.$itemTitle)
+
+@section('content')
+<div class="container-fluid py-4">
+
+    {{-- heratio#1207 - notice when a walkable 3D return was requested but unavailable --}}
+    @if(session('vr_notice'))
+        <div class="alert alert-info" role="status">{{ session('vr_notice') }}</div>
+    @endif
+
+    {{-- Hero: the object placed back in its origin context --}}
+    <div class="p-4 p-md-5 mb-4 rounded-3 bg-dark text-white">
+        <div class="d-flex align-items-center mb-2">
+            <i class="fas fa-person-walking-arrow-right fa-lg me-3"></i>
+            <span class="text-uppercase small fw-semibold text-white-50">{{ __('Virtual return') }}</span>
+        </div>
+        <h1 class="h2 mb-2">{{ $itemTitle }}</h1>
+        @if(!empty($claim['origin_place']) || !empty($claim['claimant_community']))
+            <p class="lead mb-1">
+                {{ __('Returned, virtually, to') }}
+                <strong>{{ $claim['origin_place'] ?: ($claim['claimant_community'] ?? '') }}</strong>@if(!empty($claim['origin_place']) && !empty($claim['claimant_community'])), {{ $claim['claimant_community'] }}@endif.
+            </p>
+        @endif
+        <p class="mb-0 text-white-50">
+            {{ __('This page brings the object back into its place and community of origin in digital form. It honours that context regardless of where the object is physically held today, and independently of any decision about physical return.') }}
+        </p>
+    </div>
+
+    {{-- Standing disclaimer --}}
+    <div class="alert alert-warning d-flex align-items-start mb-4" role="alert">
+        <i class="fas fa-circle-info fa-lg me-3 mt-1"></i>
+        <div>
+            <strong>{{ __('A documented request and its status, not a determination.') }}</strong>
+            <p class="mb-0 small">{{ $disclaimer }}</p>
+        </div>
+    </div>
+
+    <div class="row g-4">
+
+        {{-- Origin context --}}
+        <div class="col-12 col-lg-8">
+            <div class="card shadow-sm h-100">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <span class="fw-semibold"><i class="fas fa-seedling text-success me-2"></i>{{ __('In its origin context') }}</span>
+                    <span class="badge text-bg-{{ $sm['level'] }}">{{ __($sm['label']) }}</span>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <div class="text-uppercase text-muted small fw-semibold mb-1">{{ __('Place / region of origin') }}</div>
+                            <div class="fw-semibold">{{ $claim['origin_place'] ?: '-' }}</div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="text-uppercase text-muted small fw-semibold mb-1">{{ __('Claimant community') }}</div>
+                            <div class="fw-semibold">{{ $claim['claimant_community'] ?: '-' }}</div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="text-uppercase text-muted small fw-semibold mb-1">{{ __('Current holder') }}</div>
+                            <div>{{ $claim['current_holder'] ?: '-' }}</div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="text-uppercase text-muted small fw-semibold mb-1">{{ __('Stage of dialogue') }}</div>
+                            <div>{{ __($sm['label']) }}</div>
+                            @if(!empty($sm['help']))
+                                <div class="small text-muted">{{ __($sm['help']) }}</div>
+                            @endif
+                        </div>
+                    </div>
+
+                    @if(!empty($claim['evidence_summary']))
+                        <div class="border-start border-3 ps-3 mb-3">
+                            <div class="text-uppercase text-muted small fw-semibold mb-1">
+                                <i class="fas fa-file-lines me-1"></i>{{ __('Documented evidence') }}
+                            </div>
+                            <p class="mb-0">{{ $claim['evidence_summary'] }}</p>
+                        </div>
+                    @endif
+
+                    {{-- Register trace (origin-vs-holding), shown when the detection register still traces the item --}}
+                    @if(!empty($register) && !empty($register['reason']))
+                        <div class="border-start border-3 border-secondary ps-3">
+                            <div class="text-uppercase text-muted small fw-semibold mb-1">
+                                <i class="fas fa-route me-1"></i>{{ __('Displacement context (from the register)') }}
+                            </div>
+                            <p class="small mb-0">{{ $register['reason'] }}</p>
+                        </div>
+                    @endif
+                </div>
+            </div>
+        </div>
+
+        {{-- Re-encounter the object --}}
+        <div class="col-12 col-lg-4">
+            <div class="card shadow-sm h-100">
+                <div class="card-header bg-white fw-semibold">
+                    <i class="fas fa-image me-2"></i>{{ __('Re-encounter the object') }}
+                </div>
+                <div class="card-body d-flex flex-column">
+                    @if($recordUrl)
+                        <p class="text-muted small">
+                            {{ __('The published record hosts the object\'s description and any digital surrogate or 3D view.') }}
+                        </p>
+                        {{-- heratio#1207 3D handoff: walk the object's 3D model in an origin-context room --}}
+                        @if(!empty($canWalk) && !empty($walkUrl))
+                            <p class="text-muted small mb-2">
+                                {{ __('This object has a 3D model. Step into a virtual return - the object placed in a room set in its place of origin.') }}
+                            </p>
+                            <a href="{{ $walkUrl }}" class="btn btn-success mb-2">
+                                <i class="fas fa-vr-cardboard me-1"></i>{{ __('Walk the virtual return (3D)') }}
+                            </a>
+                        @endif
+                        <a href="{{ $recordUrl }}" class="btn btn-dark mt-auto">
+                            <i class="fas fa-up-right-from-square me-1"></i>{{ __('Open the object record') }}
+                        </a>
+                    @else
+                        <p class="text-muted small mb-0">
+                            {{ __('A public record is not available for this object yet. Its origin context is recorded above; a digital surrogate may be added in future.') }}
+                        </p>
+                    @endif
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    {{-- Community knowledge (heratio#1207, knowledge slice). Approved community
+         knowledge about this object - oral history, provenance, corrections,
+         source-community links - plus an invitation to contribute. Defensive
+         defaults so the page is unchanged when these props are not supplied. --}}
+    @php
+        $knowledge = $knowledge ?? [];
+        $kClaimId = $claimId ?? ($claim['id'] ?? null);
+    @endphp
+    @if($kClaimId)
+        <section class="mt-5">
+            <div class="d-flex justify-content-between align-items-center border-bottom pb-2 mb-3">
+                <h2 class="h4 mb-0"><i class="fas fa-users me-2 text-muted"></i>{{ __('Community knowledge') }}</h2>
+                <a href="{{ route('repatriation-knowledge.form', ['claim' => $kClaimId]) }}" class="btn btn-outline-dark btn-sm">
+                    <i class="fas fa-hand-holding-heart me-1"></i>{{ __('Share what you know') }}
+                </a>
+            </div>
+            <p class="text-muted small">
+                {{ __('Knowledge about this object belongs to its communities. Oral history, provenance, corrections and links to source communities are welcome; contributions are reviewed before they appear, and you are credited only if you ask to be.') }}
+            </p>
+            @if(empty($knowledge))
+                <p class="text-muted small mb-0">{{ __('No approved community knowledge on this object yet. Be the first to contribute.') }}</p>
+            @else
+                <div class="row g-3">
+                    @foreach($knowledge as $c)
+                        <div class="col-12 col-lg-6">
+                            <div class="card h-100 shadow-sm">
+                                <div class="card-header bg-white">
+                                    <span class="small fw-semibold">
+                                        <i class="fas {{ $c['type_meta']['icon'] ?? 'fa-circle-info' }} me-1 text-muted"></i>{{ __($c['type_meta']['label'] ?? $c['contribution_type']) }}
+                                    </span>
+                                </div>
+                                <div class="card-body">
+                                    <p class="small mb-2" style="white-space: pre-line;">{{ \Illuminate\Support\Str::limit($c['body'], 600) }}</p>
+                                    @if(!empty($c['source']))
+                                        <p class="small text-muted mb-1"><i class="fas fa-book-open me-1"></i>{{ $c['source'] }}</p>
+                                    @endif
+                                    <p class="small text-muted mb-0"><i class="fas fa-user me-1"></i>{{ $c['contributor_name'] ?: __('Anonymous contributor') }}</p>
+                                </div>
+                            </div>
+                        </div>
+                    @endforeach
+                </div>
+            @endif
+        </section>
+    @endif
+
+    <p class="text-muted small mt-4 mb-0">
+        <i class="fas fa-hand-holding-heart me-1"></i>
+        {{ __('This virtual return is maintained in dialogue with communities and holding institutions. Origin, ownership and lawful-transfer history are matters for the relevant communities and qualified staff to assess together, case by case.') }}
+    </p>
+
+</div>
+@endsection

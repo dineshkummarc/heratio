@@ -1,0 +1,873 @@
+@extends('theme::layouts.1col')
+
+@section('title', $title)
+
+@section('content')
+
+  <nav aria-label="{{ __('breadcrumb') }}">
+    <ol class="breadcrumb">
+      <li class="breadcrumb-item"><a href="{{ url('/') }}">{{ __('Home') }}</a></li>
+      <li class="breadcrumb-item">{{ __('Import') }}</li>
+      <li class="breadcrumb-item active">{{ __('FTP Upload') }}</li>
+    </ol>
+  </nav>
+
+  <h1 class="mb-4"><i class="fa fa-upload me-2"></i>{{ __('FTP Upload') }}</h1>
+
+  @if(!$configured)
+    <div class="alert alert-warning">
+      <h5><i class="fa fa-exclamation-triangle me-2"></i>{{ __('FTP/SFTP Not Configured') }}</h5>
+      <p class="mb-2">{{ __('Please configure the FTP/SFTP connection settings before using this page.') }}</p>
+      <a href="{{ url('/admin/settings/ftp') }}" class="btn atom-btn-white">
+        <i class="fa fa-cog me-1"></i>{{ __('Configure FTP Settings') }}
+      </a>
+    </div>
+  @else
+
+    <!-- CSV Path Info -->
+    <div class="alert alert-info border-start border-4 border-primary">
+      <h5><i class="fa fa-info-circle me-2"></i>{{ __('Important: CSV Digital Object Path') }}</h5>
+      <p class="mb-2">Files uploaded here are stored at the remote path shown below. In your CSV import file, set the <code>digitalObjectPath</code> column to:</p>
+      <div class="bg-white border rounded p-3 mb-2">
+        <code id="path-prefix" class="fs-5 text-primary user-select-all">{{ $diskPath }}/</code><code class="fs-5 text-muted">your-filename.ext</code>
+        <button type="button" class="btn btn-sm atom-btn-white ms-3" id="copy-path-btn" title="{{ __('Copy path prefix') }}">
+          <i class="fa fa-copy"></i>
+        </button>
+      </div>
+      <small class="text-muted">{{ __('Replace') }} <em>your-filename.ext</em> with the actual filename you upload.</small>
+    </div>
+
+    <!-- Upload Zone -->
+    <div class="card mb-4">
+      <div class="card-header" style="background:var(--ahg-primary);color:#fff">
+        <h5 class="mb-0"><i class="fa fa-cloud-upload-alt me-2"></i>{{ __('Upload Files or Folders') }}
+          <small class="ms-2 opacity-75">(supports files up to 2 GB - chunked upload with resume)</small>
+        </h5>
+      </div>
+      <div class="card-body">
+        <div id="drop-zone" class="border border-2 border-dashed rounded p-5 text-center mb-3" style="border-color:#0d6efd!important;">
+          <i class="fa fa-cloud-upload-alt fa-3x text-muted mb-3 d-block"></i>
+          <p class="lead mb-1">{{ __('Drag and drop files or folders here') }}</p>
+          <p class="text-muted mb-3">{{ __('or use the buttons below') }}</p>
+          <div class="d-flex justify-content-center gap-2 flex-wrap">
+            <button type="button" id="pick-files-btn" class="btn atom-btn-white">
+              <i class="fa fa-file me-1"></i>{{ __('Browse files') }}
+            </button>
+            <button type="button" id="pick-folder-btn" class="btn atom-btn-white">
+              <i class="fa fa-folder-open me-1"></i>{{ __('Browse folder') }}
+            </button>
+          </div>
+          <input type="file" id="file-input" multiple class="d-none">
+          <input type="file" id="folder-input" webkitdirectory directory class="d-none">
+        </div>
+        <div class="row">
+          <div class="col-md-4">
+            <small class="text-muted"><i class="fa fa-file me-1"></i>{{ __('Accepted: CSV, XML, ZIP, images, documents') }}</small>
+          </div>
+          <div class="col-md-4 text-center">
+            <small class="text-muted"><i class="fa fa-hdd me-1"></i>{{ __('Max file size: 2 GB per file') }}</small>
+          </div>
+          <div class="col-md-4 text-end">
+            <small class="text-muted"><i class="fa fa-server me-1"></i>Protocol: {{ strtoupper($protocol) }}</small>
+          </div>
+        </div>
+        <div id="upload-progress" class="d-none mt-3">
+          <!-- Per-file progress bars inserted by JS -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Combine a folder into PDF/A -->
+    <div class="card mb-4">
+      <div class="card-header" style="background:var(--ahg-primary);color:#fff">
+        <h5 class="mb-0"><i class="fa fa-file-pdf me-2"></i>{{ __('Combine a folder into PDF/A') }}</h5>
+      </div>
+      <div class="card-body">
+        <p class="text-muted small mb-3">{{ __('Combine all images in an uploaded folder into one PDF/A. It runs in the background.') }}</p>
+        <div class="row g-2 align-items-end">
+          <div class="col-md-5">
+            <label class="form-label" for="combine-folder">{{ __('Folder') }}</label>
+            <select class="form-select" id="combine-folder">
+              <option value="">{{ __('(all files in the upload root)') }}</option>
+              @foreach(($folders ?? []) as $folder)
+                @php $fname = is_array($folder) ? ($folder['name'] ?? '') : $folder; @endphp
+                @if($fname !== '')<option value="{{ $fname }}">{{ $fname }}</option>@endif
+              @endforeach
+            </select>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label" for="combine-record">{{ __('Attach to record (slug, optional)') }}</label>
+            <input type="text" class="form-control" id="combine-record" placeholder="{{ __('blank = link later') }}">
+          </div>
+          <div class="col-md-3">
+            <button type="button" class="btn btn-danger w-100" id="combine-btn">
+              <i class="fa fa-file-pdf me-1"></i>{{ __('Create PDF/A') }}
+            </button>
+          </div>
+        </div>
+        <div id="combine-result" class="mt-3"></div>
+      </div>
+    </div>
+
+    <!-- Combined PDFs ready to link to a record -->
+    <div class="card mb-4" id="ready-link-card" style="display:none;">
+      <div class="card-header" style="background:var(--ahg-primary);color:#fff">
+        <h5 class="mb-0"><i class="fa fa-link me-2"></i>{{ __('Combined PDFs - link to a record') }}</h5>
+      </div>
+      <div class="card-body">
+        <p class="text-muted small mb-3">{{ __('PDFs that were combined without a record slug. Enter a record slug and attach each one as a digital object.') }}</p>
+        <div id="ready-link-list"></div>
+      </div>
+    </div>
+
+    <!-- File Listing -->
+    <div class="card mb-4">
+      <div class="card-header d-flex justify-content-between align-items-center" style="background:var(--ahg-primary);color:#fff">
+        <h5 class="mb-0"><i class="fa fa-folder-open me-2"></i>{{ __('Remote Files') }}</h5>
+        <div>
+          <button type="button" class="btn btn-sm atom-btn-white" id="refresh-btn">
+            <i class="fa fa-sync-alt me-1"></i>{{ __('Refresh') }}
+          </button>
+          <button type="button" class="btn btn-sm btn-danger ms-1" id="clear-all-btn">
+            <i class="fa fa-trash me-1"></i>{{ __('Clear all') }}
+          </button>
+        </div>
+      </div>
+      <div class="card-body">
+        @if($listError)
+          <div class="alert alert-danger">
+            <i class="fa fa-exclamation-circle me-2"></i>{{ $listError }}
+          </div>
+        @endif
+
+        {{-- Breadcrumb + Up button. Populated client-side as the user navigates;
+             initial render is the root. --}}
+        <div class="d-flex align-items-center mb-2 flex-wrap gap-2">
+          <button type="button" class="btn btn-sm atom-btn-white" id="up-btn" disabled title="{{ __('Up one level') }}">
+            <i class="fa fa-level-up-alt"></i>
+          </button>
+          <nav aria-label="{{ __('folder breadcrumb') }}" class="flex-grow-1">
+            <ol class="breadcrumb mb-0" id="folder-breadcrumb">
+              <li class="breadcrumb-item active" aria-current="page" data-dir="">
+                <i class="fa fa-folder me-1"></i>{{ __('Root') }}
+              </li>
+            </ol>
+          </nav>
+          <small class="text-muted">{{ __('Click a folder row to open it. Uploads land in the currently-shown folder.') }}</small>
+        </div>
+
+        <div class="table-responsive">
+          <table class="table table-bordered table-striped table-hover mb-0" id="files-table">
+            <thead>
+              <tr>
+                <th>{{ __('Filename') }}</th>
+                <th class="text-end" style="width:120px">{{ __('Size') }}</th>
+                <th style="width:180px">{{ __('Modified') }}</th>
+                <th class="text-center" style="width:80px">{{ __('Actions') }}</th>
+              </tr>
+            </thead>
+            <tbody id="files-tbody">
+              @if(empty($folders) && empty($files))
+                <tr id="empty-row"><td colspan="4" class="text-center text-muted py-4">{{ __('No files found') }}</td></tr>
+              @else
+                @foreach($folders as $folder)
+                  <tr class="folder-row" data-foldername="{{ $folder['name'] }}" style="cursor:pointer">
+                    <td><i class="fa fa-folder me-2 text-warning"></i><span class="fw-semibold">{{ $folder['name'] }}</span></td>
+                    <td class="text-end text-muted">-</td>
+                    <td>{{ $folder['modified'] }}</td>
+                    <td class="text-center"><span class="text-muted small">{{ __('Open') }}</span></td>
+                  </tr>
+                @endforeach
+                @foreach($files as $file)
+                  <tr>
+                    <td><i class="fa fa-file me-2 text-muted"></i>{{ $file['name'] }}</td>
+                    <td class="text-end">{{ \AhgFtpUpload\Services\FtpService::formatBytes($file['size']) }}</td>
+                    <td>{{ $file['modified'] }}</td>
+                    <td class="text-center">
+                      <button type="button" class="btn btn-sm atom-btn-outline-danger delete-file-btn" data-filename="{{ $file['name'] }}" title="{{ __('Delete') }}">
+                        <i class="fa fa-trash"></i>
+                      </button>
+                    </td>
+                  </tr>
+                @endforeach
+              @endif
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  @endif
+
+  <script>
+  (function() {
+      'use strict';
+
+      var CHUNK_SIZE = {{ (int) $chunkSize }};
+      var MAX_RETRIES = 3;
+      var RETRY_DELAY_MS = 2000;
+      var UPLOAD_URL = '{{ route("ftpUpload.uploadChunk") }}';
+      var LIST_URL = '{{ route("ftpUpload.listFiles") }}';
+      var DELETE_URL = '{{ route("ftpUpload.deleteFile") }}';
+      var CLEAR_URL = '{{ route("ftpUpload.clearAll") }}';
+      var clearAllBtn = document.getElementById('clear-all-btn');
+      if (clearAllBtn) {
+          clearAllBtn.addEventListener('click', function () {
+              if (!confirm('{{ __('Delete ALL uploaded files in this folder? This cannot be undone.') }}')) return;
+              clearAllBtn.disabled = true;
+              var fd = new FormData(); fd.append('_token', CSRF_TOKEN);
+              fetch(CLEAR_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                  .then(function (r) { return r.json(); })
+                  .then(function (d) {
+                      clearAllBtn.disabled = false;
+                      var rb = document.getElementById('refresh-btn'); if (rb) rb.click();
+                      alert(d.message || (d.success ? 'Cleared' : 'Failed'));
+                  })
+                  .catch(function () { clearAllBtn.disabled = false; alert('Request failed'); });
+          });
+      }
+      var COMBINE_URL = '{{ route("ftpUpload.combineFolder") }}';
+      var CSRF_TOKEN = '{{ csrf_token() }}';
+
+      // Combine a folder into PDF/A (background).
+      var combineBtn = document.getElementById('combine-btn');
+      if (combineBtn) {
+          combineBtn.addEventListener('click', function () {
+              var sub = document.getElementById('combine-folder').value;
+              var rec = document.getElementById('combine-record').value.trim();
+              var out = document.getElementById('combine-result');
+              combineBtn.disabled = true;
+              out.innerHTML = '<span class="text-muted"><i class="fa fa-spinner fa-spin me-1"></i>{{ __('Starting…') }}</span>';
+              var fd = new FormData();
+              fd.append('folder', sub);
+              if (rec) fd.append('record', rec);
+              fd.append('_token', CSRF_TOKEN);
+              fetch(COMBINE_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                  .then(function (r) { return r.json(); })
+                  .then(function (d) {
+                      combineBtn.disabled = false;
+                      out.innerHTML = d.success
+                          ? '<div class="alert alert-success mb-0"><i class="fa fa-check me-1"></i>' + d.message + '</div>'
+                          : '<div class="alert alert-danger mb-0">' + (d.error || 'Failed') + '</div>';
+                  })
+                  .catch(function () { combineBtn.disabled = false; out.innerHTML = '<div class="alert alert-danger mb-0">Request failed</div>'; });
+          });
+      }
+
+      // Combined PDFs ready to link (combined without a slug): list + attach by slug.
+      var READY_URL = '{{ route("ftpUpload.readyToLink") }}';
+      var ATTACH_URL = '{{ route("ftpUpload.attachExisting") }}';
+      function escHtml(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
+      function loadReadyToLink() {
+          var card = document.getElementById('ready-link-card');
+          var list = document.getElementById('ready-link-list');
+          if (!card || !list) return;
+          fetch(READY_URL, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+              .then(function (r) { return r.json(); })
+              .then(function (d) {
+                  var items = (d && d.items) || [];
+                  if (!items.length) { card.style.display = 'none'; list.innerHTML = ''; return; }
+                  card.style.display = '';
+                  var html = '';
+                  items.forEach(function (it) {
+                      html += '<div class="row g-2 align-items-end mb-2 ready-link-row" data-file="' + escHtml(it.file) + '">'
+                          + '<div class="col-md-5"><span class="fw-semibold">' + escHtml(it.name) + '</span>'
+                          + '<span class="text-muted small ms-2">' + it.size_mb + ' MB</span></div>'
+                          + '<div class="col-md-4"><input type="text" class="form-control form-control-sm ready-link-slug" placeholder="{{ __('record slug') }}"></div>'
+                          + '<div class="col-md-3"><button type="button" class="btn btn-sm btn-primary w-100 ready-link-btn"><i class="fa fa-link me-1"></i>{{ __('Attach') }}</button></div>'
+                          + '</div>';
+                  });
+                  list.innerHTML = html;
+              })
+              .catch(function () {});
+      }
+      var readyList = document.getElementById('ready-link-list');
+      if (readyList) {
+          readyList.addEventListener('click', function (e) {
+              var btn = e.target.closest ? e.target.closest('.ready-link-btn') : null;
+              if (!btn) return;
+              var row = btn.closest('.ready-link-row');
+              var file = row.getAttribute('data-file');
+              var slug = row.querySelector('.ready-link-slug').value.trim();
+              if (!slug) { alert('{{ __('Enter a record slug first.') }}'); return; }
+              btn.disabled = true;
+              btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i>';
+              var fd = new FormData();
+              fd.append('file', file);
+              fd.append('slug', slug);
+              fd.append('_token', CSRF_TOKEN);
+              fetch(ATTACH_URL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                  .then(function (r) { return r.json(); })
+                  .then(function (d) {
+                      if (d.success) {
+                          row.outerHTML = '<div class="alert alert-success mb-2 py-1"><i class="fa fa-check me-1"></i>{{ __('Attached to') }} ' + escHtml(slug) + '</div>';
+                          loadReadyToLink();
+                      } else {
+                          btn.disabled = false; btn.innerHTML = '<i class="fa fa-link me-1"></i>{{ __('Attach') }}';
+                          alert(d.error || 'Failed');
+                      }
+                  })
+                  .catch(function () { btn.disabled = false; btn.innerHTML = '<i class="fa fa-link me-1"></i>{{ __('Attach') }}'; alert('Request failed'); });
+          });
+      }
+      loadReadyToLink();
+      window.setInterval(loadReadyToLink, 20000);
+
+      var uploads = {};
+      // The folder the user is currently viewing in the Remote Files panel.
+      // '' = root. Used by both the listing refresh and the upload pipeline
+      // (uploads always land inside the currently-shown folder so the UX
+      // matches every desktop file manager).
+      var currentDir = '';
+
+      // Copy path prefix
+      var copyBtn = document.getElementById('copy-path-btn');
+      if (copyBtn) {
+          copyBtn.addEventListener('click', function() {
+              var pathEl = document.getElementById('path-prefix');
+              if (pathEl && navigator.clipboard) {
+                  navigator.clipboard.writeText(pathEl.textContent).then(function() {
+                      copyBtn.innerHTML = '<i class="fa fa-check text-success"></i>';
+                      setTimeout(function() { copyBtn.innerHTML = '<i class="fa fa-copy"></i>'; }, 2000);
+                  });
+              }
+          });
+      }
+
+      var dropZone = document.getElementById('drop-zone');
+      var fileInput = document.getElementById('file-input');
+      var folderInput = document.getElementById('folder-input');
+      var pickFilesBtn = document.getElementById('pick-files-btn');
+      var pickFolderBtn = document.getElementById('pick-folder-btn');
+      var progressContainer = document.getElementById('upload-progress');
+
+      if (!dropZone || !fileInput) return;
+
+      // Pick-files button → standard multi-file picker (root-level).
+      if (pickFilesBtn) pickFilesBtn.addEventListener('click', function(e) {
+          e.preventDefault(); e.stopPropagation();
+          fileInput.click();
+      });
+      fileInput.addEventListener('change', function() {
+          if (this.files.length > 0) startUploads(toArrayWithoutPaths(this.files));
+          this.value = '';
+      });
+
+      // Pick-folder button → webkitdirectory picker. Each File gets a
+      // .webkitRelativePath like 'session-2026/scans/page-001.tiff'.
+      if (pickFolderBtn && folderInput) {
+          pickFolderBtn.addEventListener('click', function(e) {
+              e.preventDefault(); e.stopPropagation();
+              folderInput.click();
+          });
+          folderInput.addEventListener('change', function() {
+              if (this.files.length > 0) {
+                  var arr = [];
+                  for (var i = 0; i < this.files.length; i++) {
+                      var f = this.files[i];
+                      // Tag each file with the path the server should preserve.
+                      f._ahgRelPath = f.webkitRelativePath || f.name;
+                      arr.push(f);
+                  }
+                  startUploads(arr);
+              }
+              this.value = '';
+          });
+      }
+
+      dropZone.addEventListener('dragover', function(e) { e.preventDefault(); e.stopPropagation(); this.classList.add('bg-light'); });
+      dropZone.addEventListener('dragleave', function(e) { e.preventDefault(); e.stopPropagation(); this.classList.remove('bg-light'); });
+      dropZone.addEventListener('drop', function(e) {
+          e.preventDefault(); e.stopPropagation();
+          dropZone.classList.remove('bg-light');
+
+          var dt = e.dataTransfer;
+          var items = dt && dt.items ? dt.items : null;
+          // webkitGetAsEntry is the only cross-browser way to detect that the
+          // user dropped a folder (FileList alone collapses folders to nothing).
+          var hasEntryAPI = items && items.length && typeof items[0].webkitGetAsEntry === 'function';
+
+          if (hasEntryAPI) {
+              var files = [];
+              var pending = items.length;
+              var done = function() {
+                  pending--;
+                  if (pending === 0) {
+                      if (files.length === 0) return;
+                      startUploads(files);
+                  }
+              };
+              for (var i = 0; i < items.length; i++) {
+                  var entry = items[i].webkitGetAsEntry();
+                  if (entry) {
+                      walkFsEntry(entry, '', files, done);
+                  } else {
+                      done();
+                  }
+              }
+          } else {
+              // Old browser → only flat file lists work
+              if (dt && dt.files && dt.files.length > 0) startUploads(toArrayWithoutPaths(dt.files));
+          }
+      });
+
+      // Recursively walk a FileSystemEntry tree, tagging each File with
+      // _ahgRelPath = full path inside the dropped tree (e.g. 'foo/bar/baz.tif').
+      // 'parentPath' is the path accumulated above this entry.
+      function walkFsEntry(entry, parentPath, out, done) {
+          if (entry.isFile) {
+              entry.file(function(file) {
+                  var rel = parentPath ? (parentPath + '/' + entry.name) : entry.name;
+                  file._ahgRelPath = rel;
+                  out.push(file);
+                  done();
+              }, done);
+              return;
+          }
+          if (entry.isDirectory) {
+              var reader = entry.createReader();
+              var collected = [];
+              var thisPath = parentPath ? (parentPath + '/' + entry.name) : entry.name;
+              // readEntries returns at most ~100 per call; loop until empty.
+              var readBatch = function() {
+                  reader.readEntries(function(batch) {
+                      if (batch.length === 0) {
+                          if (collected.length === 0) { done(); return; }
+                          var pending = collected.length;
+                          collected.forEach(function(child) {
+                              walkFsEntry(child, thisPath, out, function() {
+                                  pending--;
+                                  if (pending === 0) done();
+                              });
+                          });
+                          return;
+                      }
+                      collected = collected.concat(Array.from(batch));
+                      readBatch();
+                  }, done);
+              };
+              readBatch();
+              return;
+          }
+          done();
+      }
+
+      // For root-level pickers (pick-files / legacy drop), wrap a FileList into
+      // an array and ensure no _ahgRelPath leaks from a previous round.
+      function toArrayWithoutPaths(fileList) {
+          var arr = [];
+          for (var i = 0; i < fileList.length; i++) {
+              var f = fileList[i];
+              f._ahgRelPath = '';  // explicit: root-level upload
+              arr.push(f);
+          }
+          return arr;
+      }
+
+      function startUploads(files) {
+          progressContainer.classList.remove('d-none');
+          for (var i = 0; i < files.length; i++) {
+              chunkedUpload(files[i]);
+          }
+      }
+
+      function generateId() {
+          return 'up_' + Date.now() + '_' + Math.random().toString(36).substr(2, 8);
+      }
+
+      function chunkedUpload(file) {
+          var uploadId = generateId();
+          var totalChunks = Math.ceil(file.size / CHUNK_SIZE) || 1;
+          var domId = 'progress-' + uploadId;
+          // Folder-upload: when set, this file came from a dropped folder or
+          // webkitdirectory picker. Display the full relative path so the user
+          // can see WHICH 'page-001.tiff' is uploading (out of dozens).
+          var displayName = file._ahgRelPath ? file._ahgRelPath : file.name;
+          var iconClass = file._ahgRelPath && file._ahgRelPath.indexOf('/') >= 0 ? 'fa-folder-open' : 'fa-file';
+
+          var html = '<div id="' + domId + '" class="mb-3 border rounded p-3">' +
+              '<div class="d-flex justify-content-between align-items-center mb-1">' +
+                  '<span class="text-truncate fw-semibold" style="max-width:50%"><i class="fa ' + iconClass + ' me-1"></i>' + escapeHtml(displayName) + '</span>' +
+                  '<span class="text-muted small">' + formatBytes(file.size) + ' &middot; ' + totalChunks + ' chunk' + (totalChunks > 1 ? 's' : '') + '</span>' +
+                  '<span class="upload-status badge bg-primary">0%</span>' +
+              '</div>' +
+              '<div class="progress mb-2" style="height:8px">' +
+                  '<div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:0%"></div>' +
+              '</div>' +
+              '<div class="upload-detail text-muted small"></div>' +
+              '<div class="upload-actions mt-1">' +
+                  '<button type="button" class="btn btn-sm atom-btn-white pause-btn d-none"><i class="fa fa-pause me-1"></i>Pause</button> ' +
+                  '<button type="button" class="btn btn-sm atom-btn-outline-success resume-btn d-none"><i class="fa fa-play me-1"></i>Resume</button> ' +
+                  '<button type="button" class="btn btn-sm atom-btn-outline-danger cancel-btn"><i class="fa fa-times me-1"></i>Cancel</button>' +
+              '</div>' +
+          '</div>';
+          progressContainer.insertAdjacentHTML('beforeend', html);
+
+          var el = document.getElementById(domId);
+          var bar = el.querySelector('.progress-bar');
+          var status = el.querySelector('.upload-status');
+          var detail = el.querySelector('.upload-detail');
+          var pauseBtn = el.querySelector('.pause-btn');
+          var resumeBtn = el.querySelector('.resume-btn');
+          var cancelBtn = el.querySelector('.cancel-btn');
+
+          var state = {
+              uploadId: uploadId,
+              file: file,
+              totalChunks: totalChunks,
+              currentChunk: 0,
+              paused: false,
+              cancelled: false,
+              retries: 0,
+              startTime: Date.now()
+          };
+          uploads[uploadId] = state;
+
+          pauseBtn.classList.remove('d-none');
+          pauseBtn.addEventListener('click', function() {
+              state.paused = true;
+              pauseBtn.classList.add('d-none');
+              resumeBtn.classList.remove('d-none');
+              status.textContent = 'Paused';
+              status.className = 'upload-status badge bg-warning text-dark';
+              bar.classList.remove('progress-bar-animated');
+              detail.textContent = 'Chunk ' + state.currentChunk + '/' + totalChunks + ' - paused';
+          });
+
+          resumeBtn.addEventListener('click', function() {
+              state.paused = false;
+              resumeBtn.classList.add('d-none');
+              pauseBtn.classList.remove('d-none');
+              status.className = 'upload-status badge bg-primary';
+              bar.classList.add('progress-bar-animated');
+              sendChunk();
+          });
+
+          cancelBtn.addEventListener('click', function() {
+              state.cancelled = true;
+              bar.classList.remove('progress-bar-animated', 'progress-bar-striped');
+              bar.classList.add('bg-secondary');
+              status.textContent = 'Cancelled';
+              status.className = 'upload-status badge bg-secondary';
+              detail.textContent = '';
+              el.querySelector('.upload-actions').innerHTML = '';
+              delete uploads[uploadId];
+          });
+
+          function sendChunk() {
+              if (state.cancelled || state.paused) return;
+              if (state.currentChunk >= totalChunks) return;
+
+              var start = state.currentChunk * CHUNK_SIZE;
+              var end = Math.min(start + CHUNK_SIZE, file.size);
+              var blob = file.slice(start, end);
+
+              var formData = new FormData();
+              formData.append('file', blob);
+              formData.append('uploadId', uploadId);
+              formData.append('chunkIndex', state.currentChunk);
+              formData.append('totalChunks', totalChunks);
+              formData.append('fileName', file.name);
+              formData.append('fileSize', file.size);
+              // Empty for root-level uploads in the root listing, otherwise the
+              // file's path *relative to the FTP root* - which is the current
+              // viewing folder + (for folder-uploads) the within-tree path.
+              // Server uses dirname() for mkdir-p, basename() for the filename.
+              var rel = file._ahgRelPath || '';
+              if (currentDir) {
+                  rel = rel ? (currentDir + '/' + rel) : (currentDir + '/' + file.name);
+              }
+              formData.append('relativePath', rel);
+              formData.append('_token', CSRF_TOKEN);
+
+              var xhr = new XMLHttpRequest();
+              xhr.open('POST', UPLOAD_URL, true);
+
+              xhr.upload.addEventListener('progress', function(e) {
+                  if (e.lengthComputable) {
+                      var chunkPct = e.loaded / e.total;
+                      var overallPct = ((state.currentChunk + chunkPct) / totalChunks) * 100;
+                      bar.style.width = overallPct.toFixed(1) + '%';
+                      status.textContent = overallPct.toFixed(0) + '%';
+
+                      var elapsed = (Date.now() - state.startTime) / 1000;
+                      var bytesUploaded = state.currentChunk * CHUNK_SIZE + e.loaded;
+                      if (elapsed > 1) {
+                          var speed = bytesUploaded / elapsed;
+                          var remaining = (file.size - bytesUploaded) / speed;
+                          detail.textContent = 'Chunk ' + (state.currentChunk + 1) + '/' + totalChunks +
+                              ' - ' + formatBytes(Math.round(speed)) + '/s' +
+                              ' - ' + formatTime(remaining) + ' remaining';
+                      }
+                  }
+              });
+
+              xhr.addEventListener('load', function() {
+                  if (xhr.status >= 200 && xhr.status < 300) {
+                      try {
+                          var data = JSON.parse(xhr.responseText);
+                          if (data.success) {
+                              state.retries = 0;
+                              state.currentChunk++;
+
+                              if (data.complete === false) {
+                                  sendChunk();
+                              } else {
+                                  bar.classList.remove('progress-bar-animated', 'progress-bar-striped');
+                                  bar.classList.add('bg-success');
+                                  bar.style.width = '100%';
+                                  status.textContent = 'Uploaded';
+                                  status.className = 'upload-status badge bg-success';
+                                  var elapsed = (Date.now() - state.startTime) / 1000;
+                                  detail.textContent = formatBytes(file.size) + ' in ' + formatTime(elapsed);
+                                  el.querySelector('.upload-actions').innerHTML = '<i class="fa fa-check-circle text-success"></i>';
+                                  delete uploads[uploadId];
+                                  refreshFileList();
+                              }
+                          } else {
+                              handleChunkError(data.message || 'Server error');
+                          }
+                      } catch (e) {
+                          handleChunkError('Invalid response');
+                      }
+                  } else {
+                      handleChunkError('HTTP ' + xhr.status);
+                  }
+              });
+
+              xhr.addEventListener('error', function() {
+                  handleChunkError('Network error');
+              });
+
+              xhr.addEventListener('timeout', function() {
+                  handleChunkError('Timeout');
+              });
+
+              xhr.timeout = 120000;
+              xhr.send(formData);
+          }
+
+          function handleChunkError(msg) {
+              if (state.cancelled) return;
+
+              state.retries++;
+              if (state.retries <= MAX_RETRIES) {
+                  var delay = RETRY_DELAY_MS * state.retries;
+                  detail.innerHTML = '<i class="fa fa-exclamation-triangle text-warning me-1"></i>' +
+                      'Retry ' + state.retries + '/' + MAX_RETRIES +
+                      ' in ' + (delay / 1000) + 's - ' + escapeHtml(msg);
+                  status.textContent = 'Retrying...';
+                  status.className = 'upload-status badge bg-warning text-dark';
+                  setTimeout(function() {
+                      if (!state.cancelled && !state.paused) {
+                          status.className = 'upload-status badge bg-primary';
+                          sendChunk();
+                      }
+                  }, delay);
+              } else {
+                  bar.classList.remove('progress-bar-animated', 'progress-bar-striped');
+                  bar.classList.add('bg-danger');
+                  status.textContent = 'Failed';
+                  status.className = 'upload-status badge bg-danger';
+                  detail.innerHTML = '<i class="fa fa-times-circle text-danger me-1"></i>' + escapeHtml(msg) +
+                      ' - chunk ' + (state.currentChunk + 1) + '/' + totalChunks;
+                  pauseBtn.classList.add('d-none');
+                  resumeBtn.classList.remove('d-none');
+                  resumeBtn.innerHTML = '<i class="fa fa-redo me-1"></i>Retry';
+                  resumeBtn.addEventListener('click', function handler() {
+                      state.retries = 0;
+                      state.paused = false;
+                      resumeBtn.classList.add('d-none');
+                      pauseBtn.classList.remove('d-none');
+                      bar.classList.remove('bg-danger');
+                      bar.classList.add('progress-bar-striped', 'progress-bar-animated');
+                      status.className = 'upload-status badge bg-primary';
+                      resumeBtn.removeEventListener('click', handler);
+                      sendChunk();
+                  });
+              }
+          }
+
+          sendChunk();
+      }
+
+      // === File list refresh ===
+      var refreshBtn = document.getElementById('refresh-btn');
+      if (refreshBtn) refreshBtn.addEventListener('click', function() { refreshFileList(); });
+
+      function refreshFileList() {
+          var url = LIST_URL + (currentDir ? ('?dir=' + encodeURIComponent(currentDir)) : '');
+          fetch(url)
+              .then(function(r) { return r.json(); })
+              .then(function(data) {
+                  var tbody = document.getElementById('files-tbody');
+                  if (!tbody) return;
+                  tbody.innerHTML = '';
+
+                  if (!data.success) {
+                      tbody.innerHTML = '<tr><td colspan="4" class="text-center text-danger py-4"><i class="fa fa-exclamation-circle me-2"></i>' + escapeHtml(data.message || 'Cannot list directory') + '</td></tr>';
+                      return;
+                  }
+
+                  var folders = data.folders || [];
+                  var files = data.files || [];
+
+                  if (folders.length === 0 && files.length === 0) {
+                      tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">No files found</td></tr>';
+                      return;
+                  }
+
+                  // Folders first (open-on-click rows)
+                  folders.forEach(function(f) {
+                      var row = '<tr class="folder-row" data-foldername="' + escapeHtml(f.name) + '" style="cursor:pointer">' +
+                          '<td><i class="fa fa-folder me-2 text-warning"></i><span class="fw-semibold">' + escapeHtml(f.name) + '</span></td>' +
+                          '<td class="text-end text-muted">-</td>' +
+                          '<td>' + escapeHtml(f.modified) + '</td>' +
+                          '<td class="text-center"><span class="text-muted small">Open</span></td>' +
+                          '</tr>';
+                      tbody.insertAdjacentHTML('beforeend', row);
+                  });
+
+                  // Files (delete-button rows)
+                  files.forEach(function(f) {
+                      var row = '<tr>' +
+                          '<td><i class="fa fa-file me-2 text-muted"></i>' + escapeHtml(f.name) + '</td>' +
+                          '<td class="text-end">' + formatBytes(f.size) + '</td>' +
+                          '<td>' + escapeHtml(f.modified) + '</td>' +
+                          '<td class="text-center"><button type="button" class="btn btn-sm atom-btn-outline-danger delete-file-btn" data-filename="' + escapeHtml(f.name) + '" title="Delete"><i class="fa fa-trash"></i></button></td>' +
+                          '</tr>';
+                      tbody.insertAdjacentHTML('beforeend', row);
+                  });
+
+                  bindFolderRows();
+                  bindDeleteButtons();
+              })
+              .catch(function() {});
+      }
+
+      // === Folder navigation ===
+      function navigateTo(newDir) {
+          // newDir is full relative-to-root path. '' = root.
+          currentDir = newDir;
+          renderBreadcrumb();
+          updateUpButton();
+          refreshFileList();
+      }
+
+      function renderBreadcrumb() {
+          var nav = document.getElementById('folder-breadcrumb');
+          if (!nav) return;
+          // Root crumb is always the first link.
+          var html = '<li class="breadcrumb-item' + (currentDir === '' ? ' active' : '') + '" data-dir="">' +
+              (currentDir === ''
+                  ? '<i class="fa fa-folder me-1"></i>Root'
+                  : '<a href="#" class="bc-link"><i class="fa fa-folder me-1"></i>Root</a>'
+              ) + '</li>';
+          if (currentDir !== '') {
+              var parts = currentDir.split('/');
+              var accum = '';
+              for (var i = 0; i < parts.length; i++) {
+                  accum = accum ? (accum + '/' + parts[i]) : parts[i];
+                  var isLast = (i === parts.length - 1);
+                  html += '<li class="breadcrumb-item' + (isLast ? ' active' : '') + '" data-dir="' + escapeHtml(accum) + '">' +
+                      (isLast
+                          ? escapeHtml(parts[i])
+                          : '<a href="#" class="bc-link">' + escapeHtml(parts[i]) + '</a>'
+                      ) + '</li>';
+              }
+          }
+          nav.innerHTML = html;
+          // Bind crumb clicks
+          nav.querySelectorAll('a.bc-link').forEach(function(a) {
+              a.addEventListener('click', function(e) {
+                  e.preventDefault();
+                  var li = a.closest('li');
+                  if (li) navigateTo(li.getAttribute('data-dir') || '');
+              });
+          });
+      }
+
+      function updateUpButton() {
+          var btn = document.getElementById('up-btn');
+          if (!btn) return;
+          btn.disabled = (currentDir === '');
+          if (!btn.__bound) {
+              btn.__bound = true;
+              btn.addEventListener('click', function() {
+                  if (currentDir === '') return;
+                  var idx = currentDir.lastIndexOf('/');
+                  navigateTo(idx === -1 ? '' : currentDir.substring(0, idx));
+              });
+          }
+      }
+
+      function bindFolderRows() {
+          document.querySelectorAll('.folder-row').forEach(function(tr) {
+              tr.addEventListener('click', function(e) {
+                  if (e.target.closest('button, a')) return; // don't capture clicks on inner controls
+                  var name = tr.getAttribute('data-foldername');
+                  if (!name) return;
+                  navigateTo(currentDir ? (currentDir + '/' + name) : name);
+              });
+          });
+      }
+
+      // === Delete file ===
+      function bindDeleteButtons() {
+          document.querySelectorAll('.delete-file-btn').forEach(function(btn) {
+              btn.addEventListener('click', function() {
+                  var filename = this.getAttribute('data-filename');
+                  if (!confirm('Delete "' + filename + '"?')) return;
+
+                  var row = this.closest('tr');
+                  this.disabled = true;
+                  this.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+
+                  fetch(DELETE_URL, {
+                      method: 'POST',
+                      headers: {
+                          'Content-Type': 'application/json',
+                          'X-CSRF-TOKEN': CSRF_TOKEN
+                      },
+                      body: JSON.stringify({filename: filename, dir: currentDir})
+                  })
+                  .then(function(r) { return r.json(); })
+                  .then(function(data) {
+                      if (data.success) {
+                          row.remove();
+                          var tbody = document.getElementById('files-tbody');
+                          if (tbody && tbody.children.length === 0) {
+                              tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">No files found</td></tr>';
+                          }
+                      } else {
+                          alert(data.message || 'Delete failed');
+                          refreshFileList();
+                      }
+                  })
+                  .catch(function() { alert('Network error'); refreshFileList(); });
+              });
+          });
+      }
+      // Initial bindings against the server-rendered table
+      bindFolderRows();
+      bindDeleteButtons();
+
+      // === Helpers ===
+      function escapeHtml(str) { var d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
+
+      function formatBytes(bytes) {
+          if (bytes === 0) return '0 B';
+          var k = 1024, s = ['B', 'KB', 'MB', 'GB', 'TB'];
+          var i = Math.floor(Math.log(bytes) / Math.log(k));
+          return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + s[i];
+      }
+
+      function formatTime(seconds) {
+          if (seconds < 60) return Math.round(seconds) + 's';
+          if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + Math.round(seconds % 60) + 's';
+          return Math.floor(seconds / 3600) + 'h ' + Math.floor((seconds % 3600) / 60) + 'm';
+      }
+  })();
+  </script>
+
+@endsection

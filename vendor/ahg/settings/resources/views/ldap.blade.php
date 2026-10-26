@@ -1,0 +1,46 @@
+@extends('theme::layouts.2col')
+@section('title', 'LDAP authentication')
+@section('body-class', 'admin settings')
+
+@section('sidebar')
+  @include('ahg-settings::_menu', ['menu' => $menu ?? []])
+@endsection
+
+@section('title-block')
+  <h1>{{ __('LDAP authentication') }}</h1>
+@endsection
+
+@section('content')
+    <form method="post" action="{{ route('settings.ldap') }}">
+      @csrf
+      <div class="accordion mb-3">
+        <div class="accordion-item">
+          <h2 class="accordion-header"><button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#ldap-collapse">{{ __('LDAP authentication settings') }}</button></h2>
+          <div id="ldap-collapse" class="accordion-collapse collapse show">
+            <div class="accordion-body">
+              <div class="mb-3">
+                <label class="form-label">{{ __('Host') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+                <input type="text" name="settings[ldapHost]" class="form-control" value="{{ $settings['ldapHost'] ?? '' }}" placeholder="{{ __('ldap.example.com') }}">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">{{ __('Port') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <input type="number" name="settings[ldapPort]" class="form-control" value="{{ $settings['ldapPort'] ?? '389' }}" style="max-width:200px;">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">{{ __('Base DN') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+                <input type="text" name="settings[ldapBaseDn]" class="form-control" value="{{ $settings['ldapBaseDn'] ?? '' }}" placeholder="{{ __('dc=example,dc=com') }}">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">{{ __('Bind Lookup Attribute') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <input type="text" name="settings[ldapBindAttribute]" class="form-control" value="{{ $settings['ldapBindAttribute'] ?? 'uid' }}">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <section class="actions mb-3">
+        <input class="btn atom-btn-outline-success" type="submit" value="Save">
+      </section>
+    </form>
+@endsection

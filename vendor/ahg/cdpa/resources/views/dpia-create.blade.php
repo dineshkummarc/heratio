@@ -1,0 +1,117 @@
+{{--
+  Copyright (C) 2026 Johan Pieterse
+  Plain Sailing Information Systems
+  Email: johan@plainsailingisystems.co.za
+
+  This file is part of Heratio.
+
+  Heratio is free software: you can redistribute it and/or modify
+  it under the terms of the GNU Affero General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+--}}
+@extends('theme::layouts.1col')
+
+@section('title', 'New DPIA')
+
+@section('content')
+<div class="container-fluid">
+    <div class="row mb-4">
+        <div class="col">
+            <nav aria-label="{{ __('breadcrumb') }}">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{{ route('ahgcdpa.index') }}">CDPA</a></li>
+                    <li class="breadcrumb-item"><a href="{{ route('ahgcdpa.dpia') }}">DPIA</a></li>
+                    <li class="breadcrumb-item active">{{ __('New DPIA') }}</li>
+                </ol>
+            </nav>
+            <h1><i class="fas fa-clipboard-check me-2"></i>{{ __('New Data Protection Impact Assessment') }}</h1>
+        </div>
+    </div>
+
+    <form method="post" class="row g-4" autocomplete="off">
+        @csrf
+        <div class="col-lg-8">
+            <div class="card mb-4">
+                <div class="card-header"><h5 class="mb-0">{{ __('Assessment Details') }}</h5></div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-12">
+                            <label class="form-label">{{ __('DPIA Name') }} <span class="text-danger">*</span></label>
+                            <input type="text" name="name" class="form-control" autocomplete="off" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">{{ __('Related Processing Activity') }}</label>
+                            <select name="processing_activity_id" class="form-select">
+                                <option value="">{{ __('None / New Activity') }}</option>
+                                @foreach(($activities ?? []) as $a)
+                                    <option value="{{ $a->id }}">{{ $a->name }}</option>
+                                @endforeach
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">{{ __('Assessor Name') }} <span class="text-danger">*</span></label>
+                            <input type="text" name="assessor_name" class="form-control" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">{{ __('Assessment Date') }} <span class="text-danger">*</span></label>
+                            <input type="date" name="assessment_date" class="form-control" value="{{ \Carbon\Carbon::now()->format('Y-m-d') }}" required>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">{{ __('Description') }} <span class="text-danger">*</span></label>
+                            <textarea name="description" class="form-control" rows="4" required placeholder="{{ __('Describe the processing activity and why a DPIA is needed...') }}"></textarea>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mb-4">
+                <div class="card-header"><h5 class="mb-0">{{ __('Necessity & Proportionality') }}</h5></div>
+                <div class="card-body">
+                    <label class="form-label">{{ __('Assessment of necessity and proportionality') }} <span class="text-danger">*</span></label>
+                    <textarea name="necessity_assessment" class="form-control" rows="4" required placeholder="{{ __('Why is this processing necessary? Is it proportionate to the purpose?') }}"></textarea>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><h5 class="mb-0">{{ __('Risk Assessment') }}</h5></div>
+                <div class="card-body">
+                    <label class="form-label">{{ __('Overall Risk Level') }} <span class="text-danger">*</span></label>
+                    <select name="risk_level" class="form-select" required>
+                        <option value="">{{ __('Select...') }}</option>
+                        <option value="low">{{ __('Low - Minimal impact on data subjects') }}</option>
+                        <option value="medium">{{ __('Medium - Moderate impact, manageable with controls') }}</option>
+                        <option value="high">{{ __('High - Significant impact, requires strong controls') }}</option>
+                        <option value="critical">{{ __('Critical - Severe impact, may require regulator consultation') }}</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-4">
+            <div class="alert alert-info">
+                <h6><i class="fas fa-info-circle me-1"></i> {{ __('When is DPIA Required?') }}</h6>
+                <ul class="small mb-0">
+                    <li>{{ __('Large-scale processing') }}</li>
+                    <li>{{ __('Systematic monitoring') }}</li>
+                    <li>{{ __('Automated decisions with legal effects') }}</li>
+                    <li>{{ __('Special categories of data') }}</li>
+                    <li>{{ __('Cross-border transfers') }}</li>
+                    <li>{{ __('Innovative technologies') }}</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <div class="card-body d-grid gap-2">
+                    <button type="submit" class="btn btn-primary btn-lg">
+                        <i class="fas fa-save me-2"></i>{{ __('Create DPIA') }}
+                    </button>
+                    <a href="{{ route('ahgcdpa.dpia') }}" class="btn btn-outline-secondary">
+                        {{ __('Cancel') }}
+                    </a>
+                </div>
+            </div>
+        </div>
+    </form>
+</div>
+@endsection

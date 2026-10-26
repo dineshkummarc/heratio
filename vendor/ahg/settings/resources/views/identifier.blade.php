@@ -1,0 +1,88 @@
+@extends('theme::layouts.2col')
+@section('title', 'Identifier Settings')
+@section('body-class', 'admin settings')
+
+@section('sidebar')
+  @include('ahg-settings::_menu', ['menu' => $menu ?? []])
+@endsection
+
+@section('title-block')
+  <h1>{{ __('Identifier-related') }}</h1>
+@endsection
+
+@section('content')
+    <div class="alert alert-info" role="alert">
+      <p>{{ __('Please clear the application cache and rebuild the search index if you are changing the reference code separator setting.') }}</p>
+      <pre>$ php artisan cache:clear</pre>
+      <pre>$ php artisan search:populate</pre>
+    </div>
+
+    <form method="post" action="{{ route('settings.identifier') }}">
+      @csrf
+      <div class="accordion" id="settingsAccordion">
+        <div class="accordion-item">
+          <h2 class="accordion-header">
+            <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseIdentifier">
+              {{ __('Identifier settings') }}
+            </button>
+          </h2>
+          <div id="collapseIdentifier" class="accordion-collapse collapse show" data-bs-parent="#settingsAccordion">
+            <div class="accordion-body">
+              <div class="form-check mb-3">
+                <input type="hidden" name="settings[accession_mask_enabled]" value="0">
+                <input class="form-check-input" type="checkbox" name="settings[accession_mask_enabled]" value="1" id="accession_mask_enabled" {{ ($settings['accession_mask_enabled'] ?? '') == '1' ? 'checked' : '' }}>
+                <label class="form-check-label" for="accession_mask_enabled">{{ __('Accession mask enabled') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">{{ __('Accession mask') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <input type="text" name="settings[accession_mask]" class="form-control" value="{{ e($settings['accession_mask'] ?? '') }}">
+                <small class="text-muted">e.g. %Y-%m-%d/#</small>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">{{ __('Accession counter') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <input type="number" name="settings[accession_counter]" class="form-control" value="{{ e($settings['accession_counter'] ?? '0') }}">
+              </div>
+
+              <div class="form-check mb-3">
+                <input type="hidden" name="settings[identifier_mask_enabled]" value="0">
+                <input class="form-check-input" type="checkbox" name="settings[identifier_mask_enabled]" value="1" id="identifier_mask_enabled" {{ ($settings['identifier_mask_enabled'] ?? '') == '1' ? 'checked' : '' }}>
+                <label class="form-check-label" for="identifier_mask_enabled">{{ __('Identifier mask enabled') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">{{ __('Identifier mask') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <input type="text" name="settings[identifier_mask]" class="form-control" value="{{ e($settings['identifier_mask'] ?? '') }}">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">{{ __('Identifier counter') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <input type="number" name="settings[identifier_counter]" class="form-control" value="{{ e($settings['identifier_counter'] ?? '0') }}">
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">{{ __('Reference code separator') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <input type="text" name="settings[separator_character]" class="form-control" value="{{ e($settings['separator_character'] ?? '-') }}" maxlength="5">
+              </div>
+              <div class="form-check mb-3">
+                <input type="hidden" name="settings[inherit_code_informationobject]" value="0">
+                <input class="form-check-input" type="checkbox" name="settings[inherit_code_informationobject]" value="1" id="inherit_code_io" {{ ($settings['inherit_code_informationobject'] ?? '') == '1' ? 'checked' : '' }}>
+                <label class="form-check-label" for="inherit_code_io">{{ __('Inherit reference code (information object)') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              </div>
+              <div class="form-check mb-3">
+                <input type="hidden" name="settings[inherit_code_dc_xml]" value="0">
+                <input class="form-check-input" type="checkbox" name="settings[inherit_code_dc_xml]" value="1" id="inherit_code_dc" {{ ($settings['inherit_code_dc_xml'] ?? '') == '1' ? 'checked' : '' }}>
+                <label class="form-check-label" for="inherit_code_dc">{{ __('Inherit reference code (DC XML)') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              </div>
+              <div class="form-check mb-3">
+                <input type="hidden" name="settings[prevent_duplicate_actor_identifiers]" value="0">
+                <input class="form-check-input" type="checkbox" name="settings[prevent_duplicate_actor_identifiers]" value="1" id="prevent_dup" {{ ($settings['prevent_duplicate_actor_identifiers'] ?? '') == '1' ? 'checked' : '' }}>
+                <label class="form-check-label" for="prevent_dup">{{ __('Prevent duplicate authority record identifiers') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <section class="actions mb-3">
+        <input class="btn atom-btn-outline-success" type="submit" value="Save">
+      </section>
+    </form>
+@endsection

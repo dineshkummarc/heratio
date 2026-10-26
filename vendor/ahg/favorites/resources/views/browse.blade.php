@@ -1,0 +1,632 @@
+@extends('theme::layouts.2col')
+@section('title', 'Favorites')
+@section('body-class', 'favorites')
+
+@section('sidebar')
+  @include('research::research._sidebar', ['sidebarActive' => 'favorites'])
+@endsection
+
+@php
+  /**
+   * Resolve the URL for a favorited item based on its object_type and slug.
+   * Supports information_object, actor, repository, accession, donor, rights_holder,
+   * term, function, physical_object.
+   */
+  function favItemUrl($item): string {
+      $slug = $item->slug ?? '';
+      if (empty($slug)) {
+          return '#';
+      }
+      return match ($item->object_type ?? 'information_object') {
+          'actor'          => url('/actor/' . $slug),
+          'repository'     => url('/repository/' . $slug),
+          'accession'      => url('/accession/' . $slug),
+          'donor'          => url('/donor/' . $slug),
+          'rights_holder'  => url('/rights-holder/' . $slug),
+          'term'           => url('/term/' . $slug),
+          'function'       => url('/function/' . $slug),
+          'physical_object' => url('/physical-object/' . $slug),
+          default          => url('/' . $slug),
+      };
+  }
+@endphp
+
+@push('css')
+<style>
+  /* Sidebar width: doubled from the previous 8% setting to 16% per request
+     after folder creation made the small sidebar feel too cramped. Main
+     content takes the remaining 84%. Falls back to standard col-md-3 /
+     col-md-9 split on smaller screens so folder names stay readable. */
+  @media (min-width: 992px) {
+    .favorites-sidebar { flex: 0 0 16% !important; max-width: 16% !important; }
+    .favorites-main    { flex: 0 0 84% !important; max-width: 84% !important; }
+    .favorites-sidebar .list-group-item { font-size: 0.875rem; padding: 0.45rem 0.6rem; }
+    .favorites-sidebar .list-group-item span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  }
+  /* Thumbnail column: small inline preview when a digital object exists. */
+  td.fav-thumb img { width: 40px; height: 40px; object-fit: cover; border-radius: 3px; border: 1px solid #dee2e6; }
+</style>
+@endpush
+
+@section('content')
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1><i class="fas fa-heart me-2"></i>{{ __('Favorites') }} <span class="badge bg-primary">{{ $totalCount }}</span></h1>
+  <div class="d-flex gap-2 align-items-center">
+    {{-- Export Dropdown --}}
+    @if($totalCount > 0)
+      <div class="dropdown">
+        <button class="btn atom-btn-white dropdown-toggle" data-bs-toggle="dropdown">
+          <i class="fas fa-download me-1"></i>{{ __('Export') }}
+        </button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          <li><a class="dropdown-item" href="{{ route('favorites.export.csv', request()->query()) }}"><i class="fas fa-file-csv me-2 text-success"></i>CSV</a></li>
+          <li><a class="dropdown-item" href="{{ route('favorites.export.json', request()->query()) }}"><i class="fas fa-file-code me-2 text-warning"></i>JSON</a></li>
+          <li><hr class="dropdown-divider"></li>
+          <li><a class="dropdown-item" href="{{ route('favorites.export.csv', array_merge(request()->query(), ['format' => 'print'])) }}" target="_blank"><i class="fas fa-print me-2"></i>{{ __('Print') }}</a></li>
+        </ul>
+      </div>
+    @endif
+
+    {{-- Take offline (per folder) --}}
+    @if(!empty($params['folder_id']))
+      @include('research::research._take-offline-button', ['source' => 'favorites', 'id' => $params['folder_id']])
+    @endif
+
+    {{-- Import --}}
+    <button class="btn atom-btn-white" data-bs-toggle="modal" data-bs-target="#importModal">
+      <i class="fas fa-upload me-1"></i>{{ __('Import') }}
+    </button>
+
+    {{-- View Toggle --}}
+    <div class="btn-group btn-group-sm">
+      <a href="{{ route('favorites.browse', array_merge($params, ['view' => 'table'])) }}" class="btn {{ ($params['view'] ?? 'table') === 'table' ? 'atom-btn-outline-success' : 'atom-btn-white' }}" title="{{ __('Table View') }}">
+        <i class="fas fa-list"></i>
+      </a>
+      <a href="{{ route('favorites.browse', array_merge($params, ['view' => 'grid'])) }}" class="btn {{ ($params['view'] ?? 'table') === 'grid' ? 'atom-btn-outline-success' : 'atom-btn-white' }}" title="{{ __('Grid View') }}">
+        <i class="fas fa-th"></i>
+      </a>
+    </div>
+
+    {{-- Clear All --}}
+    @if($totalCount > 0)
+      <form method="post" action="{{ route('favorites.clear') }}" onsubmit="return confirm('Are you sure you want to clear all favorites?');">
+        @csrf
+        <button type="submit" class="btn atom-btn-white btn-sm">
+          <i class="fas fa-trash-alt me-1"></i>{{ __('Clear All') }}
+        </button>
+      </form>
+    @endif
+  </div>
+</div>
+
+<div class="row">
+  {{-- Sidebar: Folders --}}
+  <div class="col-lg-3 col-md-4 favorites-sidebar">
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center" style="background:var(--ahg-primary);color:#fff">
+        <span><i class="fas fa-folder me-1"></i> {{ __('Folders') }}</span>
+        <button class="btn btn-sm atom-btn-white" data-bs-toggle="modal" data-bs-target="#newFolderModal"><i class="fas fa-plus"></i></button>
+      </div>
+      <div class="list-group list-group-flush">
+        <a href="{{ route('favorites.browse') }}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center{{ empty($params['folder_id']) && empty($params['unfiled']) ? ' active' : '' }}">
+          <span><i class="fas fa-heart me-2"></i>{{ __('All Favorites') }}</span>
+          <span class="badge bg-primary rounded-pill">{{ $totalCount }}</span>
+        </a>
+        <a href="{{ route('favorites.browse', ['unfiled' => 1]) }}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center{{ !empty($params['unfiled']) ? ' active' : '' }}">
+          <span><i class="fas fa-inbox me-2"></i>{{ __('Unfiled') }}</span>
+          <span class="badge bg-secondary rounded-pill">{{ $unfiledCount }}</span>
+        </a>
+        @if(!empty($folders) && count($folders) > 0)
+          <li class="list-group-item px-3 py-1 bg-light"><small class="text-muted text-uppercase">{{ __('My Folders') }}</small></li>
+          @foreach($folders as $folder)
+            <a href="{{ route('favorites.browse', ['folder_id' => $folder->id]) }}"
+               class="list-group-item list-group-item-action d-flex justify-content-between align-items-center{{ ($params['folder_id'] ?? '') == $folder->id ? ' active' : '' }}">
+              <span>
+                <i class="fas fa-folder{{ ($params['folder_id'] ?? '') == $folder->id ? '-open' : '' }} me-2"></i>
+                @if($folder->color)<i class="fas fa-circle me-1" style="color:{{ $folder->color }}; font-size:0.5em;"></i>@endif
+                {{ $folder->name }}
+                @if(!empty($folder->share_token))
+                  <i class="fas fa-share-alt text-info ms-1" title="{{ __('Shared') }}"></i>
+                @endif
+              </span>
+              <span class="badge bg-secondary rounded-pill">{{ $folder->item_count }}</span>
+            </a>
+          @endforeach
+        @endif
+      </div>
+    </div>
+
+    {{-- Folder Actions (when viewing a folder) --}}
+    @if(isset($params['folder_id']) && $params['folder_id'])
+      @php $activeFolder = $folders->firstWhere('id', $params['folder_id']); @endphp
+      @if($activeFolder)
+        <div class="card mb-3">
+          <div class="card-header" style="background:var(--ahg-primary);color:#fff">{{ __('Folder actions') }}</div>
+          <div class="card-body py-2">
+            <h6 class="mb-2">{{ e($activeFolder->name) }}</h6>
+            @if($activeFolder->description)
+              <p class="text-muted small mb-2">{{ e($activeFolder->description) }}</p>
+            @endif
+            <div class="d-flex gap-1 flex-wrap">
+              <button type="button" class="btn btn-sm atom-btn-white" data-bs-toggle="modal" data-bs-target="#editFolderModal">
+                <i class="fas fa-edit"></i> {{ __('Edit') }}
+              </button>
+              @if(empty($activeFolder->share_token))
+                <form method="post" action="{{ route('favorites.folder.share', $activeFolder->id) }}" class="d-inline">
+                  @csrf
+                  <button type="submit" class="btn btn-sm atom-btn-white">
+                    <i class="fas fa-share-alt"></i> {{ __('Share') }}
+                  </button>
+                </form>
+              @else
+                <button type="button" class="btn btn-sm atom-btn-white text-white" data-bs-toggle="modal" data-bs-target="#shareInfoModal">
+                  <i class="fas fa-share-alt"></i> {{ __('Shared') }}
+                </button>
+              @endif
+              <form method="post" action="{{ route('favorites.folder.delete', $activeFolder->id) }}" class="d-inline"
+                    onsubmit="return confirm('Delete this folder? Items will be moved to Unfiled.');">
+                @csrf
+                <button type="submit" class="btn btn-sm atom-btn-outline-danger">
+                  <i class="fas fa-trash"></i> {{ __('Delete') }}
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      @endif
+    @endif
+  </div>
+
+  {{-- Main Content --}}
+  <div class="col-lg-9 col-md-8 favorites-main">
+    {{-- Search + Sort Bar --}}
+    <form method="get" action="{{ route('favorites.browse') }}" class="row g-2 mb-3 align-items-end">
+      @if(!empty($params['folder_id']))<input type="hidden" name="folder_id" value="{{ $params['folder_id'] }}">@endif
+      @if(!empty($params['unfiled']))<input type="hidden" name="unfiled" value="1">@endif
+      @if(($params['view'] ?? 'table') !== 'table')<input type="hidden" name="view" value="{{ $params['view'] }}">@endif
+
+      <div class="col-md-5">
+        <div class="input-group input-group-sm">
+          <input type="text" name="query" class="form-control" placeholder="{{ __('Search favorites...') }}" value="{{ $params['query'] ?? '' }}">
+          <button class="btn atom-btn-outline-light" type="submit"><i class="fas fa-search"></i></button>
+          @if(!empty($params['query']))
+            <a href="{{ route('favorites.browse', array_diff_key($params, ['query' => ''])) }}" class="btn atom-btn-outline-danger" title="{{ __('Clear search') }}"><i class="fas fa-times"></i></a>
+          @endif
+        </div>
+      </div>
+      <div class="col-md-4">
+        <select name="sort" class="form-select form-select-sm" data-csp-auto-submit>
+          @foreach(['created_at' => 'Date Added (Newest)', 'title' => 'Title (A-Z)', 'reference_code' => 'Reference Code (A-Z)'] as $val => $label)
+            <option value="{{ $val }}" {{ ($params['sort'] ?? 'created_at') === $val ? 'selected' : '' }}>{{ $label }}</option>
+          @endforeach
+        </select>
+      </div>
+      <div class="col-md-3 text-end">
+        <small class="text-muted">{{ $total }} {{ Str::plural('item', $total) }}</small>
+      </div>
+    </form>
+
+    {{-- Bulk Action Bar --}}
+    <div id="bulkActionBar" class="border rounded bg-light p-2 mb-2" style="display: none;">
+      <form method="post" action="{{ route('favorites.bulk') }}" id="bulkForm">
+        @csrf
+        <div class="d-flex gap-2 align-items-center flex-wrap">
+          <span id="selectedCount" class="text-muted small me-2">0 selected</span>
+          <button type="submit" name="action" value="remove" class="btn btn-sm atom-btn-outline-danger"
+                  onclick="return confirm('Remove selected favorites?');">
+            <i class="fas fa-trash me-1"></i>{{ __('Remove Selected') }}
+          </button>
+          @if(!empty($folders) && count($folders) > 0)
+            <div class="input-group input-group-sm" style="max-width: 250px;">
+              <select name="move_folder_id" class="form-select form-select-sm">
+                <option value="">{{ __('Move to...') }}</option>
+                <option value="">{{ __('Unfiled') }}</option>
+                @foreach($folders as $f)
+                  <option value="{{ $f->id }}">{{ $f->name }}</option>
+                @endforeach
+              </select>
+              <button type="submit" name="action" value="move" class="btn btn-sm atom-btn-white">
+                <i class="bi bi-folder"></i> {{ __('Move') }}
+              </button>
+            </div>
+          @endif
+
+          {{-- Send to... dropdown (research bridge) --}}
+          <div class="dropdown">
+            <button type="button" class="btn btn-sm atom-btn-white dropdown-toggle" data-bs-toggle="dropdown">
+              <i class="bi bi-send"></i> {{ __('Send to...') }}
+            </button>
+            <ul class="dropdown-menu">
+              <li><button type="button" class="dropdown-item js-send-to" data-target="collection">
+                <i class="bi bi-collection me-2 text-primary"></i>{{ __('Research Collection') }}
+              </button></li>
+              <li><button type="button" class="dropdown-item js-send-to" data-target="project">
+                <i class="bi bi-diagram-3 me-2 text-success"></i>{{ __('Research Project') }}
+              </button></li>
+              <li><button type="button" class="dropdown-item js-send-to" data-target="bibliography">
+                <i class="bi bi-quote me-2 text-warning"></i>{{ __('Bibliography') }}
+              </button></li>
+            </ul>
+          </div>
+        </div>
+        <div id="bulkIdsContainer"></div>
+      </form>
+    </div>
+
+    {{-- Send-to picker modal (single modal, populated dynamically by JS) --}}
+    <div class="modal fade" id="sendToModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title"><i class="bi bi-send me-2"></i><span id="sendToTitle">{{ __('Send to...') }}</span></h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <div class="alert alert-info" id="sendToEmpty" style="display:none">
+              <i class="bi bi-info-circle me-2"></i>{{ __('You have no eligible items in your researcher account, or the research package is not installed.') }}
+            </div>
+            <div class="mb-3" id="sendToPicker" style="display:none">
+              <label class="form-label" id="sendToLabel">{{ __('Choose destination') }}</label>
+              <select class="form-select" id="sendToSelect"></select>
+            </div>
+            <div class="mb-3 form-check" id="sendToIncludeNotesWrap" style="display:none">
+              <input class="form-check-input" type="checkbox" id="sendToIncludeNotes" checked>
+              <label class="form-check-label" for="sendToIncludeNotes">{{ __('Include my notes') }}</label>
+            </div>
+            <div id="sendToCount" class="text-muted small"></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn atom-btn-white" data-bs-dismiss="modal">{{ __('Cancel') }}</button>
+            <button type="button" class="btn atom-btn-outline-success" id="sendToConfirm" disabled>
+              <i class="bi bi-send me-1"></i>{{ __('Send') }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    @if($results->isEmpty())
+      <div class="alert alert-info">
+        <i class="fas fa-info-circle me-2"></i>
+        @if(!empty($params['query']))
+          No favorites match your search.
+        @else
+          You have no favorites yet. Browse the archive and click the heart icon to add items.
+        @endif
+      </div>
+    @elseif(($params['view'] ?? 'table') === 'grid')
+      {{-- Grid View --}}
+      <div class="row row-cols-1 row-cols-sm-2 row-cols-lg-3 g-3">
+        @foreach($results as $item)
+          <div class="col">
+            <div class="card h-100 border">
+              @if(!empty($item->thumbnail_path))
+                <img src="{{ $item->thumbnail_path }}" class="card-img-top" alt="" style="height: 120px; object-fit: cover;">
+              @endif
+              <div class="card-body">
+                <div class="d-flex justify-content-between align-items-start mb-2">
+                  <div class="form-check">
+                    <input type="checkbox" class="form-check-input bulk-checkbox" value="{{ $item->id }}">
+                  </div>
+                  <div>
+                    @if(!empty($item->has_digital_object))
+                      <i class="fas fa-camera text-info me-1" title="{{ __('Has digital object') }}"></i>
+                    @endif
+                    <form method="post" action="{{ route('favorites.remove', $item->id) }}" class="d-inline">
+                      @csrf
+                      <button type="submit" class="btn btn-sm atom-btn-outline-danger" title="{{ __('Remove') }}"
+                              onclick="return confirm('Remove from favorites?');">
+                        <i class="fas fa-heart-broken"></i>
+                      </button>
+                    </form>
+                  </div>
+                </div>
+                <h6 class="card-title">
+                  <i class="{{ $item->type_icon ?? 'fas fa-file-alt' }} text-muted me-1"></i>
+                  <a href="{{ favItemUrl($item) }}" class="text-decoration-none">{{ $item->archival_description }}</a>
+                </h6>
+                @if($item->reference_code)
+                  <p class="card-text small text-muted mb-1"><i class="fas fa-barcode me-1"></i>{{ $item->reference_code }}</p>
+                @endif
+                @if(!empty($item->level_of_description))
+                  <p class="card-text small text-muted mb-1"><i class="fas fa-layer-group me-1"></i>{{ $item->level_of_description }}</p>
+                @endif
+                @if(!empty($item->date_range))
+                  <p class="card-text small text-muted mb-1"><i class="fas fa-calendar-alt me-1"></i>{{ $item->date_range }}</p>
+                @endif
+                @if(!empty($item->repository_name))
+                  <p class="card-text small text-muted mb-1"><i class="fas fa-building me-1"></i>{{ $item->repository_name }}</p>
+                @endif
+                <p class="card-text small text-muted mb-0">
+                  <i class="far fa-clock me-1"></i>{{ \Carbon\Carbon::parse($item->created_at)->format('Y-m-d') }}
+                </p>
+              </div>
+              @if($item->notes)
+                <div class="card-footer bg-light small">
+                  <i class="fas fa-sticky-note me-1"></i>{{ e($item->notes) }}
+                </div>
+              @endif
+            </div>
+          </div>
+        @endforeach
+      </div>
+    @else
+      {{-- Table View --}}
+      <div class="table-responsive">
+        <table class="table table-bordered table-striped table-sm align-middle mb-0">
+          <thead>
+            <tr>
+              <th style="width:30px"><input type="checkbox" id="selectAll" class="form-check-input" title="{{ __('Select all') }}"></th>
+              <th>{{ __('Title') }}</th>
+              <th class="text-center" style="width:50px" title="{{ __('Digital Object') }}"><i class="fas fa-camera"></i></th>
+              <th class="text-center" style="width:110px">{{ __('Date Added') }}</th>
+              <th class="text-center" style="width:60px">{{ __('Notes') }}</th>
+              <th class="text-center" style="width:100px">{{ __('Actions') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            @foreach($results as $item)
+              <tr>
+                <td><input type="checkbox" name="ids[]" value="{{ $item->id }}" class="form-check-input bulk-checkbox"></td>
+                <td>
+                  <a href="{{ favItemUrl($item) }}" class="text-decoration-none">
+                    <i class="{{ $item->type_icon ?? 'fas fa-file-alt' }} text-muted me-2"></i>
+                    {{ $item->archival_description }}
+                  </a>
+                </td>
+                <td class="text-center fav-thumb">
+                  @if(!empty($item->thumbnail_path))
+                    <a href="{{ favItemUrl($item) }}" title="{{ __('View') }}">
+                      <img src="{{ $item->thumbnail_path }}" alt="" loading="lazy">
+                    </a>
+                  @elseif(!empty($item->has_digital_object))
+                    <i class="fas fa-camera text-info" title="{{ __('Has digital object (no thumbnail)') }}"></i>
+                  @endif
+                </td>
+                <td class="text-center text-muted small">{{ \Carbon\Carbon::parse($item->created_at)->format('Y-m-d') }}</td>
+                <td class="text-center">
+                  <button type="button" class="btn btn-sm atom-btn-white notes-toggle" data-fav-id="{{ $item->id }}" title="{{ __('Notes') }}">
+                    <i class="fas fa-sticky-note{{ $item->notes ? ' text-warning' : '' }}"></i>
+                  </button>
+                </td>
+                <td class="text-center">
+                  <a href="{{ favItemUrl($item) }}" class="btn btn-sm atom-btn-white me-1" title="{{ __('View') }}">
+                    <i class="fas fa-eye"></i>
+                  </a>
+                  <form method="post" action="{{ route('favorites.remove', $item->id) }}" class="d-inline">
+                    @csrf
+                    <button type="submit" class="btn btn-sm atom-btn-outline-danger" title="{{ __('Remove') }}"
+                            onclick="return confirm('Remove from favorites?');">
+                      <i class="fas fa-heart-broken"></i>
+                    </button>
+                  </form>
+                </td>
+              </tr>
+              {{-- Expandable notes row --}}
+              <tr class="notes-row" id="notes-row-{{ $item->id }}" style="display: none;">
+                <td></td>
+                <td colspan="5">
+                  <div class="input-group input-group-sm">
+                    <input type="text" class="form-control notes-input" id="notes-input-{{ $item->id }}"
+                           placeholder="{{ __('Add a note...') }}" value="{{ e($item->notes ?? '') }}">
+                    <button class="btn atom-btn-white notes-save" data-fav-id="{{ $item->id }}" type="button">
+                      <i class="fas fa-save"></i> {{ __('Save') }}
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            @endforeach
+          </tbody>
+        </table>
+      </div>
+    @endif
+
+    @if(!$results->isEmpty())
+      @include('ahg-reports::_pagination')
+    @endif
+  </div>
+</div>
+
+{{-- New Folder Modal --}}
+<div class="modal fade" id="newFolderModal" tabindex="-1">
+  <div class="modal-dialog">
+    <form method="post" action="{{ route('favorites.folder.create') }}">
+      @csrf
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title"><i class="fas fa-folder-plus me-2"></i>{{ __('New Folder') }}</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+          <div class="mb-3"><label class="form-label">{{ __('Folder Name') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label><input type="text" name="name" class="form-control" required maxlength="255"></div>
+          <div class="mb-3"><label class="form-label">{{ __('Description') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label><textarea name="description" class="form-control" rows="2"></textarea></div>
+          <div class="mb-3"><label class="form-label">{{ __('Color') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label><input type="color" name="color" class="form-control form-control-color" value="#0d6efd"></div>
+          @if(!empty($folders) && count($folders) > 0)
+            <div class="mb-3">
+              <label class="form-label">{{ __('Parent Folder') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <select class="form-select" name="parent_id">
+                <option value="">{{ __('None (top level)') }}</option>
+                @foreach($folders as $f)
+                  @if(!$f->parent_id)
+                    <option value="{{ $f->id }}">{{ $f->name }}</option>
+                  @endif
+                @endforeach
+              </select>
+            </div>
+          @endif
+        </div>
+        <div class="modal-footer"><button type="button" class="btn atom-btn-white" data-bs-dismiss="modal">{{ __('Cancel') }}</button><button type="submit" class="btn atom-btn-outline-success"><i class="fas fa-folder-plus me-1"></i>{{ __('Create Folder') }}</button></div>
+      </div>
+    </form>
+  </div>
+</div>
+
+{{-- Import Modal --}}
+<div class="modal fade" id="importModal" tabindex="-1">
+  <div class="modal-dialog">
+    <form method="post" action="{{ route('favorites.import') }}" enctype="multipart/form-data">
+      @csrf
+      @if(!empty($params['folder_id']))<input type="hidden" name="folder_id" value="{{ $params['folder_id'] }}">@endif
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title"><i class="fas fa-upload me-2"></i>{{ __('Import Favorites') }}</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+          <div class="mb-3"><label class="form-label">{{ __('Upload CSV') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label><input type="file" name="file" class="form-control" accept=".csv,.txt"><small class="text-muted">{{ __('CSV must contain a "slug" or "reference_code" column.') }}</small></div>
+          <div class="text-center text-muted my-2">- or -</div>
+          <div class="mb-3"><label class="form-label">{{ __('Paste Slugs') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label><textarea name="slugs" class="form-control" rows="4" placeholder="{{ __('One slug per line, or comma-separated...') }}"></textarea></div>
+        </div>
+        <div class="modal-footer"><button type="button" class="btn atom-btn-white" data-bs-dismiss="modal">{{ __('Cancel') }}</button><button type="submit" class="btn atom-btn-outline-success"><i class="fas fa-upload me-1"></i>{{ __('Import') }}</button></div>
+      </div>
+    </form>
+  </div>
+</div>
+
+{{-- Edit Folder Modal --}}
+@if(isset($activeFolder) && $activeFolder)
+<div class="modal fade" id="editFolderModal" tabindex="-1">
+  <div class="modal-dialog">
+    <form method="post" action="{{ route('favorites.folder.edit', $activeFolder->id) }}">
+      @csrf
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title"><i class="fas fa-edit me-2"></i>{{ __('Edit Folder') }}</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+          <div class="mb-3"><label class="form-label">{{ __('Folder Name') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label><input type="text" name="name" class="form-control" value="{{ e($activeFolder->name) }}" required maxlength="255"></div>
+          <div class="mb-3"><label class="form-label">{{ __('Description') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label><textarea name="description" class="form-control" rows="2">{{ e($activeFolder->description ?? '') }}</textarea></div>
+        </div>
+        <div class="modal-footer"><button type="button" class="btn atom-btn-white" data-bs-dismiss="modal">{{ __('Cancel') }}</button><button type="submit" class="btn atom-btn-outline-success"><i class="fas fa-save me-1"></i>{{ __('Save Changes') }}</button></div>
+      </div>
+    </form>
+  </div>
+</div>
+
+@if(!empty($activeFolder->share_token))
+<div class="modal fade" id="shareInfoModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title"><i class="fas fa-share-alt me-2"></i>{{ __('Folder is Shared') }}</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">{{ __('Share Link') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+          <div class="input-group">
+            <input type="text" class="form-control" readonly value="{{ url('/favorites/shared/' . $activeFolder->share_token) }}">
+            <button type="button" class="btn atom-btn-white" onclick="navigator.clipboard.writeText(this.previousElementSibling.value); this.innerHTML='<i class=\'fas fa-check\'></i>';">
+              <i class="fas fa-copy"></i>
+            </button>
+          </div>
+        </div>
+        @if($activeFolder->share_expires_at)
+          <p class="text-muted small">Expires: {{ $activeFolder->share_expires_at }}</p>
+        @endif
+      </div>
+      <div class="modal-footer">
+        <form action="{{ route('favorites.folder.revoke', $activeFolder->id) }}" method="post" class="d-inline">
+          @csrf
+          <button type="submit" class="btn atom-btn-outline-danger" onclick="return confirm('Revoke sharing? The link will no longer work.');">
+            <i class="fas fa-ban me-1"></i>{{ __('Revoke Sharing') }}
+          </button>
+        </form>
+        <button type="button" class="btn atom-btn-white" data-bs-dismiss="modal">{{ __('Close') }}</button>
+      </div>
+    </div>
+  </div>
+</div>
+@endif
+@endif
+
+{{-- Column Config Dropdown removed: Dates and Repository columns dropped per request. --}}
+
+@push('js')
+<script>
+(function() {
+    // Select All checkbox
+    var selectAll = document.getElementById('selectAll');
+    if (selectAll) {
+        selectAll.addEventListener('change', function() {
+            document.querySelectorAll('.bulk-checkbox').forEach(function(cb) { cb.checked = selectAll.checked; });
+            updateBulkBar();
+        });
+    }
+
+    document.addEventListener('change', function(e) {
+        if (e.target.classList.contains('bulk-checkbox')) updateBulkBar();
+    });
+
+    function updateBulkBar() {
+        var checked = document.querySelectorAll('.bulk-checkbox:checked');
+        var bar = document.getElementById('bulkActionBar');
+        var countEl = document.getElementById('selectedCount');
+        var container = document.getElementById('bulkIdsContainer');
+
+        if (checked.length > 0) {
+            bar.style.display = 'block';
+            countEl.textContent = checked.length + ' selected';
+            container.innerHTML = '';
+            checked.forEach(function(cb) {
+                var input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'ids[]';
+                input.value = cb.value;
+                container.appendChild(input);
+            });
+        } else {
+            bar.style.display = 'none';
+        }
+    }
+
+    // Notes toggle
+    document.querySelectorAll('.notes-toggle').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var favId = btn.getAttribute('data-fav-id');
+            var row = document.getElementById('notes-row-' + favId);
+            if (row) {
+                row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+                if (row.style.display === 'table-row') {
+                    var input = document.getElementById('notes-input-' + favId);
+                    if (input) input.focus();
+                }
+            }
+        });
+    });
+
+    // Notes save (AJAX)
+    document.querySelectorAll('.notes-save').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var favId = btn.getAttribute('data-fav-id');
+            var input = document.getElementById('notes-input-' + favId);
+            if (!input) return;
+            fetch('{{ url("/favorites/notes") }}/' + favId, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': '{{ csrf_token() }}',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: JSON.stringify({notes: input.value})
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    var toggleBtn = document.querySelector('.notes-toggle[data-fav-id="' + favId + '"] i');
+                    if (toggleBtn) {
+                        if (input.value) { toggleBtn.classList.add('text-warning'); }
+                        else { toggleBtn.classList.remove('text-warning'); }
+                    }
+                    input.classList.add('is-valid');
+                    // Close the notes row after successful save
+                    var row = document.getElementById('notes-row-' + favId);
+                    if (row) { row.style.display = 'none'; }
+                    setTimeout(function() { input.classList.remove('is-valid'); }, 1500);
+                }
+            });
+        });
+    });
+
+    // Column toggle
+    document.querySelectorAll('.col-toggle').forEach(function(cb) {
+        cb.addEventListener('change', function() {
+            var col = this.getAttribute('data-col');
+            document.querySelectorAll('.' + col).forEach(function(el) {
+                el.style.display = cb.checked ? '' : 'none';
+            });
+        });
+    });
+})();
+</script>
+@endpush
+@endsection

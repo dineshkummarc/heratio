@@ -1,0 +1,107 @@
+<?php
+
+/**
+ * RegenDerivativesCommand - regenerate thumbnails / reference copies for masters.
+ *
+ * Copyright (C) 2026 Johan Pieterse, Plain Sailing Information Systems
+ * Licensed under the GNU AGPL v3.
+ */
+
+namespace AhgCore\Commands;
+
+use AhgMediaProcessing\Services\DerivativeService;
+use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
+
+class RegenDerivativesCommand extends Command
+{
+    protected $signature = 'ahg:regen-derivatives
+        {--slug= : Information object slug}
+        {--type=all : Derivative type (all, thumbnail, reference)}
+        {--force : Regenerate even if derivatives exist}
+        {--only-externals : Only process external digital objects}
+        {--json : Output results as JSON}';
+
+    protected $description = 'Regenerate image derivatives';
+
+    public function handle(DerivativeService $derivatives): int
+    {
+        $masters = $this->collectMasters($derivatives);
+        $this->info("regenerating derivatives for {$masters->count()} masters");
+
+        $results = [];
+        $ok = 0;
+        $failed = 0;
+        foreach ($masters as $m) {
+            try {
+                $r = $derivatives->regenerateDerivatives((int) $m->id);
+                $results[] = ['id' => $m->id, 'status' => 'ok', 'detail' => $r];
+                $ok++;
+            } catch (\Throwable $e) {
+                $results[] = ['id' => $m->id, 'status' => 'fail', 'error' => $e->getMessage()];
+                $failed++;
+            }
+        }
+
+        if ($this->option('json')) {
+            $this->line(json_encode(['ok' => $ok, 'failed' => $failed, 'results' => $results], JSON_PRETTY_PRINT));
+        } else {
+            $this->info("ok={$ok} failed={$failed}");
+            // Say WHY, not just how many. Without this the scheduled run recorded
+            // "ok=30 failed=4" and threw the reason away, so a failure that was
+            // identical across all four - and trivially fixable - sat unexplained
+            // in the cron history. The reason only appeared under --json, which
+            // nothing scheduled passes.
+            foreach ($results as $r) {
+                if (($r['status'] ?? '') === 'fail') {
+                    $this->error("  id {$r['id']}: ".$r['error']);
+                }
+            }
+        }
+
+        return $failed === 0 ? self::SUCCESS : self::FAILURE;
+    }
+
+    protected function collectMasters(DerivativeService $derivatives): \Illuminate\Support\Collection
+    {
+        // Single-slug mode always targets that record's master directly.
+        if ($slug = $this->option('slug')) {
+            $ioId = DB::table('slug')->where('slug', $slug)->value('object_id');
+            if (! $ioId) {
+                $this->error("slug not found: {$slug}");
+
+                return collect();
+            }
+            $q = DB::table('digital_object as do')
+                ->where('do.usage_id', DerivativeService::USAGE_MASTER) // 140 = master
+                ->where('do.object_id', $ioId);
+            if ($this->option('only-externals')) {
+                $q->whereNotNull('do.path')->where('do.path', 'like', 'http%');
+            }
+
+            return $q->select('do.id', 'do.object_id', 'do.path', 'do.name')->get();
+        }
+
+        // Default (no --force): idempotent sweep - only masters that are still
+        // missing a thumbnail and/or reference derivative. Lets this run safely
+        // on a cron without re-encoding the whole corpus every time.
+        if (! $this->option('force')) {
+            $missing = $derivatives->getMastersWithMissingDerivatives(100000);
+            if ($this->option('only-externals')) {
+                $missing = $missing->filter(
+                    fn ($m) => str_starts_with((string) $m->path, 'http')
+                )->values();
+            }
+
+            return $missing; // rows expose ->id (master digital_object id)
+        }
+
+        // --force: every master, regenerate regardless of existing derivatives.
+        $q = DB::table('digital_object as do')->where('do.usage_id', DerivativeService::USAGE_MASTER);
+        if ($this->option('only-externals')) {
+            $q->whereNotNull('do.path')->where('do.path', 'like', 'http%');
+        }
+
+        return $q->select('do.id', 'do.object_id', 'do.path', 'do.name')->get();
+    }
+}

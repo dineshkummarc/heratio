@@ -1,0 +1,27 @@
+{
+    "name": "ahg/federation",
+    "description": "Federation and OAI-PMH peer harvesting for Heratio",
+    "type": "library",
+    "require": {
+        "ahg/core": "@dev",
+        "ahg/information-object-manage": "@dev",
+        "ahg/term-taxonomy": "@dev",
+        "ahg/search": "@dev",
+        "ahg/sharepoint": "@dev"
+    },
+    "autoload": {
+        "psr-4": {
+            "AhgFederation\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "AhgFederation\\Providers\\AhgFederationServiceProvider",
+                "AhgFederation\\Providers\\AhgUnionCatalogueServiceProvider",
+                "AhgFederation\\Providers\\AhgFederationLoanServiceProvider",
+                "AhgFederation\\Providers\\AhgFederationJoinServiceProvider"
+            ]
+        }
+    }
+}

@@ -1,0 +1,342 @@
+<?php
+
+/**
+ * HelpController - Controller for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace AhgHelp\Controllers;
+
+use AhgHelp\Services\HelpArticleService;
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+
+class HelpController extends Controller
+{
+    protected array $categoryDescriptions = [
+        'Admin & Settings' => 'System settings, backup, encryption, statistics, and workflow',
+        'AI & Automation' => 'AI tools, NER, duplicate detection, semantic and fuzzy search',
+        'Browse & Search' => 'GLAM browse, advanced search, term and taxonomy browsing',
+        'Collection Mgmt' => 'Condition, contacts, contracts, donors, loans, provenance, vendors',
+        'Compliance' => 'Audit trail, embargo, privacy, security, preservation',
+        'Exhibitions' => 'Exhibition management and landing page builder',
+        'GLAM Sectors' => 'Gallery, Library, Museum, DAM, and GLAM Browse modules',
+        'Heritage Accounting' => 'Heritage asset accounting (GRAP 103 / IPSAS 45)',
+        'Import/Export' => 'Data ingest, migration, metadata export, portable export',
+        'Integration' => 'DOI, REST API, GraphQL, Federation, IIIF, RiC',
+        'Labels & Forms' => 'Barcodes, label printing, and forms builder',
+        'Marketplace' => 'Heritage marketplace and vendor management',
+        'Public Access' => 'Access requests, cart, favorites, feedback, heritage platform',
+        'Reference' => 'Functions, workflows, and roadmap documents',
+        'Research' => 'Researcher portal and knowledge platform',
+        'Rights' => 'Rights management, extended rights, ICIP',
+        'User Guide' => 'Step-by-step guides for common tasks',
+        'User Manual' => 'Comprehensive user manuals',
+        'Viewers & Media' => '3D viewer, audio player, IIIF, Mirador, OpenSeadragon, PDF',
+    ];
+
+    protected array $categoryIcons = [
+        'Admin & Settings' => 'bi-gear',
+        'AI & Automation' => 'bi-robot',
+        'Browse & Search' => 'bi-search',
+        'Collection Mgmt' => 'bi-archive',
+        'Compliance' => 'bi-shield-check',
+        'Exhibitions' => 'bi-easel',
+        'GLAM Sectors' => 'bi-building',
+        'Heritage Accounting' => 'bi-calculator',
+        'Import/Export' => 'bi-arrow-left-right',
+        'Integration' => 'bi-plug',
+        'Labels & Forms' => 'bi-tag',
+        'Marketplace' => 'bi-shop',
+        'Public Access' => 'bi-people',
+        'Reference' => 'bi-file-text',
+        'Research' => 'bi-mortarboard',
+        'Rights' => 'bi-lock',
+        'User Guide' => 'bi-book',
+        'User Manual' => 'bi-journal-text',
+        'Viewers & Media' => 'bi-play-circle',
+    ];
+
+    public function index()
+    {
+        $categories = HelpArticleService::getCategories();
+        $recentArticles = HelpArticleService::getRecentlyUpdated(5);
+
+        return view('ahg-help::index', [
+            'categories' => $categories,
+            'recentArticles' => $recentArticles,
+            'categoryDescriptions' => $this->categoryDescriptions,
+            'categoryIcons' => $this->categoryIcons,
+        ]);
+    }
+
+    /**
+     * Context-sensitive help resolver (F1 target). Given the calling page's
+     * path (and optional route name), find the most relevant article and
+     * redirect to it. Order: an explicit config mapping (help-context.routes /
+     * .paths) wins; otherwise a keyword search over the meaningful path
+     * segments; otherwise the help index. So every page lands somewhere useful,
+     * whether or not it has an explicit mapping.
+     */
+    public function context(Request $request)
+    {
+        $path = (string) $request->query('path', $request->path());
+        $routeName = trim((string) $request->query('route', '')) ?: null;
+        $slug = $this->resolveContextSlug($routeName, $path);
+
+        // JSON mode: the in-page help panel fetches the resolved article's body
+        // so it can render inline without leaving the page.
+        if ($request->query('format') === 'json' || $request->wantsJson()) {
+            $article = $slug !== null ? HelpArticleService::getBySlug($slug) : null;
+            if ($article) {
+                return response()->json([
+                    'ok'    => true,
+                    'slug'  => $slug,
+                    'title' => (string) ($article['title'] ?? 'Help'),
+                    'url'   => route('help.article', ['slug' => $slug]),
+                    'html'  => (string) ($article['body_html'] ?? $article['body_text'] ?? ''),
+                ]);
+            }
+
+            return response()->json([
+                'ok'    => false,
+                'title' => 'Help',
+                'url'   => route('help.index'),
+                'html'  => '<p class="text-muted">No specific help article for this page. Browse the Help Center.</p>',
+            ]);
+        }
+
+        // Redirect mode (F1 / direct link opens the full article, new tab).
+        return $slug !== null
+            ? redirect()->route('help.article', ['slug' => $slug])
+            : redirect()->route('help.index');
+    }
+
+    /**
+     * Best help-article slug for a page. Explicit config mapping wins; else a
+     * slug/title keyword match on the path's meaningful segments (not body
+     * full-text, which pulls in loosely related docs); else null. Shared by the
+     * redirect (F1/new-tab) and JSON (in-page panel) modes of context().
+     */
+    private function resolveContextSlug(?string $routeName, string $path): ?string
+    {
+        $help = HelpArticleService::contextualFor($routeName, $path);
+        if ($help && ! empty($help['slug'])) {
+            return (string) $help['slug'];
+        }
+
+        $skip = ['admin', 'api', 'app', 'index', 'edit', 'create', 'store', 'update',
+            'delete', 'view', 'show', 'list', 'new', 'add', 'manage', 'informationobject',
+            'packages', 'package', 'settings', 'object'];
+        $terms = [];
+        foreach (explode('/', trim($path, '/')) as $seg) {
+            $seg = strtolower(trim($seg));
+            if ($seg === '' || ctype_digit($seg) || in_array($seg, $skip, true) || strlen($seg) < 4) {
+                continue;
+            }
+            $terms[] = $seg;
+            if (str_contains($seg, '-') && strlen(strtok($seg, '-')) >= 4) {
+                $terms[] = strtok($seg, '-');
+            }
+        }
+        foreach (array_unique($terms) as $term) {
+            $like = '%' . $term . '%';
+            $slug = \Illuminate\Support\Facades\DB::table('help_article')
+                ->where('is_published', 1)
+                ->where(function ($q) use ($like) {
+                    $q->where('slug', 'like', $like)->orWhere('title', 'like', $like);
+                })
+                ->orderByRaw('CASE
+                    WHEN slug LIKE ? THEN 0
+                    WHEN slug LIKE ? THEN 1
+                    WHEN title LIKE ? THEN 2
+                    ELSE 3 END', ['%' . $term . '%user-guide%', $term . '%', $like])
+                ->orderByDesc('word_count')
+                ->value('slug');
+            if ($slug) {
+                return (string) $slug;
+            }
+        }
+
+        return null;
+    }
+
+    public function category(string $category)
+    {
+        $category = urldecode($category);
+        $articles = HelpArticleService::getByCategory($category);
+
+        // Slug-form (e.g. "import-export") - reverse-resolve to display name ("Import/Export")
+        if (empty($articles)) {
+            $resolved = HelpArticleService::categoryFromSlug($category);
+            if ($resolved !== $category) {
+                $category = $resolved;
+                $articles = HelpArticleService::getByCategory($category);
+            }
+        }
+
+        if (empty($articles)) {
+            return redirect()->route('help.index');
+        }
+
+        $grouped = [];
+        foreach ($articles as $article) {
+            $sub = $article['subcategory'] ?: 'General';
+            $grouped[$sub][] = $article;
+        }
+        ksort($grouped);
+
+        $categories = HelpArticleService::getCategories();
+
+        return view('ahg-help::category', [
+            'category' => $category,
+            'grouped' => $grouped,
+            'categories' => $categories,
+        ]);
+    }
+
+    public function article(string $slug)
+    {
+        $article = HelpArticleService::getBySlug($slug);
+        if (! $article) {
+            abort(404);
+        }
+
+        $toc = [];
+        if (! empty($article['toc_json'])) {
+            $toc = json_decode($article['toc_json'], true) ?: [];
+        }
+
+        $adjacent = HelpArticleService::getAdjacentArticles($article['id'], $article['category']);
+        $categories = HelpArticleService::getCategories();
+        $related = HelpArticleService::relatedArticles((int) $article['id']);
+
+        return view('ahg-help::article', [
+            'article' => $article,
+            'toc' => $toc,
+            'prevArticle' => $adjacent['prev'],
+            'nextArticle' => $adjacent['next'],
+            'categories' => $categories,
+            'related' => $related,
+        ]);
+    }
+
+    /** Admin: manage an article's cross-links (heratio#1399). */
+    public function manageLinks(string $slug)
+    {
+        $article = HelpArticleService::getBySlug($slug);
+        if (! $article) {
+            abort(404);
+        }
+        HelpArticleService::ensureLinkTable();
+
+        return view('ahg-help::manage-links', [
+            'article' => $article,
+            'related' => HelpArticleService::relatedArticles((int) $article['id']),
+            'allArticles' => HelpArticleService::searchArticles('', (int) $article['id'], 1000),
+        ]);
+    }
+
+    /** Admin: add a link (from a picked title, a slug, or a pasted /help/article URL). */
+    public function addLink(\Illuminate\Http\Request $request, string $slug)
+    {
+        $article = HelpArticleService::getBySlug($slug);
+        if (! $article) {
+            abort(404);
+        }
+        $targetId = HelpArticleService::resolveArticleId((string) $request->input('target', ''));
+        if (! $targetId) {
+            return back()->with('error', 'Could not find that article - pick one from the list or paste its /help/article/… URL.');
+        }
+        HelpArticleService::addManualLink((int) $article['id'], $targetId);
+
+        return redirect()->route('help.article.links', $slug)->with('success', 'Link added.');
+    }
+
+    /** Admin: remove a link. */
+    public function removeLink(string $slug, int $targetId)
+    {
+        $article = HelpArticleService::getBySlug($slug);
+        if (! $article) {
+            abort(404);
+        }
+        HelpArticleService::removeLink((int) $article['id'], $targetId);
+
+        return redirect()->route('help.article.links', $slug)->with('success', 'Link removed.');
+    }
+
+    /**
+     * Interactive end-to-end system flow map (issue #1216). A single
+     * data-driven, pan/zoom/drill diagram of the platform journey. The
+     * node/edge model lives in resources/data/system-map.php and is turned
+     * into Cytoscape elements by SystemMapService.
+     */
+    public function systemMap()
+    {
+        $graph = \AhgHelp\Services\SystemMapService::graph();
+        $categories = HelpArticleService::getCategories();
+
+        return view('ahg-help::system-map', [
+            'graph' => $graph,
+            'categories' => $categories,
+        ]);
+    }
+
+    /**
+     * Interactive System Breakdown - a four-level functional capability tree
+     * (Heratio -> entity -> aspect -> feature). Separate from, and deeper than,
+     * the three-level workflow System Map: this answers "what can the platform
+     * do, broken down by record type". The node/edge model lives in
+     * resources/data/system-breakdown.php and is turned into Cytoscape elements
+     * by SystemBreakdownService.
+     */
+    public function systemBreakdown()
+    {
+        $graph = \AhgHelp\Services\SystemBreakdownService::graph();
+        $categories = HelpArticleService::getCategories();
+
+        return view('ahg-help::system-breakdown', [
+            'graph' => $graph,
+            'categories' => $categories,
+        ]);
+    }
+
+    public function search(Request $request)
+    {
+        $query = trim($request->get('q', ''));
+        $articleResults = [];
+        $sectionResults = [];
+
+        if (mb_strlen($query) >= 2) {
+            $articleResults = HelpArticleService::search($query, 20);
+            $sectionResults = HelpArticleService::searchSections($query, 20);
+        }
+
+        $categories = HelpArticleService::getCategories();
+
+        return view('ahg-help::search', [
+            'query' => $query,
+            'articleResults' => $articleResults,
+            'sectionResults' => $sectionResults,
+            'categories' => $categories,
+        ]);
+    }
+}

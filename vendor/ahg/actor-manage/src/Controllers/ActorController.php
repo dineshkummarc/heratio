@@ -1,0 +1,1939 @@
+<?php
+
+/**
+ * ActorController - Controller for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace AhgActorManage\Controllers;
+
+use AhgActorManage\Services\ActorBrowseService;
+use AhgActorManage\Services\ActorService;
+use AhgActorManage\Services\AuthorityCompletenessService;
+use AhgActorManage\Services\AuthorityDedupeService;
+use AhgActorManage\Services\AuthorityFunctionService;
+use AhgActorManage\Services\AuthorityGraphService;
+use AhgActorManage\Services\AuthorityIdentifierService;
+use AhgActorManage\Services\AuthorityLookupService;
+use AhgActorManage\Services\AuthorityMergeService;
+use AhgActorManage\Services\AuthorityNerPipelineService;
+use AhgActorManage\Services\AuthorityOccupationService;
+use AhgCore\Constants\TermId;
+use AhgCore\Pagination\SimplePager;
+use AhgCore\Services\SettingHelper;
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+
+class ActorController extends Controller
+{
+    protected ActorService $service;
+
+    public function __construct()
+    {
+        $this->service = new ActorService(app()->getLocale());
+    }
+
+    public function browse(Request $request)
+    {
+        $culture = app()->getLocale();
+        $browseService = new ActorBrowseService($culture);
+
+        $params = [
+            'page' => $request->get('page', 1),
+            'limit' => $request->get('limit', SettingHelper::hitsPerPage()),
+            'sort' => $request->get('sort', 'alphabetic'),
+            'sortDir' => $request->get('sortDir', ''),
+            'subquery' => $request->get('query', $request->get('subquery', '')),
+            'entityType' => $request->get('entityType', ''),
+            'repository' => $request->get('repository', ''),
+            'hasDigitalObject' => $request->get('hasDigitalObject', ''),
+            'emptyField' => $request->get('emptyField', ''),
+            'relatedType' => $request->get('relatedType', ''),
+            'relatedAuthority' => $request->get('relatedAuthority', ''),
+        ];
+
+        // Collect advanced search criteria
+        for ($i = 0; $i < 10; $i++) {
+            $params["sq{$i}"] = $request->get("sq{$i}", '');
+            $params["sf{$i}"] = $request->get("sf{$i}", '');
+            $params["so{$i}"] = $request->get("so{$i}", 'and');
+        }
+
+        $hasAdvancedFilters = $params['entityType'] || $params['repository']
+            || $params['hasDigitalObject'] || $params['emptyField']
+            || $params['sq0'];
+
+        $result = $hasAdvancedFilters
+            ? $browseService->browseAdvanced($params)
+            : $browseService->browse($params);
+
+        $pager = new SimplePager($result);
+
+        // Sidebar facets
+        $entityTypeFacets = $browseService->getEntityTypeFacets();
+        $totalCount = $browseService->getTotalCount();
+        $repositories = $browseService->getRepositories();
+        $maintainedByFacets = $browseService->getMaintainedByFacets();
+        $occupationFacets = $browseService->getOccupationFacets();
+        $placeFacets = $browseService->getPlaceFacets();
+        $subjectFacets = $browseService->getSubjectFacets();
+        $mediaTypeFacets = $browseService->getMediaTypeFacets();
+        $languageFacets = $browseService->getLanguageFacets();
+
+        // Build filter tags for active filters
+        $filterTags = [];
+        $baseUrl = url('/actor/browse');
+        $allParams = $request->except(['page']);
+
+        if (! empty($params['subquery'])) {
+            $removeParams = $allParams;
+            unset($removeParams['query'], $removeParams['subquery']);
+            $filterTags[] = ['label' => 'Search: '.$params['subquery'], 'removeUrl' => $baseUrl.'?'.http_build_query($removeParams)];
+        }
+        if (! empty($params['entityType']) && isset($entityTypeFacets[$params['entityType']])) {
+            $removeParams = $allParams;
+            unset($removeParams['entityType']);
+            $filterTags[] = ['label' => 'Entity type: '.$entityTypeFacets[$params['entityType']]['name'], 'removeUrl' => $baseUrl.'?'.http_build_query($removeParams)];
+        }
+        if (! empty($params['repository'])) {
+            $repoName = collect($repositories)->firstWhere('id', $params['repository'])->name ?? $params['repository'];
+            $removeParams = $allParams;
+            unset($removeParams['repository']);
+            $filterTags[] = ['label' => 'Repository: '.$repoName, 'removeUrl' => $baseUrl.'?'.http_build_query($removeParams)];
+        }
+        if (! empty($params['hasDigitalObject'])) {
+            $removeParams = $allParams;
+            unset($removeParams['hasDigitalObject']);
+            $filterTags[] = ['label' => 'Has digital object', 'removeUrl' => $baseUrl.'?'.http_build_query($removeParams)];
+        }
+        if (! empty($params['emptyField'])) {
+            $removeParams = $allParams;
+            unset($removeParams['emptyField']);
+            $filterTags[] = ['label' => 'Empty field: '.$params['emptyField'], 'removeUrl' => $baseUrl.'?'.http_build_query($removeParams)];
+        }
+        if ($request->has('languages') && $request->get('languages') !== '') {
+            $langCode = $request->get('languages');
+            $langName = isset($languageFacets[$langCode]) ? $languageFacets[$langCode]['name'] : $langCode;
+            $removeParams = $allParams;
+            unset($removeParams['languages']);
+            $filterTags[] = ['label' => 'Language: '.$langName, 'removeUrl' => $baseUrl.'?'.http_build_query($removeParams)];
+        }
+        if ($request->has('maintainedBy') && $request->get('maintainedBy') !== '') {
+            $mbId = $request->get('maintainedBy');
+            $mbName = isset($maintainedByFacets[$mbId]) ? $maintainedByFacets[$mbId]['name'] : $mbId;
+            $removeParams = $allParams;
+            unset($removeParams['maintainedBy']);
+            $filterTags[] = ['label' => 'Maintained by: '.$mbName, 'removeUrl' => $baseUrl.'?'.http_build_query($removeParams)];
+        }
+        if ($request->has('occupation') && $request->get('occupation') !== '') {
+            $occId = $request->get('occupation');
+            $occName = isset($occupationFacets[$occId]) ? $occupationFacets[$occId]['name'] : $occId;
+            $removeParams = $allParams;
+            unset($removeParams['occupation']);
+            $filterTags[] = ['label' => 'Occupation: '.$occName, 'removeUrl' => $baseUrl.'?'.http_build_query($removeParams)];
+        }
+        if ($request->has('place') && $request->get('place') !== '') {
+            $placeId = $request->get('place');
+            $placeName = isset($placeFacets[$placeId]) ? $placeFacets[$placeId]['name'] : $placeId;
+            $removeParams = $allParams;
+            unset($removeParams['place']);
+            $filterTags[] = ['label' => 'Place: '.$placeName, 'removeUrl' => $baseUrl.'?'.http_build_query($removeParams)];
+        }
+        if ($request->has('subject') && $request->get('subject') !== '') {
+            $subId = $request->get('subject');
+            $subName = isset($subjectFacets[$subId]) ? $subjectFacets[$subId]['name'] : $subId;
+            $removeParams = $allParams;
+            unset($removeParams['subject']);
+            $filterTags[] = ['label' => 'Subject: '.$subName, 'removeUrl' => $baseUrl.'?'.http_build_query($removeParams)];
+        }
+        if ($request->has('mediaType') && $request->get('mediaType') !== '') {
+            $mtId = $request->get('mediaType');
+            $mtName = isset($mediaTypeFacets[$mtId]) ? $mediaTypeFacets[$mtId]['name'] : $mtId;
+            $removeParams = $allParams;
+            unset($removeParams['mediaType']);
+            $filterTags[] = ['label' => 'Media type: '.$mtName, 'removeUrl' => $baseUrl.'?'.http_build_query($removeParams)];
+        }
+
+        return view('ahg-actor-manage::browse', [
+            'pager' => $pager,
+            'entityTypeNames' => $result['entityTypeNames'] ?? [],
+            'entityTypeFacets' => $entityTypeFacets,
+            'totalCount' => $totalCount,
+            'repositories' => $repositories,
+            'maintainedByFacets' => $maintainedByFacets,
+            'occupationFacets' => $occupationFacets,
+            'placeFacets' => $placeFacets,
+            'subjectFacets' => $subjectFacets,
+            'mediaTypeFacets' => $mediaTypeFacets,
+            'languageFacets' => $languageFacets,
+            'filterTags' => $filterTags,
+            'params' => $params,
+            'sortOptions' => [
+                'lastUpdated' => 'Date modified',
+                'alphabetic' => 'Name',
+                'identifier' => 'Identifier',
+            ],
+        ]);
+    }
+
+    public function show(string $slug, Request $request)
+    {
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        // #51 ACL enforcement: read-side gate. Admin-bypass built into
+        // hasPermission so admins always pass; anonymous users + group
+        // members without 'read' on this actor get 403.
+        if (! \AhgCore\Services\AclService::hasPermission(\Illuminate\Support\Facades\Auth::id(), 'read', (int) $actor->id)) {
+            abort(403, 'You do not have permission to view this record.');
+        }
+
+        // Draft / embargoed authority records must not leak to guests (the ACL
+        // 'read' gate above is a no-op for anonymous). Editors/admins bypass.
+        if (! \AhgCore\Services\AclService::isActorVisible((int) $actor->id)) {
+            abort(404);
+        }
+
+        $entityTypeName = $this->service->getEntityTypeName($actor->entity_type_id);
+        $otherNames = $this->service->getOtherNames($actor->id);
+        $contacts = $this->service->getContacts($actor->id);
+        $events = $this->service->getEvents($actor->id);
+        $relatedActors = $this->service->getRelatedActors($actor->id);
+        $digitalObjects = $this->service->getDigitalObjects($actor->id);
+        $maintenanceNotes = $this->service->getMaintenanceNotes($actor->id);
+        $subjects = $this->service->getSubjectAccessPoints($actor->id);
+        $places = $this->service->getPlaceAccessPoints($actor->id);
+        $occupations = $this->service->getOccupations($actor->id);
+        $occupationNotes = $this->service->getOccupationNotes($actor->id);
+
+        // Paginated "Creator of" resources (via events)
+        $creatorPage = max(1, (int) $request->get('creator_page', 1));
+        $creatorPaginated = $this->service->getRelatedResourcesPaginated($actor->id, $creatorPage, 10);
+
+        // Paginated "Subject of" resources (name access points via relation table)
+        $subjectPage = max(1, (int) $request->get('subject_page', 1));
+        $subjectPaginated = $this->service->getSubjectOfResourcesPaginated($actor->id, $subjectPage, 10);
+
+        // Resolve description status/detail names
+        $descriptionStatusName = $this->service->getEntityTypeName($actor->description_status_id);
+        $descriptionDetailName = $this->service->getEntityTypeName($actor->description_detail_id);
+
+        // Resolve name type names
+        $nameTypeIds = $otherNames->pluck('type_id')->filter()->unique()->values()->toArray();
+        $nameTypeNames = $this->service->getNameTypeNames($nameTypeIds);
+
+        // Resolve relation type names and category names
+        $relationTypeIds = collect($relatedActors)->pluck('type_id')->filter()->unique()->values()->toArray();
+        $relationTypeNames = $this->service->getRelationTypeNames($relationTypeIds);
+        $relationCategoryNames = $this->service->getRelationCategoryNames($relationTypeIds);
+        $converseRelationTypeNames = $this->service->getConverseRelationTypeNames($relationTypeIds);
+
+        // Language(s) and Script(s) from property table
+        $languages = $this->service->getLanguages($actor->id);
+        $scripts = $this->service->getScripts($actor->id);
+
+        // Maintaining repository
+        $maintainingRepository = $this->service->getMaintainingRepository($actor->id);
+
+        // Related functions (may not exist in all installs)
+        $relatedFunctions = collect();
+        try {
+            $relatedFunctions = $this->service->getRelatedFunctions($actor->id);
+        } catch (\Exception $e) {
+            // function_object table may not exist
+        }
+
+        // Parent actor (hierarchical actors - parent_id=3 is ROOT)
+        $parentActor = null;
+        if ($actor->parent_id && $actor->parent_id != 3) {
+            $parentActor = DB::table('actor')
+                ->join('actor_i18n', function ($j) {
+                    $j->on('actor.id', '=', 'actor_i18n.id')
+                        ->where('actor_i18n.culture', '=', app()->getLocale());
+                })
+                ->join('slug', 'actor.id', '=', 'slug.object_id')
+                ->where('actor.id', $actor->parent_id)
+                ->select('actor.id', 'actor_i18n.authorized_form_of_name', 'slug.slug')
+                ->first();
+        }
+
+        // Source language name
+        $sourceLangName = null;
+        if ($actor->source_culture) {
+            $langNames = ['en' => 'English', 'fr' => 'French', 'es' => 'Spanish', 'pt' => 'Portuguese', 'de' => 'German', 'nl' => 'Dutch', 'it' => 'Italian', 'af' => 'Afrikaans', 'zu' => 'Zulu', 'xh' => 'Xhosa', 'st' => 'Southern Sotho', 'tn' => 'Tswana', 'ar' => 'Arabic', 'ja' => 'Japanese', 'zh' => 'Chinese'];
+            $sourceLangName = $langNames[$actor->source_culture] ?? $actor->source_culture;
+        }
+
+        // AHG extended: completeness, external identifiers, structured occupations
+        $completeness = $this->service->getActorCompleteness($actor->id);
+        $externalIdentifiers = $this->service->getActorIdentifiers($actor->id);
+        $structuredOccupations = $this->service->getActorOccupations($actor->id);
+
+        // #98 Phase 1: pick the view per setting.scope='default_template' name='actor' (isaar default).
+        // ISAAR-CPF is the only canonical standard; resolver falls back to the base 'show' view when
+        // the operator picks an unimplemented value, so changing the setting can never break the page.
+        return view(\AhgCore\Services\SettingHelper::resolveTemplateView('actor', 'ahg-actor-manage::show', 'isaar'), [
+            'actor' => $actor,
+            'publicationStatusId' => (int) (DB::table('status')
+                ->where('object_id', $actor->id)->where('type_id', 158)
+                ->value('status_id') ?: 160),
+            'entityTypeName' => $entityTypeName,
+            'otherNames' => $otherNames,
+            'nameTypeNames' => $nameTypeNames,
+            'contacts' => $contacts,
+            'events' => $events,
+            'relatedActors' => $relatedActors,
+            'relationTypeNames' => $relationTypeNames,
+            'relationCategoryNames' => $relationCategoryNames,
+            'converseRelationTypeNames' => $converseRelationTypeNames,
+            'relatedResources' => $creatorPaginated['items'],
+            'relatedResourcesTotal' => $creatorPaginated['total'],
+            'relatedResourcesPage' => $creatorPaginated['page'],
+            'relatedResourcesLastPage' => $creatorPaginated['lastPage'],
+            'relatedFunctions' => $relatedFunctions,
+            'digitalObjects' => $digitalObjects,
+            'maintenanceNotes' => $maintenanceNotes,
+            'descriptionStatusName' => $descriptionStatusName,
+            'descriptionDetailName' => $descriptionDetailName,
+            'subjects' => $subjects,
+            'places' => $places,
+            'occupations' => $occupations,
+            'occupationNotes' => $occupationNotes,
+            'subjectOfResources' => $subjectPaginated['items'],
+            'subjectOfResourcesTotal' => $subjectPaginated['total'],
+            'subjectOfResourcesPage' => $subjectPaginated['page'],
+            'subjectOfResourcesLastPage' => $subjectPaginated['lastPage'],
+            'languages' => $languages,
+            'scripts' => $scripts,
+            'maintainingRepository' => $maintainingRepository,
+            'parentActor' => $parentActor,
+            'sourceLangName' => $sourceLangName,
+            'completeness' => $completeness,
+            'externalIdentifiers' => $externalIdentifiers,
+            'structuredOccupations' => $structuredOccupations,
+        ]);
+    }
+
+    /**
+     * Print-friendly view for an authority record.
+     */
+    public function print(string $slug)
+    {
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        $entityTypeName = $this->service->getEntityTypeName($actor->entity_type_id);
+        $otherNames = $this->service->getOtherNames($actor->id);
+        $contacts = $this->service->getContacts($actor->id);
+        $events = $this->service->getEvents($actor->id);
+        $relatedActors = $this->service->getRelatedActors($actor->id);
+        $relatedResources = $this->service->getRelatedResources($actor->id);
+        $maintenanceNotes = $this->service->getMaintenanceNotes($actor->id);
+        $subjects = $this->service->getSubjectAccessPoints($actor->id);
+        $places = $this->service->getPlaceAccessPoints($actor->id);
+        $occupations = $this->service->getOccupations($actor->id);
+        $occupationNotes = $this->service->getOccupationNotes($actor->id);
+        $subjectOfResources = $this->service->getSubjectOfResources($actor->id);
+
+        $descriptionStatusName = $this->service->getEntityTypeName($actor->description_status_id);
+        $descriptionDetailName = $this->service->getEntityTypeName($actor->description_detail_id);
+
+        $nameTypeIds = $otherNames->pluck('type_id')->filter()->unique()->values()->toArray();
+        $nameTypeNames = $this->service->getNameTypeNames($nameTypeIds);
+
+        $relationTypeIds = collect($relatedActors)->pluck('type_id')->filter()->unique()->values()->toArray();
+        $relationTypeNames = $this->service->getRelationTypeNames($relationTypeIds);
+        $relationCategoryNames = $this->service->getRelationCategoryNames($relationTypeIds);
+        $converseRelationTypeNames = $this->service->getConverseRelationTypeNames($relationTypeIds);
+
+        $languages = $this->service->getLanguages($actor->id);
+        $scripts = $this->service->getScripts($actor->id);
+        $maintainingRepository = $this->service->getMaintainingRepository($actor->id);
+
+        $relatedFunctions = collect();
+        try {
+            $relatedFunctions = $this->service->getRelatedFunctions($actor->id);
+        } catch (\Exception $e) {
+        }
+
+        // AHG extended: completeness, external identifiers, structured occupations
+        $completeness = $this->service->getActorCompleteness($actor->id);
+        $externalIdentifiers = $this->service->getActorIdentifiers($actor->id);
+        $structuredOccupations = $this->service->getActorOccupations($actor->id);
+
+        return view('ahg-actor-manage::print', [
+            'actor' => $actor,
+            'entityTypeName' => $entityTypeName,
+            'otherNames' => $otherNames,
+            'nameTypeNames' => $nameTypeNames,
+            'contacts' => $contacts,
+            'events' => $events,
+            'relatedActors' => $relatedActors,
+            'relationTypeNames' => $relationTypeNames,
+            'relationCategoryNames' => $relationCategoryNames,
+            'converseRelationTypeNames' => $converseRelationTypeNames,
+            'relatedResources' => $relatedResources,
+            'relatedFunctions' => $relatedFunctions,
+            'maintenanceNotes' => $maintenanceNotes,
+            'descriptionStatusName' => $descriptionStatusName,
+            'descriptionDetailName' => $descriptionDetailName,
+            'subjects' => $subjects,
+            'places' => $places,
+            'occupations' => $occupations,
+            'occupationNotes' => $occupationNotes,
+            'subjectOfResources' => $subjectOfResources,
+            'languages' => $languages,
+            'scripts' => $scripts,
+            'maintainingRepository' => $maintainingRepository,
+            'completeness' => $completeness,
+            'externalIdentifiers' => $externalIdentifiers,
+            'structuredOccupations' => $structuredOccupations,
+        ]);
+    }
+
+    public function create()
+    {
+        $formChoices = $this->service->getFormChoices();
+
+        return view('ahg-actor-manage::edit', [
+            'actor' => null,
+            'contacts' => collect(),
+            'otherNames' => collect(),
+            'maintenanceNotes' => null,
+            'formChoices' => $formChoices,
+            'externalIdentifiers' => collect(),
+            'structuredOccupations' => collect(),
+            'publicationStatusId' => 160,
+        ]);
+    }
+
+    public function edit(string $slug)
+    {
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        $contacts = $this->service->getContacts($actor->id);
+        $otherNames = $this->service->getOtherNames($actor->id);
+        $maintenanceNotes = $this->service->getMaintenanceNotes($actor->id);
+        $formChoices = $this->service->getFormChoices();
+        $externalIdentifiers = $this->service->getActorIdentifiers($actor->id);
+        $structuredOccupations = $this->service->getActorOccupations($actor->id);
+        $subjects = $this->service->getSubjectAccessPoints($actor->id);
+        $places = $this->service->getPlaceAccessPoints($actor->id);
+        $maintainingRepository = $this->service->getMaintainingRepository($actor->id);
+
+        // Parent actor name for the parent_id autocomplete field
+        $parentActorName = '';
+        if ($actor->parent_id && $actor->parent_id != 3) {
+            $culture = app()->getLocale();
+            $parentActorName = DB::table('actor_i18n')
+                ->where('id', $actor->parent_id)
+                ->where('culture', $culture)
+                ->value('authorized_form_of_name') ?? '';
+        }
+
+        $languages = $this->service->getLanguages($actor->id);
+        $scripts = $this->service->getScripts($actor->id);
+
+        // Part B: current publication status (159 draft / 160 published, default
+        // published) so the ISAAR Control-area toggle reflects the saved state.
+        $publicationStatusId = (int) (DB::table('status')
+            ->where('object_id', $actor->id)->where('type_id', 158)
+            ->value('status_id') ?: 160);
+
+        return view('ahg-actor-manage::edit', [
+            'actor' => $actor,
+            'publicationStatusId' => $publicationStatusId,
+            'contacts' => $contacts,
+            'otherNames' => $otherNames,
+            'maintenanceNotes' => $maintenanceNotes,
+            'formChoices' => $formChoices,
+            'externalIdentifiers' => $externalIdentifiers,
+            'structuredOccupations' => $structuredOccupations,
+            'subjects' => $subjects,
+            'places' => $places,
+            'maintainingRepository' => $maintainingRepository,
+            'parentActorName' => $parentActorName,
+            'languages' => $languages,
+            'scripts' => $scripts,
+        ]);
+    }
+
+    public function store(Request $request)
+    {
+        $request->validate([
+            'authorized_form_of_name' => 'required|string|max:1024',
+            'entity_type_id' => 'required|integer|exists:term,id',
+            'dates_of_existence' => 'nullable|string|max:1024',
+            'description_identifier' => 'nullable|string|max:1024',
+            'corporate_body_identifiers' => 'nullable|string|max:1024',
+            'source_standard' => 'nullable|string|max:1024',
+            'description_status_id' => 'nullable|integer',
+            'description_detail_id' => 'nullable|integer',
+            'institution_responsible_identifier' => 'nullable|string|max:1024',
+            'history' => 'nullable|string',
+            'places' => 'nullable|string',
+            'legal_status' => 'nullable|string',
+            'functions' => 'nullable|string',
+            'mandates' => 'nullable|string',
+            'internal_structures' => 'nullable|string',
+            'general_context' => 'nullable|string',
+            'rules' => 'nullable|string',
+            'sources' => 'nullable|string',
+            'revision_history' => 'nullable|string',
+            'maintenance_notes' => 'nullable|string',
+            'contacts' => 'nullable|array',
+            'contacts.*.contact_person' => 'nullable|string|max:1024',
+            'contacts.*.email' => 'nullable|email|max:255',
+            'contacts.*.telephone' => 'nullable|string|max:255',
+            'contacts.*.website' => 'nullable|url|max:1024',
+            // Extended contact fields
+            'contacts.*.title' => 'nullable|string|max:100',
+            'contacts.*.role' => 'nullable|string|max:255',
+            'contacts.*.department' => 'nullable|string|max:255',
+            'contacts.*.cell' => 'nullable|string|max:255',
+            'contacts.*.id_number' => 'nullable|string|max:50',
+            'contacts.*.alternative_email' => 'nullable|email|max:255',
+            'contacts.*.alternative_phone' => 'nullable|string|max:255',
+            'contacts.*.preferred_contact_method' => 'nullable|string|max:35',
+            'contacts.*.language_preference' => 'nullable|string|max:16',
+            'contacts.*.extended_notes' => 'nullable|string',
+            'other_names' => 'nullable|array',
+            'other_names.*.name' => 'nullable|string|max:1024',
+            'other_names.*.type_id' => 'nullable|integer',
+        ]);
+        \AhgCustomFields\Services\CustomFieldService::validateRequest($request, 'actor'); // heratio#1548
+
+        $data = $request->only([
+            'authorized_form_of_name', 'entity_type_id', 'dates_of_existence',
+            'description_identifier', 'corporate_body_identifiers', 'source_standard',
+            'description_status_id', 'description_detail_id',
+            'institution_responsible_identifier', 'history', 'places', 'legal_status',
+            'functions', 'mandates', 'internal_structures', 'general_context',
+            'rules', 'sources', 'revision_history', 'maintenance_notes',
+            'contacts', 'other_names',
+        ]);
+
+        $id = $this->service->create($data);
+        \AhgCustomFields\Services\CustomFieldService::saveFromRequest((int) $id, $request, 'actor'); // heratio#1548
+
+        // Publication status (159 draft / 160 published) + embargo date (Part B).
+        $embargo = $request->input('embargo_until');
+        $embargo = ($embargo && strtotime($embargo)) ? date('Y-m-d', strtotime($embargo)) : null;
+        \AhgCore\Services\AclService::setActorPublicationStatus(
+            $id, (int) $request->input('publication_status_id', 160), $embargo
+        );
+
+        // Save external identifiers if provided
+        if ($request->has('external_identifiers')) {
+            $this->service->saveActorIdentifiers($id, $request->input('external_identifiers', []));
+        }
+
+        // Save structured occupations if provided
+        if ($request->has('structured_occupations')) {
+            $this->service->saveActorOccupations($id, $request->input('structured_occupations', []));
+        }
+
+        // Calculate and store completeness score
+        $this->service->saveActorCompleteness($id);
+
+        // #1433: reflect the new actor + its publication/embargo state in ES now,
+        // so draft/embargoed authority records drop from ES-backed search without
+        // waiting for a full reindex.
+        $this->reindexActorInEs($id);
+
+        $slug = $this->service->getSlug($id);
+
+        return redirect()
+            ->route('actor.show', $slug)
+            ->with('success', 'Authority record created successfully.');
+    }
+
+    public function update(Request $request, string $slug)
+    {
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        // #51 ACL enforcement: object-aware write gate (mirrors show() read gate).
+        // Falls back to the global update grant when no object rule exists.
+        if (! \AhgCore\Services\AclService::hasPermission(\Illuminate\Support\Facades\Auth::id(), 'update', (int) $actor->id)) {
+            abort(403, 'You do not have permission to edit this record.');
+        }
+
+        $request->validate([
+            'authorized_form_of_name' => 'required|string|max:1024',
+            'entity_type_id' => 'required|integer|exists:term,id',
+            'dates_of_existence' => 'nullable|string|max:1024',
+            'description_identifier' => 'nullable|string|max:1024',
+            'corporate_body_identifiers' => 'nullable|string|max:1024',
+            'parent_id' => 'nullable|integer',
+            'source_standard' => 'nullable|string|max:1024',
+            'description_status_id' => 'nullable|integer',
+            'description_detail_id' => 'nullable|integer',
+            'institution_responsible_identifier' => 'nullable|string|max:1024',
+            'history' => 'nullable|string',
+            'places' => 'nullable|string',
+            'legal_status' => 'nullable|string',
+            'functions' => 'nullable|string',
+            'mandates' => 'nullable|string',
+            'internal_structures' => 'nullable|string',
+            'general_context' => 'nullable|string',
+            'rules' => 'nullable|string',
+            'sources' => 'nullable|string',
+            'revision_history' => 'nullable|string',
+            'maintenance_notes' => 'nullable|string',
+            'contacts' => 'nullable|array',
+            'contacts.*.contact_person' => 'nullable|string|max:1024',
+            'contacts.*.email' => 'nullable|email|max:255',
+            'contacts.*.telephone' => 'nullable|string|max:255',
+            'contacts.*.website' => 'nullable|url|max:1024',
+            // Extended contact fields
+            'contacts.*.title' => 'nullable|string|max:100',
+            'contacts.*.role' => 'nullable|string|max:255',
+            'contacts.*.department' => 'nullable|string|max:255',
+            'contacts.*.cell' => 'nullable|string|max:255',
+            'contacts.*.id_number' => 'nullable|string|max:50',
+            'contacts.*.alternative_email' => 'nullable|email|max:255',
+            'contacts.*.alternative_phone' => 'nullable|string|max:255',
+            'contacts.*.preferred_contact_method' => 'nullable|string|max:35',
+            'contacts.*.language_preference' => 'nullable|string|max:16',
+            'contacts.*.extended_notes' => 'nullable|string',
+            'other_names' => 'nullable|array',
+            'other_names.*.name' => 'nullable|string|max:1024',
+            'other_names.*.type_id' => 'nullable|integer',
+        ]);
+        \AhgCustomFields\Services\CustomFieldService::validateRequest($request, 'actor'); // heratio#1548
+
+        $data = $request->only([
+            'authorized_form_of_name', 'entity_type_id', 'dates_of_existence',
+            'description_identifier', 'corporate_body_identifiers', 'parent_id',
+            'source_standard', 'description_status_id', 'description_detail_id',
+            'institution_responsible_identifier', 'history', 'places', 'legal_status',
+            'functions', 'mandates', 'internal_structures', 'general_context',
+            'rules', 'sources', 'revision_history', 'maintenance_notes',
+            'contacts', 'other_names',
+            // ICIP cultural-sensitivity URI (issue #36 Phase 2b) - persisted to actor.icip_sensitivity.
+            'icip_sensitivity',
+        ]);
+
+        $this->service->update($actor->id, $data);
+        \AhgCustomFields\Services\CustomFieldService::saveFromRequest((int) $actor->id, $request, 'actor'); // heratio#1548
+
+        // Publication status (159 draft / 160 published) + embargo date (Part B).
+        $embargo = $request->input('embargo_until');
+        $embargo = ($embargo && strtotime($embargo)) ? date('Y-m-d', strtotime($embargo)) : null;
+        \AhgCore\Services\AclService::setActorPublicationStatus(
+            $actor->id, (int) $request->input('publication_status_id', 160), $embargo
+        );
+
+        // #1433: keep the ES doc's publicationStatusId / embargoUntil current so a
+        // status/embargo change immediately hides (or restores) the actor in
+        // ES-backed search + autocomplete.
+        $this->reindexActorInEs((int) $actor->id);
+
+        // Save external identifiers if provided
+        if ($request->has('external_identifiers')) {
+            $this->service->saveActorIdentifiers($actor->id, $request->input('external_identifiers', []));
+        }
+
+        // Save structured occupations if provided
+        if ($request->has('structured_occupations')) {
+            $this->service->saveActorOccupations($actor->id, $request->input('structured_occupations', []));
+        }
+
+        // ---- Subject access points (taxonomy 35) ----
+        if ($request->has('subjectAccessPointIds')) {
+            $beforeSubjects = DB::table('object_term_relation')
+                ->where('object_id', $actor->id)
+                ->whereIn('term_id', function ($q) {
+                    $q->select('id')->from('term')->where('taxonomy_id', 35);
+                })
+                ->pluck('term_id')->map(fn ($v) => (int) $v)->sort()->values()->toArray();
+            DB::table('object_term_relation')
+                ->where('object_id', $actor->id)
+                ->whereIn('term_id', function ($q) {
+                    $q->select('id')->from('term')->where('taxonomy_id', 35);
+                })
+                ->delete();
+            foreach (array_filter((array) $request->input('subjectAccessPointIds', [])) as $termId) {
+                DB::table('object_term_relation')->insert([
+                    'object_id' => $actor->id,
+                    'term_id' => (int) $termId,
+                ]);
+            }
+            $afterSubjects = array_values(array_map('intval', array_filter((array) $request->input('subjectAccessPointIds', []))));
+            sort($afterSubjects);
+            if ($beforeSubjects !== $afterSubjects) {
+                \AhgCore\Support\AuditLog::captureSecondaryMutation($actor->id, 'actor', 'subject_access_points_change', [
+                    'data' => ['before' => $beforeSubjects, 'after' => $afterSubjects],
+                ]);
+            }
+        }
+
+        // ---- Place access points (taxonomy 42) ----
+        if ($request->has('placeAccessPointIds')) {
+            $beforePlaces = DB::table('object_term_relation')
+                ->where('object_id', $actor->id)
+                ->whereIn('term_id', function ($q) {
+                    $q->select('id')->from('term')->where('taxonomy_id', 42);
+                })
+                ->pluck('term_id')->map(fn ($v) => (int) $v)->sort()->values()->toArray();
+            DB::table('object_term_relation')
+                ->where('object_id', $actor->id)
+                ->whereIn('term_id', function ($q) {
+                    $q->select('id')->from('term')->where('taxonomy_id', 42);
+                })
+                ->delete();
+            foreach (array_filter((array) $request->input('placeAccessPointIds', [])) as $termId) {
+                DB::table('object_term_relation')->insert([
+                    'object_id' => $actor->id,
+                    'term_id' => (int) $termId,
+                ]);
+            }
+            $afterPlaces = array_values(array_map('intval', array_filter((array) $request->input('placeAccessPointIds', []))));
+            sort($afterPlaces);
+            if ($beforePlaces !== $afterPlaces) {
+                \AhgCore\Support\AuditLog::captureSecondaryMutation($actor->id, 'actor', 'place_access_points_change', [
+                    'data' => ['before' => $beforePlaces, 'after' => $afterPlaces],
+                ]);
+            }
+        }
+
+        // ---- Maintaining repository ----
+        if ($request->has('maintaining_repository_id')) {
+            $beforeRepoId = (int) DB::table('relation')
+                ->where('subject_id', $actor->id)
+                ->whereIn('object_id', function ($q) {
+                    $q->select('id')->from('repository');
+                })
+                ->value('object_id');
+            // Remove existing maintaining repository relation
+            DB::table('relation')
+                ->where('subject_id', $actor->id)
+                ->whereIn('object_id', function ($q) {
+                    $q->select('id')->from('repository');
+                })
+                ->delete();
+            $repoId = (int) $request->input('maintaining_repository_id');
+            if ($repoId > 0) {
+                $relObjectId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitRelation',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                $culture = app()->getLocale();
+                DB::table('relation')->insert([
+                    'id' => $relObjectId,
+                    'subject_id' => $actor->id,
+                    'object_id' => $repoId,
+                    'type_id' => TermId::RELATION_MAINTAINING_REPOSITORY,
+                    'source_culture' => $culture,
+                ]);
+            }
+            if ($beforeRepoId !== $repoId) {
+                \AhgCore\Support\AuditLog::captureSecondaryMutation($actor->id, 'actor', 'maintaining_repository_change', [
+                    'data' => ['before' => $beforeRepoId ?: null, 'after' => $repoId ?: null],
+                ]);
+            }
+        }
+
+        // Recalculate completeness score
+        $this->service->saveActorCompleteness($actor->id);
+
+        return redirect()
+            ->route('actor.show', $slug)
+            ->with('success', 'Authority record updated successfully.');
+    }
+
+    public function rename(string $slug)
+    {
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        // Get the first digital object linked to this actor (if any)
+        $digitalObject = DB::table('digital_object')
+            ->where('object_id', $actor->id)
+            ->first();
+
+        return view('ahg-actor-manage::rename', [
+            'actor' => $actor,
+            'digitalObject' => $digitalObject,
+        ]);
+    }
+
+    public function processRename(Request $request, string $slug)
+    {
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        // #51 ACL enforcement: object-aware write gate (mirrors show() read gate).
+        // Falls back to the global update grant when no object rule exists.
+        if (! \AhgCore\Services\AclService::hasPermission(\Illuminate\Support\Facades\Auth::id(), 'update', (int) $actor->id)) {
+            abort(403, 'You do not have permission to rename this record.');
+        }
+
+        $request->validate([
+            'authorized_form_of_name' => 'nullable|string|max:1024',
+            'slug' => 'nullable|string|max:255',
+            'filename' => 'nullable|string|max:1024',
+        ]);
+
+        $newSlug = $slug;
+
+        DB::transaction(function () use ($request, $actor, &$newSlug) {
+            $culture = app()->getLocale();
+
+            // Update authorized form of name
+            if ($request->has('update_name') && $request->filled('authorized_form_of_name')) {
+                DB::table('actor_i18n')
+                    ->where('id', $actor->id)
+                    ->where('culture', $culture)
+                    ->update(['authorized_form_of_name' => $request->input('authorized_form_of_name')]);
+            }
+
+            // Update slug
+            if ($request->has('update_slug') && $request->filled('slug')) {
+                $desiredSlug = \Illuminate\Support\Str::slug($request->input('slug'));
+                if (empty($desiredSlug)) {
+                    $desiredSlug = 'untitled';
+                }
+
+                // Check for duplicate slugs (excluding the current actor)
+                $existingSlug = DB::table('slug')
+                    ->where('slug', $desiredSlug)
+                    ->where('object_id', '!=', $actor->id)
+                    ->exists();
+
+                if ($existingSlug) {
+                    // Pad with a number to make unique
+                    $counter = 2;
+                    while (DB::table('slug')->where('slug', $desiredSlug.'-'.$counter)->exists()) {
+                        $counter++;
+                    }
+                    $desiredSlug = $desiredSlug.'-'.$counter;
+                }
+
+                DB::table('slug')
+                    ->where('object_id', $actor->id)
+                    ->update(['slug' => $desiredSlug]);
+
+                $newSlug = $desiredSlug;
+            }
+
+            // Update filename
+            if ($request->has('update_filename') && $request->filled('filename')) {
+                $filename = $request->input('filename');
+                // Sanitize filename: keep only lowercase alphanumeric, dashes
+                $filename = preg_replace('/[^a-z0-9\-]/', '', strtolower($filename));
+                if (empty($filename)) {
+                    $filename = 'untitled';
+                }
+
+                DB::table('digital_object')
+                    ->where('object_id', $actor->id)
+                    ->update(['name' => $filename]);
+            }
+        });
+
+        return redirect()
+            ->route('actor.show', $newSlug)
+            ->with('success', 'Authority record renamed successfully.');
+    }
+
+    public function confirmDelete(string $slug)
+    {
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        return view('ahg-actor-manage::delete', [
+            'actor' => $actor,
+        ]);
+    }
+
+    public function destroy(Request $request, string $slug)
+    {
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        // #51 ACL enforcement: object-aware delete gate (mirrors show() read gate).
+        // Falls back to the global delete grant when no object rule exists.
+        if (! \AhgCore\Services\AclService::hasPermission(\Illuminate\Support\Facades\Auth::id(), 'delete', (int) $actor->id)) {
+            abort(403, 'You do not have permission to delete this record.');
+        }
+
+        $this->service->delete($actor->id);
+
+        return redirect()
+            ->route('actor.browse')
+            ->with('success', 'Authority record deleted successfully.');
+    }
+
+    // ── External Authority Reconciliation ────────────────────────────
+
+    /**
+     * GET /actor/{slug}/reconcile - show reconciliation results for an actor.
+     */
+    public function reconcile(string $slug)
+    {
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        $reconciler = new \AhgActorManage\Services\AuthorityReconciliationService;
+        $enabledSources = $reconciler->getEnabledSources();
+        $results = [];
+        $existingIds = (new \AhgActorManage\Services\AuthorityIdentifierService)->getIdentifiers($actor->id);
+
+        if (! empty($enabledSources) && ! empty($actor->authorized_form_of_name)) {
+            $results = $reconciler->searchAll($actor->authorized_form_of_name);
+        }
+
+        return response()->json([
+            'actor_id' => $actor->id,
+            'name' => $actor->authorized_form_of_name,
+            'sources' => array_keys($enabledSources),
+            'results' => $results,
+            'existing' => $existingIds,
+        ]);
+    }
+
+    /**
+     * POST /actor/{slug}/reconcile/link - link an actor to an external ID.
+     */
+    public function reconcileLink(Request $request, string $slug)
+    {
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        $request->validate([
+            'source' => 'required|string|in:wikidata,viaf,ulan,lcnaf,isni',
+            'identifier_value' => 'required|string|max:500',
+            'label' => 'nullable|string|max:500',
+        ]);
+
+        $reconciler = new \AhgActorManage\Services\AuthorityReconciliationService;
+        $id = $reconciler->linkActor(
+            $actor->id,
+            $request->input('source'),
+            $request->input('identifier_value'),
+            $request->input('label', '')
+        );
+
+        return response()->json(['success' => true, 'identifier_id' => $id]);
+    }
+
+    public function autocomplete(Request $request)
+    {
+        $query = $request->get('query', '');
+        $culture = app()->getLocale();
+        $limit = (int) $request->get('limit', 10);
+
+        $builder = DB::table('actor')
+            ->join('actor_i18n', function ($j) use ($culture) {
+                $j->on('actor.id', '=', 'actor_i18n.id')
+                    ->where('actor_i18n.culture', '=', $culture);
+            })
+            ->join('slug', 'slug.object_id', '=', 'actor.id')
+            ->where('actor_i18n.authorized_form_of_name', 'LIKE', '%'.$query.'%');
+
+        // Guests must not see draft or embargoed authority records.
+        \AhgCore\Services\AclService::addActorVisibilityCriteria($builder, 'actor.id');
+
+        $results = $builder
+            ->select(
+                'actor.id',
+                'actor_i18n.authorized_form_of_name as name',
+                'slug.slug'
+            )
+            ->limit($limit)
+            ->get();
+
+        return response()->json($results);
+    }
+
+    // =========================================================================
+    // DASHBOARD & WORKQUEUE
+    // =========================================================================
+
+    public function dashboard()
+    {
+        $completenessService = new AuthorityCompletenessService;
+        $identifierService = new AuthorityIdentifierService;
+
+        $stats = $completenessService->getDashboardStats();
+        $identifierStats = $identifierService->getStats();
+
+        return view('ahg-actor-manage::authority.dashboard', [
+            'stats' => $stats,
+            'identifierStats' => $identifierStats,
+        ]);
+    }
+
+    public function workqueue(Request $request)
+    {
+        $completenessService = new AuthorityCompletenessService;
+
+        $filters = [
+            'level' => $request->get('level', ''),
+            'assigned_to' => $request->get('assigned_to', ''),
+            'unassigned' => $request->get('unassigned', ''),
+            'min_score' => $request->get('min_score', ''),
+            'max_score' => $request->get('max_score', ''),
+            'sort' => $request->get('sort', 'completeness_score'),
+            'sortDir' => $request->get('sortDir', 'asc'),
+            'page' => $request->get('page', 1),
+            'limit' => $request->get('limit', 50),
+        ];
+
+        $workqueue = $completenessService->getWorkqueue($filters);
+        $levels = array_keys(AuthorityCompletenessService::LEVELS);
+
+        $users = DB::table('user')
+            ->join('actor_i18n', function ($j) {
+                $j->on('user.id', '=', 'actor_i18n.id')
+                    ->where('actor_i18n.culture', '=', 'en');
+            })
+            ->select('user.id', 'actor_i18n.authorized_form_of_name as name')
+            ->orderBy('actor_i18n.authorized_form_of_name')
+            ->get()
+            ->all();
+
+        return view('ahg-actor-manage::authority.workqueue', [
+            'workqueue' => $workqueue,
+            'filters' => $filters,
+            'levels' => $levels,
+            'users' => $users,
+        ]);
+    }
+
+    // =========================================================================
+    // EXTERNAL IDENTIFIERS
+    // =========================================================================
+
+    public function identifiers(int $actorId)
+    {
+        $identifierService = new AuthorityIdentifierService;
+
+        $actor = $this->getActorById($actorId);
+        if (! $actor) {
+            abort(404);
+        }
+
+        $identifiers = $identifierService->getIdentifiers($actorId);
+        $uriPatterns = AuthorityIdentifierService::URI_PATTERNS;
+
+        return view('ahg-actor-manage::authority.identifiers', [
+            'actor' => $actor,
+            'identifiers' => $identifiers,
+            'uriPatterns' => $uriPatterns,
+        ]);
+    }
+
+    public function apiIdentifierSave(Request $request)
+    {
+        $identifierService = new AuthorityIdentifierService;
+
+        $actorId = (int) $request->input('actor_id');
+        $data = [
+            'identifier_type' => $request->input('identifier_type', ''),
+            'identifier_value' => $request->input('identifier_value', ''),
+            'uri' => $request->input('uri') ?: null,
+            'label' => $request->input('label') ?: null,
+            'source' => $request->input('source', 'manual'),
+        ];
+
+        $id = $identifierService->save($actorId, $data);
+
+        return response()->json(['success' => true, 'id' => $id]);
+    }
+
+    public function apiIdentifierDelete(int $id)
+    {
+        $identifierService = new AuthorityIdentifierService;
+        $result = $identifierService->delete($id);
+
+        return response()->json(['success' => $result]);
+    }
+
+    public function apiIdentifierVerify(int $id)
+    {
+        $identifierService = new AuthorityIdentifierService;
+        $userId = (int) auth()->id();
+        $result = $identifierService->verify($id, $userId);
+
+        return response()->json(['success' => $result]);
+    }
+
+    // =========================================================================
+    // EXTERNAL AUTHORITY LOOKUP
+    // =========================================================================
+
+    public function apiWikidataSearch(Request $request)
+    {
+        $lookupService = new AuthorityLookupService;
+        $result = $lookupService->searchWikidata($request->get('q', ''));
+
+        return response()->json($result);
+    }
+
+    public function apiViafSearch(Request $request)
+    {
+        $lookupService = new AuthorityLookupService;
+        $result = $lookupService->searchViaf($request->get('q', ''));
+
+        return response()->json($result);
+    }
+
+    public function apiUlanSearch(Request $request)
+    {
+        $lookupService = new AuthorityLookupService;
+        $result = $lookupService->searchUlan($request->get('q', ''));
+
+        return response()->json($result);
+    }
+
+    public function apiLcnafSearch(Request $request)
+    {
+        $lookupService = new AuthorityLookupService;
+        $result = $lookupService->searchLcnaf($request->get('q', ''));
+
+        return response()->json($result);
+    }
+
+    // =========================================================================
+    // COMPLETENESS
+    // =========================================================================
+
+    public function apiCompletenessRecalc(int $actorId)
+    {
+        $completenessService = new AuthorityCompletenessService;
+        $result = $completenessService->calculateScore($actorId);
+
+        return response()->json(['success' => true, 'result' => $result]);
+    }
+
+    public function apiCompletenessBatchAssign(Request $request)
+    {
+        $completenessService = new AuthorityCompletenessService;
+
+        $actorIds = $request->input('actor_ids', []);
+        $assigneeId = (int) $request->input('assignee_id');
+
+        if (! is_array($actorIds)) {
+            $actorIds = explode(',', $actorIds);
+        }
+        $actorIds = array_map('intval', $actorIds);
+
+        $count = $completenessService->batchAssign($actorIds, $assigneeId);
+
+        return response()->json(['success' => true, 'count' => $count]);
+    }
+
+    // =========================================================================
+    // RELATIONSHIP GRAPH
+    // =========================================================================
+
+    public function apiGraphData(Request $request, int $actorId)
+    {
+        // Draft / embargoed authority records must not leak to guests.
+        if (! \AhgCore\Services\AclService::isActorVisible($actorId)) {
+            abort(404);
+        }
+
+        $graphService = new AuthorityGraphService;
+
+        $depth = (int) $request->get('depth', 1);
+        $depth = min($depth, 3);
+
+        $data = $graphService->getGraphData($actorId, $depth);
+
+        return response()->json($data);
+    }
+
+    // =========================================================================
+    // MERGE / SPLIT
+    // =========================================================================
+
+    public function merge(int $id)
+    {
+        $mergeService = new AuthorityMergeService;
+
+        $actor = $this->getActorById($id);
+        if (! $actor) {
+            abort(404);
+        }
+
+        $mergeHistory = $mergeService->getMergeHistory($id);
+
+        return view('ahg-actor-manage::authority.merge', [
+            'actor' => $actor,
+            'mergeHistory' => $mergeHistory,
+        ]);
+    }
+
+    public function split(int $id)
+    {
+        $actor = $this->getActorById($id);
+        if (! $actor) {
+            abort(404);
+        }
+
+        return view('ahg-actor-manage::authority.split', [
+            'actor' => $actor,
+        ]);
+    }
+
+    public function apiMergePreview(Request $request)
+    {
+        $mergeService = new AuthorityMergeService;
+
+        $primaryId = (int) $request->input('primary_id');
+        $secondaryId = (int) $request->input('secondary_id');
+
+        $comparison = $mergeService->compareActors($primaryId, $secondaryId);
+
+        return response()->json(['success' => true, 'comparison' => $comparison]);
+    }
+
+    public function apiMergeExecute(Request $request)
+    {
+        $mergeService = new AuthorityMergeService;
+
+        $primaryId = (int) $request->input('primary_id');
+        $secondaryIds = $request->input('secondary_ids', []);
+        $fieldChoices = $request->input('field_choices', []);
+        $notes = $request->input('notes', '');
+        $userId = (int) auth()->id();
+
+        if (! is_array($secondaryIds)) {
+            $secondaryIds = explode(',', $secondaryIds);
+        }
+        $secondaryIds = array_map('intval', $secondaryIds);
+
+        $mergeId = $mergeService->createMergeRequest(
+            $primaryId,
+            $secondaryIds,
+            is_array($fieldChoices) ? $fieldChoices : [],
+            $userId,
+            $notes
+        );
+
+        return response()->json(['success' => true, 'merge_id' => $mergeId]);
+    }
+
+    public function apiSplitExecute(Request $request)
+    {
+        $mergeService = new AuthorityMergeService;
+
+        $sourceId = (int) $request->input('source_id');
+        $fieldsToMove = $request->input('fields_to_move', []);
+        $relationsToMove = $request->input('relations_to_move', []);
+        $notes = $request->input('notes', '');
+        $userId = (int) auth()->id();
+
+        $splitId = $mergeService->createSplitRequest(
+            $sourceId,
+            is_array($fieldsToMove) ? $fieldsToMove : [],
+            is_array($relationsToMove) ? $relationsToMove : [],
+            $userId,
+            $notes
+        );
+
+        return response()->json(['success' => true, 'split_id' => $splitId]);
+    }
+
+    // =========================================================================
+    // OCCUPATIONS
+    // =========================================================================
+
+    public function occupations(int $actorId)
+    {
+        $occupationService = new AuthorityOccupationService;
+
+        $actor = $this->getActorById($actorId);
+        if (! $actor) {
+            abort(404);
+        }
+
+        $occupations = $occupationService->getOccupations($actorId);
+
+        return view('ahg-actor-manage::authority.occupations', [
+            'actor' => $actor,
+            'occupations' => $occupations,
+        ]);
+    }
+
+    public function apiOccupationSave(Request $request)
+    {
+        $occupationService = new AuthorityOccupationService;
+
+        $actorId = (int) $request->input('actor_id');
+        $occupationId = (int) $request->input('occupation_id', 0);
+
+        $data = [
+            'term_id' => $request->input('term_id') ?: null,
+            'occupation_text' => $request->input('occupation_text', ''),
+            'date_from' => $request->input('date_from') ?: null,
+            'date_to' => $request->input('date_to') ?: null,
+            'notes' => $request->input('notes', ''),
+            'sort_order' => (int) $request->input('sort_order', 0),
+        ];
+
+        $id = $occupationService->save($actorId, $data, $occupationId);
+
+        return response()->json(['success' => true, 'id' => $id]);
+    }
+
+    public function apiOccupationDelete(int $id)
+    {
+        $occupationService = new AuthorityOccupationService;
+        $result = $occupationService->delete($id);
+
+        return response()->json(['success' => $result]);
+    }
+
+    // =========================================================================
+    // FUNCTIONS
+    // =========================================================================
+
+    public function functions(int $actorId)
+    {
+        $functionService = new AuthorityFunctionService;
+
+        $actor = $this->getActorById($actorId);
+        if (! $actor) {
+            abort(404);
+        }
+
+        $functionLinks = $functionService->getFunctionLinks($actorId);
+        $relationTypes = AuthorityFunctionService::RELATION_TYPES;
+
+        return view('ahg-actor-manage::authority.functions', [
+            'actor' => $actor,
+            'functionLinks' => $functionLinks,
+            'relationTypes' => $relationTypes,
+        ]);
+    }
+
+    public function functionBrowse()
+    {
+        $functionService = new AuthorityFunctionService;
+        $functions = $functionService->browseFunctions();
+
+        return view('ahg-actor-manage::authority.function-browse', [
+            'functions' => $functions,
+        ]);
+    }
+
+    public function apiFunctionSave(Request $request)
+    {
+        $functionService = new AuthorityFunctionService;
+
+        $actorId = (int) $request->input('actor_id');
+        $linkId = (int) $request->input('link_id', 0);
+
+        $data = [
+            'function_id' => $request->input('function_id'),
+            'relation_type' => $request->input('relation_type', 'responsible'),
+            'date_from' => $request->input('date_from') ?: null,
+            'date_to' => $request->input('date_to') ?: null,
+            'notes' => $request->input('notes', ''),
+            'sort_order' => (int) $request->input('sort_order', 0),
+        ];
+
+        $id = $functionService->save($actorId, $data, $linkId);
+
+        return response()->json(['success' => true, 'id' => $id]);
+    }
+
+    public function apiFunctionDelete(int $id)
+    {
+        $functionService = new AuthorityFunctionService;
+        $result = $functionService->delete($id);
+
+        return response()->json(['success' => $result]);
+    }
+
+    // =========================================================================
+    // DEDUPLICATION
+    // =========================================================================
+
+    public function dedupIndex()
+    {
+        $dedupeService = new AuthorityDedupeService;
+        $stats = $dedupeService->getStats();
+
+        return view('ahg-actor-manage::authority.dedup-index', [
+            'stats' => $stats,
+        ]);
+    }
+
+    public function dedupScan(Request $request)
+    {
+        $dedupeService = new AuthorityDedupeService;
+        $pairs = [];
+
+        if ($request->isMethod('post')) {
+            $limit = (int) $request->input('limit', 500);
+            $pairs = $dedupeService->scan($limit);
+        }
+
+        return view('ahg-actor-manage::authority.dedup-scan', [
+            'pairs' => $pairs,
+        ]);
+    }
+
+    public function dedupCompare(Request $request, int $id)
+    {
+        $mergeService = new AuthorityMergeService;
+
+        $secondaryId = (int) $request->get('secondary_id');
+        if (! $secondaryId) {
+            abort(404);
+        }
+
+        $comparison = $mergeService->compareActors($id, $secondaryId);
+
+        return view('ahg-actor-manage::authority.dedup-compare', [
+            'comparison' => $comparison,
+        ]);
+    }
+
+    public function apiDedupDismiss(int $id)
+    {
+        $mergeService = new AuthorityMergeService;
+        $merge = $mergeService->getMerge($id);
+
+        if ($merge) {
+            DB::table('ahg_actor_merge')
+                ->where('id', $id)
+                ->update(['status' => 'rejected']);
+        }
+
+        return response()->json(['success' => true]);
+    }
+
+    public function apiDedupMerge(int $id)
+    {
+        $mergeService = new AuthorityMergeService;
+        $userId = (int) auth()->id();
+        $result = $mergeService->executeMerge($id, $userId);
+
+        return response()->json(['success' => $result]);
+    }
+
+    // =========================================================================
+    // NER PIPELINE
+    // =========================================================================
+
+    public function nerIndex(Request $request)
+    {
+        $nerService = new AuthorityNerPipelineService;
+        $stats = $nerService->getStats();
+
+        $filters = [
+            'status' => $request->get('status', 'stub'),
+            'entity_type' => $request->get('entity_type', ''),
+            'search' => $request->get('search', ''),
+            'sort' => $request->get('sort', 's.created_at'),
+            'sortDir' => $request->get('sortDir', 'desc'),
+            'page' => $request->get('page', 1),
+            'limit' => $request->get('limit', 50),
+        ];
+
+        $stubs = [];
+        try {
+            $stubs = $nerService->getStubs($filters);
+        } catch (\Exception $e) {
+            // ahg_ner_authority_stub table may not exist yet
+        }
+
+        $pendingFilters = [
+            'entity_type' => $request->get('entity_type', ''),
+            'min_confidence' => $request->get('min_confidence', ''),
+            'search' => $request->get('search', ''),
+            'sort' => 'ne.confidence',
+            'sortDir' => 'desc',
+            'page' => 1,
+            'limit' => 20,
+        ];
+
+        $pendingEntities = [];
+        try {
+            $pendingEntities = $nerService->getPendingEntities($pendingFilters);
+        } catch (\Exception $e) {
+            // ner_entity table may not exist yet
+        }
+
+        return view('ahg-actor-manage::authority.ner-index', [
+            'stats' => $stats,
+            'stubs' => $stubs,
+            'pendingEntities' => $pendingEntities,
+            'filters' => $filters,
+        ]);
+    }
+
+    public function apiNerCreateStub(Request $request)
+    {
+        $nerService = new AuthorityNerPipelineService;
+        $userId = (int) auth()->id();
+        $nerEntityId = (int) $request->input('ner_entity_id');
+
+        $actorId = $nerService->createStub($nerEntityId, $userId);
+
+        if ($actorId) {
+            return response()->json(['success' => true, 'actor_id' => $actorId]);
+        }
+
+        return response()->json(['success' => false, 'error' => 'Failed to create stub']);
+    }
+
+    public function apiNerPromote(int $id)
+    {
+        $nerService = new AuthorityNerPipelineService;
+        $userId = (int) auth()->id();
+        $result = $nerService->promoteStub($id, $userId);
+
+        return response()->json(['success' => $result]);
+    }
+
+    public function apiNerReject(int $id)
+    {
+        $nerService = new AuthorityNerPipelineService;
+        $userId = (int) auth()->id();
+        $result = $nerService->rejectStub($id, $userId);
+
+        return response()->json(['success' => $result]);
+    }
+
+    // =========================================================================
+    // CONFIGURATION
+    // =========================================================================
+
+    public function config(Request $request)
+    {
+        if ($request->isMethod('post')) {
+            $settings = $request->input('config', []);
+            foreach ($settings as $key => $value) {
+                DB::table('ahg_authority_config')
+                    ->updateOrInsert(
+                        ['config_key' => $key],
+                        ['config_value' => $value, 'updated_at' => date('Y-m-d H:i:s')]
+                    );
+            }
+
+            return redirect()->route('actor.config')->with('success', 'Configuration saved.');
+        }
+
+        $config = DB::table('ahg_authority_config')
+            ->get()
+            ->keyBy('config_key')
+            ->all();
+
+        return view('ahg-actor-manage::authority.config', [
+            'config' => $config,
+        ]);
+    }
+
+    // =========================================================================
+    // CONTACT INFORMATION
+    // =========================================================================
+
+    public function contact(int $actorId)
+    {
+        $actor = $this->getActorById($actorId);
+        if (! $actor) {
+            abort(404);
+        }
+
+        $contacts = $this->service->getContacts($actorId);
+
+        return view('ahg-actor-manage::authority.contact', [
+            'actor' => $actor,
+            'contacts' => $contacts,
+        ]);
+    }
+
+    // =========================================================================
+    // EAC-CPF EXPORT
+    // =========================================================================
+
+    public function apiEacExport(Request $request, int $actorId)
+    {
+        $actor = $this->getActorById($actorId);
+        if (! $actor) {
+            return response()->json(['success' => false, 'error' => 'Actor not found'], 404);
+        }
+
+        // Draft / embargoed authority records must not leak to guests.
+        if (! \AhgCore\Services\AclService::isActorVisible($actorId)) {
+            return response()->json(['success' => false, 'error' => 'Actor not found'], 404);
+        }
+
+        // Retrieve external identifiers for EAC-CPF enrichment
+        $identifiers = DB::table('ahg_actor_identifier')
+            ->where('actor_id', $actorId)
+            ->get();
+
+        $otherRecordIds = [];
+        $sources = [];
+
+        $sourceLabels = [
+            'wikidata' => 'Wikidata',
+            'viaf' => 'Virtual International Authority File (VIAF)',
+            'ulan' => 'Getty Union List of Artist Names (ULAN)',
+            'lcnaf' => 'Library of Congress Name Authority File (LCNAF)',
+            'isni' => 'International Standard Name Identifier (ISNI)',
+            'orcid' => 'ORCID',
+            'gnd' => 'Gemeinsame Normdatei (GND)',
+        ];
+
+        foreach ($identifiers as $ident) {
+            $otherRecordIds[] = [
+                'localType' => $ident->identifier_type,
+                'value' => $ident->identifier_value,
+                'uri' => $ident->uri ?? '',
+                'isVerified' => (bool) ($ident->is_verified ?? false),
+            ];
+
+            if (! empty($ident->uri)) {
+                $sources[] = [
+                    'href' => $ident->uri,
+                    'label' => $ident->label ?? ($sourceLabels[$ident->identifier_type] ?? ucfirst($ident->identifier_type)),
+                ];
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'eac_data' => [
+                'otherRecordIds' => $otherRecordIds,
+                'sources' => $sources,
+            ],
+        ]);
+    }
+
+    // =========================================================================
+    // HELPER
+    // =========================================================================
+
+    protected function getActorById(int $actorId): ?object
+    {
+        return DB::table('actor as a')
+            ->leftJoin('actor_i18n as ai', function ($j) {
+                $j->on('a.id', '=', 'ai.id')
+                    ->where('ai.culture', '=', 'en');
+            })
+            ->leftJoin('slug', 'a.id', '=', 'slug.object_id')
+            ->where('a.id', $actorId)
+            ->select('a.id', 'a.entity_type_id', 'ai.authorized_form_of_name as name', 'slug.slug')
+            ->first();
+    }
+
+    // =========================================================================
+    // #743 actorEvents - chronological event listing
+    // =========================================================================
+
+    /**
+     * Lazy-load endpoint for the per-actor event chronology.
+     *
+     * Returns either HTML (default - used by the related-resources panel on
+     * actor/{slug}/edit) or JSON when ?format=json. Sorted oldest first by
+     * start_date, falling back to event id when no date is available.
+     *
+     * Migrated from PSIS ahgActorManagePlugin actorEventsAction (#743).
+     */
+    public function events(Request $request, string $slug)
+    {
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        if (! \AhgCore\Services\AclService::hasPermission(\Illuminate\Support\Facades\Auth::id(), 'read', (int) $actor->id)) {
+            abort(403, 'You do not have permission to view this record.');
+        }
+
+        $culture = app()->getLocale();
+        $limit = max(1, (int) $request->get('limit', 10));
+        $page = max(1, (int) $request->get('page', 1));
+
+        $base = DB::table('event')
+            ->leftJoin('event_i18n', function ($j) use ($culture) {
+                $j->on('event.id', '=', 'event_i18n.id')
+                    ->where('event_i18n.culture', '=', $culture);
+            })
+            ->leftJoin('term_i18n as type_i18n', function ($j) use ($culture) {
+                $j->on('event.type_id', '=', 'type_i18n.id')
+                    ->where('type_i18n.culture', '=', $culture);
+            })
+            ->leftJoin('information_object', 'event.object_id', '=', 'information_object.id')
+            ->leftJoin('information_object_i18n as io_i18n', function ($j) use ($culture) {
+                $j->on('information_object.id', '=', 'io_i18n.id')
+                    ->where('io_i18n.culture', '=', $culture);
+            })
+            ->leftJoin('slug as io_slug', 'information_object.id', '=', 'io_slug.object_id')
+            ->where('event.actor_id', $actor->id);
+
+        $total = (clone $base)->count();
+
+        $rows = $base
+            ->select(
+                'event.id',
+                'event.type_id',
+                'event.start_date',
+                'event.end_date',
+                'event_i18n.date as date_display',
+                'event_i18n.name as event_name',
+                'event_i18n.description as event_description',
+                'type_i18n.name as type_name',
+                'information_object.id as io_id',
+                'io_i18n.title as io_title',
+                'io_slug.slug as io_slug',
+            )
+            ->orderByRaw('COALESCE(event.start_date, "9999-12-31") asc')
+            ->orderBy('event.id', 'asc')
+            ->offset(($page - 1) * $limit)
+            ->limit($limit)
+            ->get();
+
+        $events = $rows->map(fn ($e) => [
+            'id' => (int) $e->id,
+            'type_id' => (int) $e->type_id,
+            'type_name' => (string) ($e->type_name ?? ''),
+            'date_display' => (string) ($e->date_display ?? ''),
+            'start_date' => (string) ($e->start_date ?? ''),
+            'end_date' => (string) ($e->end_date ?? ''),
+            'event_name' => (string) ($e->event_name ?? ''),
+            'event_description' => (string) ($e->event_description ?? ''),
+            'related_io' => $e->io_id ? [
+                'id' => (int) $e->io_id,
+                'title' => (string) ($e->io_title ?? ''),
+                'slug' => (string) ($e->io_slug ?? ''),
+            ] : null,
+        ])->values();
+
+        if ($request->wantsJson() || $request->get('format') === 'json') {
+            return response()->json([
+                'actor_id' => $actor->id,
+                'total' => $total,
+                'page' => $page,
+                'limit' => $limit,
+                'events' => $events,
+            ]);
+        }
+
+        return view('ahg-actor-manage::events', [
+            'actor' => $actor,
+            'events' => $events,
+            'total' => $total,
+            'page' => $page,
+            'limit' => $limit,
+            'lastPage' => max(1, (int) ceil($total / $limit)),
+        ]);
+    }
+
+    // =========================================================================
+    // #743 slugPreview - AJAX slug preview while typing authorized form of name
+    // =========================================================================
+
+    /**
+     * Slug preview AJAX endpoint.
+     *
+     * Returns `{ "slug": "...", "padded": bool }` for the supplied ?name=
+     * (or ?text= for AtoM-compat) string. If the slugified text collides
+     * with an existing slug owned by a different object, a numeric suffix
+     * is appended ("-2", "-3", ...) and `padded` is set to true so the
+     * client can show a "modified" indicator.
+     *
+     * Migrated from PSIS ActorSlugPreviewAction (#743).
+     */
+    public function slugPreview(Request $request)
+    {
+        // The PSIS action returned 401 for anon users. Mirror that here so
+        // unauthenticated POSTs/GETs can't be used to fingerprint slug
+        // collisions without an account.
+        if (! \Illuminate\Support\Facades\Auth::check()) {
+            return response()->json(['error' => 'unauthorized'], 401);
+        }
+
+        $text = (string) $request->get('name', $request->get('text', ''));
+        $excludeId = $request->filled('actor_id') ? (int) $request->get('actor_id') : null;
+
+        $text = trim($text);
+        if ($text === '') {
+            return response()->json(['slug' => '', 'padded' => false]);
+        }
+
+        $base = \Illuminate\Support\Str::slug($text);
+        $candidate = $base;
+        $counter = 1;
+
+        while (true) {
+            $row = DB::table('slug')->where('slug', $candidate)->first();
+            if ($row === null) {
+                break;
+            }
+            if ($excludeId !== null && (int) $row->object_id === $excludeId) {
+                break;
+            }
+            $counter++;
+            $candidate = $base.'-'.$counter;
+        }
+
+        return response()->json([
+            'slug' => $candidate,
+            'padded' => $candidate !== $base,
+        ]);
+    }
+
+    // =========================================================================
+    // Digital object
+    //
+    // Authority records could already *display* a linked digital object
+    // (ActorService::getDigitalObjects) and *rename* one, but there was no way
+    // to attach it: no route, no form, no upload handler. The show view linked
+    // to AtoM's /{slug}/linkDigitalObject, which has never existed in Heratio
+    // and 404'd for every actor. DigitalObjectService::upload() takes any
+    // object id, and an actor id *is* an object id, so this is the missing
+    // third of a feature rather than a new one.
+    // =========================================================================
+
+    /**
+     * Render the "Link digital object" form for an authority record.
+     */
+    public function addDigitalObject(string $slug)
+    {
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        if ($this->actorMaster((int) $actor->id)) {
+            return redirect()->route('actor.show', $slug)
+                ->with('info', __('A digital object is already linked. Delete it before attaching another.'));
+        }
+
+        return view('ahg-actor-manage::add-digital-object', ['actor' => $actor]);
+    }
+
+    /**
+     * Attach an uploaded file to an authority record as its master digital object.
+     */
+    public function storeDigitalObject(Request $request, string $slug)
+    {
+        $request->validate([
+            'digital_object' => 'required|file|max:'.$this->phpUploadMaxKb(),
+        ]);
+
+        $actor = $this->service->getBySlug($slug);
+        if (! $actor) {
+            abort(404);
+        }
+
+        // Re-check after validation: one master per object, same rule the IO uploader enforces.
+        if ($this->actorMaster((int) $actor->id)) {
+            return redirect()->route('actor.show', $slug)
+                ->with('error', __('A digital object already exists. Delete the current one before uploading a new file.'));
+        }
+
+        try {
+            \AhgCore\Services\DigitalObjectService::upload((int) $actor->id, $request->file('digital_object'));
+        } catch (\Throwable $e) {
+            \Log::error('actor digital object upload failed', ['actor' => $actor->id, 'error' => $e->getMessage()]);
+
+            return redirect()->route('actor.show', $slug)
+                ->with('error', __('Upload failed: ').$e->getMessage());
+        }
+
+        return redirect()->route('actor.show', $slug)
+            ->with('success', __('Digital object linked successfully.'));
+    }
+
+    /**
+     * The actor's master digital object row, if any.
+     */
+    private function actorMaster(int $actorId): ?object
+    {
+        return DB::table('digital_object')
+            ->where('object_id', $actorId)
+            ->where('usage_id', \AhgCore\Services\DigitalObjectService::USAGE_MASTER)
+            ->first();
+    }
+
+    /**
+     * Upload ceiling (KB) taken from PHP's own upload_max_filesize, so the
+     * controller never rejects a file PHP would have accepted.
+     * Mirrors DigitalObjectController::phpUploadMaxKb().
+     */
+    private function phpUploadMaxKb(): int
+    {
+        $raw = (string) ini_get('upload_max_filesize');
+        $raw = $raw !== '' ? $raw : '256M';
+        $num = (int) $raw;
+        $bytes = match (strtolower(substr($raw, -1))) {
+            'g' => $num * 1024 ** 3,
+            'm' => $num * 1024 ** 2,
+            'k' => $num * 1024,
+            default => $num,
+        };
+
+        return max(1, (int) ($bytes / 1024));
+    }
+
+    /**
+     * #1433: best-effort single-actor Elasticsearch reindex after a save.
+     * Guarded by class_exists so ahg-actor-manage does not hard-depend on
+     * ahg-search (a minimal install without ES simply no-ops); the ES service
+     * itself never throws into the caller, so a save is never blocked by ES.
+     */
+    private function reindexActorInEs(int $actorId): void
+    {
+        if (! class_exists(\AhgSearch\Services\ElasticsearchService::class)) {
+            return;
+        }
+        try {
+            app(\AhgSearch\Services\ElasticsearchService::class)->indexActor($actorId);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('[#1433] actor ES reindex hook failed: '.$e->getMessage(), ['actor' => $actorId]);
+        }
+    }
+}

@@ -1,0 +1,158 @@
+{{--
+  ahgRecordsManagePlugin - Dashboard
+
+  Single landing surface for the Records Management module. Every RM tool is
+  reachable from here. The cards count live data so officers see drift at a glance.
+
+  @copyright  Johan Pieterse / Plain Sailing Information Systems
+  @license    AGPL-3.0-or-later
+--}}
+@extends('theme::layouts.1col')
+@section('title', 'Records Management')
+@section('body-class', 'admin records dashboard')
+
+@section('content')
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="mb-0"><i class="fas fa-archive me-2"></i> {{ __('Records Management') }}</h1>
+  <span class="text-muted small">
+    {{ __('ISO 15489 / ISO 16175 / MoReq2010 / DoD 5015.2') }}
+  </span>
+</div>
+
+<p class="text-muted">
+  {{ __('Records lifecycle: retention schedules → file plan classification → review triggers → disposal workflow → certificate of destruction or transfer to archives. See') }} <a href="{{ url('/help') }}">{{ __('Help') }}</a> for the full workflow.
+</p>
+
+<div class="row g-3">
+  {{-- Retention Schedules --}}
+  <div class="col-md-4">
+    <a href="{{ route('records.schedules.index') }}" class="text-decoration-none">
+      <div class="card h-100 border-primary">
+        <div class="card-body">
+          <h5 class="card-title text-primary"><i class="fas fa-clock me-1"></i> {{ __('Retention Schedules') }}</h5>
+          <p class="card-text text-muted small">{{ __('Authority + period + jurisdiction. Versioned, approval-gated, citable.') }}</p>
+          <div class="mt-2"><span class="badge bg-primary">{{ $stats['retention_schedules'] }}</span> schedule(s)</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  {{-- Disposal Classes --}}
+  <div class="col-md-4">
+    <a href="{{ route('records.schedules.index') }}" class="text-decoration-none">
+      <div class="card h-100 border-info">
+        <div class="card-body">
+          <h5 class="card-title text-info"><i class="fas fa-tags me-1"></i> {{ __('Disposal Classes') }}</h5>
+          <p class="card-text text-muted small">{{ __('Per-schedule classes that pin retention period + trigger + final action.') }}</p>
+          <div class="mt-2"><span class="badge bg-info text-dark">{{ $stats['disposal_classes'] }}</span> active class(es)</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  {{-- File Plan --}}
+  <div class="col-md-4">
+    <a href="{{ route('records.fileplan.index') }}" class="text-decoration-none">
+      <div class="card h-100 border-success">
+        <div class="card-body">
+          <h5 class="card-title text-success"><i class="fas fa-sitemap me-1"></i> {{ __('File Plan') }}</h5>
+          <p class="card-text text-muted small">{{ __('Hierarchical functional classification. CSV / spreadsheet import supported.') }}</p>
+          <div class="mt-2"><span class="badge bg-success">{{ $stats['fileplan_nodes'] }}</span> node(s)</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  {{-- Disposal Queue --}}
+  <div class="col-md-4">
+    <a href="{{ route('records.disposal.queue') }}" class="text-decoration-none">
+      <div class="card h-100 border-danger">
+        <div class="card-body">
+          <h5 class="card-title text-danger"><i class="fas fa-exclamation-triangle me-1"></i> {{ __('Disposal Queue') }}</h5>
+          <p class="card-text text-muted small">{{ __('Records awaiting a disposal decision: recommend → approve → execute.') }}</p>
+          <div class="mt-2"><span class="badge bg-danger">{{ $stats['pending_disposal'] }}</span> pending action(s)</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  {{-- Reviews --}}
+  <div class="col-md-4">
+    <a href="{{ route('records.reviews.index') }}" class="text-decoration-none">
+      <div class="card h-100 border-warning">
+        <div class="card-body">
+          <h5 class="card-title text-warning"><i class="fas fa-eye me-1"></i> {{ __('Reviews') }}</h5>
+          <p class="card-text text-muted small">{{ __('Periodic review queue - when retention asks "look again before disposing".') }}</p>
+          <div class="mt-2"><span class="badge bg-warning text-dark">{{ $stats['overdue_reviews'] }}</span> overdue</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  {{-- Email Capture --}}
+  <div class="col-md-4">
+    <a href="{{ route('records.emails.index') }}" class="text-decoration-none">
+      <div class="card h-100 border-secondary">
+        <div class="card-body">
+          <h5 class="card-title text-secondary"><i class="fas fa-envelope me-1"></i> {{ __('Email Capture') }}</h5>
+          <p class="card-text text-muted small">{{ __('Capture and classify business email as records of activity.') }}</p>
+          <div class="mt-2"><span class="badge bg-secondary">{{ $stats['captured_emails'] }}</span> captured</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  {{-- Classification --}}
+  <div class="col-md-4">
+    <a href="{{ route('records.classification.index') }}" class="text-decoration-none">
+      <div class="card h-100 border-primary">
+        <div class="card-body">
+          <h5 class="card-title text-primary"><i class="fas fa-magic me-1"></i> {{ __('Classification Rules') }}</h5>
+          <p class="card-text text-muted small">{{ __('Auto-assign records to file plan + disposal class on declare.') }}</p>
+          <div class="mt-2"><span class="badge bg-primary">{{ $stats['classified_records'] }}</span> classified record(s)</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  {{-- Compliance --}}
+  <div class="col-md-4">
+    <a href="{{ route('records.compliance.index') }}" class="text-decoration-none">
+      <div class="card h-100 border-dark">
+        <div class="card-body">
+          <h5 class="card-title text-dark"><i class="fas fa-clipboard-check me-1"></i> {{ __('Compliance') }}</h5>
+          <p class="card-text text-muted small">{{ __('ISO 15489 / MoReq2010 / DoD 5015.2 self-assessment + reporting.') }}</p>
+          <div class="mt-2"><span class="badge bg-dark">{{ $stats['compliance_assessments'] }}</span> assessment(s)</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  {{-- Vital Records (Phase 1, lives in ahg-integrity) --}}
+  <div class="col-md-4">
+    <a href="{{ url('/admin/integrity/vital-records') }}" class="text-decoration-none">
+      <div class="card h-100 border-success">
+        <div class="card-body">
+          <h5 class="card-title text-success"><i class="fas fa-shield-alt me-1"></i> {{ __('Vital Records') }}</h5>
+          <p class="card-text text-muted small">{{ __('Records essential to organisational continuity. Off-site replicated.') }}</p>
+          <div class="mt-2"><span class="text-success small"><i class="fas fa-arrow-right me-1"></i>{{ __('Open registry') }}</span></div>
+        </div>
+      </div>
+    </a>
+  </div>
+</div>
+
+<hr class="my-4">
+
+<h2 class="h5 mb-3">{{ __('Quick links') }}</h2>
+<div class="d-flex gap-2 flex-wrap">
+  <a href="{{ route('records.fileplan.import') }}" class="btn btn-sm btn-outline-success"><i class="fas fa-file-upload me-1"></i>{{ __('Import file plan (CSV / spreadsheet)') }}</a>
+  <a href="{{ route('records.schedules.create') }}" class="btn btn-sm btn-outline-primary"><i class="fas fa-plus me-1"></i>{{ __('New retention schedule') }}</a>
+  <a href="{{ route('records.disposal.history') }}" class="btn btn-sm btn-outline-secondary"><i class="fas fa-history me-1"></i>{{ __('Disposal history') }}</a>
+</div>
+
+<div class="mt-4 small text-muted">
+  {{ __('Status badges marked') }} <em>(P2.4)</em>, <em>(P2.6)</em>, <em>(P2.8)</em>, <em>(P4.2)</em> mark roadmap phases.
+  Database tables exist; UI/services pending. See README roadmap for full status.
+</div>
+@endsection

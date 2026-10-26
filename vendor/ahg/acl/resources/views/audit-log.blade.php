@@ -1,0 +1,241 @@
+@extends('theme::layouts.2col')
+
+@section('title', 'Audit Trail')
+@section('body-class', 'admin audit-log')
+
+@section('sidebar')
+  <section id="facets">
+    <div class="sidebar-lowering">
+      <h3>{{ __('Filter Audit Logs') }}</h3>
+      <form method="get" action="{{ route('acl.audit-log') }}">
+        <div class="mb-3">
+          <label class="form-label">{{ __('Action Type') }}</label>
+          <select name="filter_action" class="form-select form-select-sm">
+            <option value="">{{ __('All Actions') }}</option>
+            {{-- code => human label, from the canonical catalogue so every
+                 instance offers the same choices --}}
+            @foreach($actionTypes as $code => $label)
+              <option value="{{ $code }}" {{ ($filters['action'] ?? '') === $code ? 'selected' : '' }}>{{ $label }}</option>
+            @endforeach
+          </select>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label">{{ __('Entity Type') }}</label>
+          <select name="entity_type" class="form-select form-select-sm">
+            <option value="">{{ __('All Types') }}</option>
+            @foreach($entityTypes as $e)
+              <option value="{{ $e }}" {{ ($filters['object_type'] ?? '') === $e ? 'selected' : '' }}>{{ $e }}</option>
+            @endforeach
+          </select>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label">{{ __('Username') }}</label>
+          <select name="username" class="form-select form-select-sm">
+            <option value="">{{ __('All Users') }}</option>
+            @foreach($usernames as $u)
+              <option value="{{ $u }}" {{ ($filters['username'] ?? '') === $u ? 'selected' : '' }}>{{ $u }}</option>
+            @endforeach
+          </select>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label">{{ __('From Date') }}</label>
+          <input type="date" name="from_date" class="form-control form-control-sm" value="{{ $filters['from_date'] ?? '' }}">
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label">{{ __('To Date') }}</label>
+          <input type="date" name="to_date" class="form-control form-control-sm" value="{{ $filters['to_date'] ?? '' }}">
+        </div>
+
+        <input type="hidden" name="limit" value="{{ $limit }}">
+
+        <div class="d-grid gap-2">
+          <button type="submit" class="btn btn-primary btn-sm">{{ __('Apply Filters') }}</button>
+          <a href="{{ route('acl.audit-log') }}" class="btn btn-outline-secondary btn-sm">{{ __('Clear') }}</a>
+        </div>
+      </form>
+
+      <hr class="my-4">
+      <h4>{{ __('Quick Links') }}</h4>
+      <ul class="list-unstyled">
+        <li><a href="{{ route('acl.audit-log', ['filter_action' => 'login']) }}">{{ __('Authentication Log') }}</a></li>
+        <li><a href="{{ route('acl.audit-log', ['filter_action' => 'access_request']) }}">{{ __('Security Access Log') }}</a></li>
+        @if(\Route::has('audit.statistics'))
+          <li><a href="{{ route('audit.statistics') }}">{{ __('Statistics Dashboard') }}</a></li>
+        @endif
+        @if(\Route::has('audit.settings'))
+          <li><a href="{{ route('audit.settings') }}">{{ __('Settings') }}</a></li>
+        @endif
+      </ul>
+    </div>
+  </section>
+@endsection
+
+@section('title-block')
+  <h1>{{ __('Audit Trail') }}</h1>
+@endsection
+
+@section('content')
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <span class="text-muted">
+      Showing {{ $pager['from'] }} to {{ $pager['to'] }} of {{ $pager['total'] }} results
+    </span>
+    <div class="d-flex align-items-center gap-2">
+      {{-- Page-size switch --}}
+      <div class="btn-group btn-group-sm" role="group" aria-label="{{ __('Page size') }}">
+        @foreach([25, 50, 100, 250] as $sz)
+          <a href="{{ route('acl.audit-log', array_merge(request()->except(['page','limit']), ['limit' => $sz])) }}"
+             class="btn btn-outline-secondary {{ $limit == $sz ? 'active' : '' }}">{{ $sz }}</a>
+        @endforeach
+      </div>
+      <div class="btn-group btn-group-sm">
+        <a href="{{ route('acl.audit-log', array_merge(request()->except(['page']), ['format' => 'csv'])) }}" class="btn btn-outline-secondary">{{ __('Export CSV') }}</a>
+        <a href="{{ route('acl.audit-log', array_merge(request()->except(['page']), ['format' => 'json'])) }}" class="btn btn-outline-secondary">{{ __('Export JSON') }}</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-striped table-hover table-sm">
+      <thead class="table-light">
+        <tr>
+          <th>{{ __('Date/Time') }}</th>
+          <th>{{ __('User') }}</th>
+          <th>{{ __('Action') }}</th>
+          <th>{{ __('Entity') }}</th>
+          <th>{{ __('Object ID') }}</th>
+          <th>{{ __('IP') }}</th>
+          <th class="text-end">{{ __('Actions') }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        @forelse($entries as $log)
+          @php
+            $badge = match(strtolower($log->action_category ?? 'access')) {
+              'security' => 'bg-danger',
+              'admin'    => 'bg-warning text-dark',
+              'auth'     => 'bg-primary',
+              'access'   => 'bg-info text-dark',
+              default    => 'bg-secondary',
+            };
+          @endphp
+          <tr>
+            <td><small>{{ $log->created_at }}</small></td>
+            {{-- ?: not ??. The display name is joined from actor_i18n, where an
+                 actor with no authorised form of name stores an EMPTY STRING, not
+                 NULL - and ?? only falls through on null. So a user whose actor
+                 record has a blank name rendered as an empty User column even
+                 though user_name was recorded correctly on the row. --}}
+            <td>{{ $log->display_name ?: ($log->user_name ?: 'Anonymous') }}</td>
+            <td>
+              <span class="badge {{ $badge }}" title="{{ $log->action }}">{{ \AhgCore\Support\AuditActionLabels::label($log->action) }}</span>
+            </td>
+            <td>{{ $log->object_type ?? '-' }}</td>
+            <td>{{ $log->object_id ?? '-' }}</td>
+            <td><small><code>{{ $log->ip_address ?? '-' }}</code></small></td>
+            <td class="text-end">
+              @if(!empty($log->details))
+                <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#auditDetailModal-{{ $log->id }}" title="{{ __('View Details') }}">
+                  <i class="fas fa-eye"></i>
+                </button>
+                <div class="modal fade" id="auditDetailModal-{{ $log->id }}" tabindex="-1">
+                  <div class="modal-dialog modal-lg">
+                    <div class="modal-content">
+                      <div class="modal-header">
+                        <h5 class="modal-title">Audit entry #{{ $log->id }}</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                      </div>
+                      <div class="modal-body">
+                        @php
+                          $d = is_string($log->details) ? json_decode($log->details, true) : $log->details;
+                          $changed = is_array($d) && isset($d['changed_fields']) ? (array) $d['changed_fields'] : [];
+                          $isCreate = is_array($d) && !empty($d['created']);
+                          $isDelete = is_array($d) && !empty($d['deleted']);
+                          $snapshot = $isCreate ? ($d['after'] ?? []) : ($isDelete ? ($d['before'] ?? []) : []);
+                        @endphp
+                        @if(!empty($changed))
+                          <h6 class="mb-2 small text-uppercase text-muted">{{ __('Field changes') }}</h6>
+                          <table class="table table-sm table-striped mb-3">
+                            <thead><tr><th>{{ __('Field') }}</th><th>{{ __('Before') }}</th><th>{{ __('After') }}</th></tr></thead>
+                            <tbody>
+                              @foreach($changed as $field)
+                                <tr>
+                                  <td><code>{{ $field }}</code></td>
+                                  <td class="small text-danger" style="white-space:pre-wrap;">{{ is_scalar($d['before'][$field] ?? null) ? ($d['before'][$field] ?? '-') : json_encode($d['before'][$field] ?? null, JSON_UNESCAPED_UNICODE) }}</td>
+                                  <td class="small text-success" style="white-space:pre-wrap;">{{ is_scalar($d['after'][$field] ?? null)  ? ($d['after'][$field]  ?? '-') : json_encode($d['after'][$field]  ?? null, JSON_UNESCAPED_UNICODE) }}</td>
+                                </tr>
+                              @endforeach
+                            </tbody>
+                          </table>
+                        @elseif(($isCreate || $isDelete) && !empty($snapshot))
+                          <h6 class="mb-2 small text-uppercase {{ $isCreate ? 'text-success' : 'text-danger' }}">
+                            <i class="fas fa-{{ $isCreate ? 'plus-circle' : 'trash-alt' }} me-1"></i>
+                            {{ $isCreate ? __('Created - initial values') : __('Deleted - last known values') }}
+                          </h6>
+                          <table class="table table-sm table-striped mb-3">
+                            <thead><tr><th>{{ __('Field') }}</th><th>{{ __('Value') }}</th></tr></thead>
+                            <tbody>
+                              @foreach($snapshot as $f => $v)
+                                @if($v !== null && $v !== '')
+                                  <tr>
+                                    <td><code>{{ $f }}</code></td>
+                                    <td class="small {{ $isCreate ? 'text-success' : 'text-danger' }}" style="white-space:pre-wrap;">{{ is_scalar($v) ? $v : json_encode($v, JSON_UNESCAPED_UNICODE) }}</td>
+                                  </tr>
+                                @endif
+                              @endforeach
+                            </tbody>
+                          </table>
+                        @endif
+                        <details>
+                          <summary class="small text-muted">{{ __('Raw payload') }}</summary>
+                          <pre class="bg-light p-3 rounded small">{{ is_string($log->details) ? $log->details : json_encode($log->details, JSON_PRETTY_PRINT) }}</pre>
+                        </details>
+                        @if($log->user_agent)
+                          <hr><small class="text-muted">{{ __('User Agent') }}</small>
+                          <div><code class="small">{{ $log->user_agent }}</code></div>
+                        @endif
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              @endif
+            </td>
+          </tr>
+        @empty
+          <tr><td colspan="7" class="text-center text-muted py-4">{{ __('No audit log entries found.') }}</td></tr>
+        @endforelse
+      </tbody>
+    </table>
+  </div>
+
+  @if($pager['last_page'] > 1)
+    <nav>
+      <ul class="pagination pagination-sm justify-content-center">
+        @if($pager['current_page'] > 1)
+          <li class="page-item">
+            <a class="page-link" href="{{ route('acl.audit-log', array_merge(request()->except(['page']), ['page' => $pager['current_page'] - 1])) }}">&laquo;</a>
+          </li>
+        @endif
+
+        @php
+          $start = max(1, $pager['current_page'] - 3);
+          $end = min($pager['last_page'], $pager['current_page'] + 3);
+        @endphp
+        @for($i = $start; $i <= $end; $i++)
+          <li class="page-item {{ $i === $pager['current_page'] ? 'active' : '' }}">
+            <a class="page-link" href="{{ route('acl.audit-log', array_merge(request()->except(['page']), ['page' => $i])) }}">{{ $i }}</a>
+          </li>
+        @endfor
+
+        @if($pager['current_page'] < $pager['last_page'])
+          <li class="page-item">
+            <a class="page-link" href="{{ route('acl.audit-log', array_merge(request()->except(['page']), ['page' => $pager['current_page'] + 1])) }}">&raquo;</a>
+          </li>
+        @endif
+      </ul>
+    </nav>
+  @endif
+@endsection

@@ -1,0 +1,68 @@
+<?php
+
+use AhgPreservation\Controllers\PreservationController;
+use AhgPreservation\Controllers\TiffPdfMergeController;
+use Illuminate\Support\Facades\Route;
+
+Route::middleware('admin')->group(function () {
+    Route::get('/admin/preservation', [PreservationController::class, 'index'])->name('preservation.index');
+    Route::get('/admin/preservation/triage', [PreservationController::class, 'triage'])->name('preservation.triage');
+    Route::get('/admin/preservation/fixity-log', [PreservationController::class, 'fixityLog'])->name('preservation.fixity-log');
+    Route::get('/admin/preservation/events', [PreservationController::class, 'events'])->name('preservation.events');
+    Route::get('/admin/preservation/formats', [PreservationController::class, 'formats'])->name('preservation.formats');
+    Route::get('/admin/preservation/virus-scan', [PreservationController::class, 'virusScan'])->name('preservation.virus-scan');
+    Route::get('/admin/preservation/policies', [PreservationController::class, 'policies'])->name('preservation.policies');
+    Route::get('/admin/preservation/packages', [PreservationController::class, 'packages'])->name('preservation.packages');
+    Route::get('/admin/preservation/package/{id}', [PreservationController::class, 'packageView'])->name('preservation.package-view');
+    Route::get('/admin/preservation/package/{id}/edit', [PreservationController::class, 'packageEdit'])->name('preservation.package-edit');
+    Route::get('/admin/preservation/package/{id}/download', [PreservationController::class, 'download'])->name('preservation.package-download')->where('id', '[0-9]+');
+    // #1437 - real actions behind the previously-stub buttons.
+    Route::post('/admin/preservation/package/{id}/export', [PreservationController::class, 'exportPackageAction'])->name('preservation.package-export')->where('id', '[0-9]+');
+    Route::post('/admin/preservation/package/{id}/convert-aip', [PreservationController::class, 'convertToAip'])->name('preservation.package-convert-aip')->where('id', '[0-9]+');
+    Route::post('/admin/preservation/package/{id}/create-dip', [PreservationController::class, 'createDip'])->name('preservation.package-create-dip')->where('id', '[0-9]+');
+    Route::post('/admin/preservation/package/{id}/delete', [PreservationController::class, 'deletePackage'])->name('preservation.package-delete')->where('id', '[0-9]+');
+    Route::get('/admin/preservation/scheduler', [PreservationController::class, 'scheduler'])->name('preservation.scheduler');
+    Route::get('/admin/preservation/schedule/{id}/edit', [PreservationController::class, 'scheduleEdit'])->name('preservation.schedule-edit');
+    Route::get('/admin/preservation/backup', [PreservationController::class, 'backup'])->name('preservation.backup');
+    Route::get('/admin/preservation/reports', [PreservationController::class, 'reports'])->name('preservation.reports');
+    Route::get('/admin/preservation/conversion', [PreservationController::class, 'conversion'])->name('preservation.conversion');
+    // #1385 Phase 4 - re-queue a failed normalization from the conversion dashboard
+    Route::post('/admin/preservation/normalization/{id}/retry', [PreservationController::class, 'retryNormalization'])->where('id', '[0-9]+')->name('preservation.normalization.retry');
+    // #1385 Phase 2 - normalization rule registry (FPR) CRUD
+    Route::get('/admin/preservation/normalization-rules', [PreservationController::class, 'normalizationRules'])->name('preservation.normalization-rules');
+    Route::post('/admin/preservation/normalization-rules', [PreservationController::class, 'storeNormalizationRule'])->name('preservation.normalization-rules.store');
+    Route::post('/admin/preservation/normalization-rules/{id}', [PreservationController::class, 'updateNormalizationRule'])->where('id', '[0-9]+')->name('preservation.normalization-rules.update');
+    Route::post('/admin/preservation/normalization-rules/{id}/toggle', [PreservationController::class, 'toggleNormalizationRule'])->where('id', '[0-9]+')->name('preservation.normalization-rules.toggle');
+    Route::post('/admin/preservation/normalization-rules/{id}/delete', [PreservationController::class, 'deleteNormalizationRule'])->where('id', '[0-9]+')->name('preservation.normalization-rules.delete');
+    Route::get('/admin/preservation/identification', [PreservationController::class, 'identification'])->name('preservation.identification');
+    Route::get('/admin/preservation/object/{id}', [PreservationController::class, 'object'])->name('preservation.object');
+
+    Route::post('/admin/preservation/api/checksum/{id}/generate', [PreservationController::class, 'apiGenerateChecksum'])->name('preservation.api.checksum.generate');
+    Route::post('/admin/preservation/api/fixity/{id}/verify', [PreservationController::class, 'apiVerifyFixity'])->name('preservation.api.fixity.verify');
+    Route::get('/admin/preservation/api/stats', [PreservationController::class, 'apiStats'])->name('preservation.api.stats');
+
+    // BagIt v1.0 packaging (P3.1)
+    Route::post('/admin/preservation/package/build/{ioId}', [PreservationController::class, 'buildBagItPackage'])
+        ->where('ioId', '[0-9]+')
+        ->name('preservation.package.build');
+    Route::post('/admin/preservation/package/{id}/validate', [PreservationController::class, 'validateBagItPackage'])
+        ->where('id', '[0-9]+')
+        ->name('preservation.package.validate');
+
+    // TIFF/PDF Merge
+    Route::prefix('admin/preservation/tiffpdfmerge')->group(function () {
+        Route::get('/', [TiffPdfMergeController::class, 'index'])->name('preservation.tiffpdfmerge.index');
+        Route::get('/browse', [TiffPdfMergeController::class, 'browse'])->name('preservation.tiffpdfmerge.browse');
+        Route::post('/store', [TiffPdfMergeController::class, 'store'])->name('preservation.tiffpdfmerge.store');
+        Route::get('/{id}/download', [TiffPdfMergeController::class, 'download'])->where('id', '[0-9]+')->name('preservation.tiffpdfmerge.download');
+        Route::get('/{id}', [TiffPdfMergeController::class, 'view'])->where('id', '[0-9]+')->name('preservation.tiffpdfmerge.view');
+    });
+
+    // TIFF/PDF Merge AJAX API routes (used by add-digital-object)
+    Route::post('/tiffpdfmerge/create', [TiffPdfMergeController::class, 'create'])->name('tiffpdfmerge.create');
+    Route::post('/tiffpdfmerge/upload', [TiffPdfMergeController::class, 'upload'])->name('tiffpdfmerge.upload');
+    Route::post('/tiffpdfmerge/reorder', [TiffPdfMergeController::class, 'reorder'])->name('tiffpdfmerge.reorder');
+    Route::post('/tiffpdfmerge/removeFile', [TiffPdfMergeController::class, 'removeFile'])->name('tiffpdfmerge.removeFile');
+    Route::post('/tiffpdfmerge/process', [TiffPdfMergeController::class, 'process'])->name('tiffpdfmerge.process');
+    Route::post('/tiffpdfmerge/delete', [TiffPdfMergeController::class, 'delete'])->name('tiffpdfmerge.delete');
+});

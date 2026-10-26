@@ -1,0 +1,71 @@
+<?php
+
+use AhgFederation\Controllers\EuropeanaController;
+use AhgFederation\Controllers\FederationController;
+use AhgFederation\Controllers\FederationGovernanceController;
+use AhgFederation\Middleware\EnsureFederationEnabled;
+use Illuminate\Support\Facades\Route;
+
+// Protect the federation UI/API with the federation_enabled setting via middleware.
+Route::middleware(['auth', 'admin', EnsureFederationEnabled::class])->prefix('federation')->group(function () {
+    Route::get('/', [FederationController::class, 'index'])->name('federation.index');
+    Route::get('/peers', [FederationController::class, 'peers'])->name('federation.peers');
+    Route::get('/peers/add', [FederationController::class, 'editPeer'])->name('federation.addPeer');
+    Route::get('/peers/{id}/edit', [FederationController::class, 'editPeer'])->name('federation.editPeer');
+    Route::post('/peers/save', [FederationController::class, 'savePeer'])->name('federation.savePeer');
+    Route::post('/peers/{id}/search-config', [FederationController::class, 'savePeerSearchConfig'])->name('federation.savePeerSearchConfig');
+    Route::get('/harvest', [FederationController::class, 'harvest'])->name('federation.harvest');
+    Route::post('/harvest/run', [FederationController::class, 'runHarvest'])->name('federation.runHarvest');
+    Route::get('/log', [FederationController::class, 'log'])->name('federation.log');
+    Route::post('/peers/{id}/test', [FederationController::class, 'testPeer'])->name('federation.testPeer');
+
+    // F2 (#1315) peer discovery + governance. Fresh, unlocked controller -
+    // separate from the locked FederationController / edit-peer.blade.php.
+    Route::get('/governance', [FederationGovernanceController::class, 'index'])->name('federation.governance');
+    Route::post('/governance/discover', [FederationGovernanceController::class, 'discover'])->name('federation.governance.discover');
+    // T2 (#1317) per-instance trust-threshold policy: the
+    // federation_require_verified toggle. Distinct from the per-peer save
+    // below (which is whereNumber('id')), so the literal 'policy' path is safe.
+    Route::post('/governance/policy', [FederationGovernanceController::class, 'savePolicy'])->name('federation.governance.policy');
+    Route::post('/governance/{id}', [FederationGovernanceController::class, 'save'])
+        ->whereNumber('id')
+        ->name('federation.governance.save');
+    // T1 (#1316) federation trust handshake: clear a peer's TOFU key pin so the
+    // next verified fetch re-pins (the "peer rotated its key" control).
+    Route::post('/governance/{id}/clear-pin', [FederationGovernanceController::class, 'clearPin'])
+        ->whereNumber('id')
+        ->name('federation.governance.clearPin');
+});
+
+// Federated search is anonymous-readable so the GLAM browse page can embed it.
+// Still gated by federation_enabled so the toggle disables the feature globally.
+Route::middleware([EnsureFederationEnabled::class])->prefix('federation')->group(function () {
+    Route::get('/search', [FederationController::class, 'search'])->name('federation.search');
+    Route::get('/provenance/{objectId}', [FederationController::class, 'provenance'])
+        ->whereNumber('objectId')
+        ->name('federation.provenance');
+});
+
+// Legacy AtoM URL aliases (AJAX endpoints used by JS widgets)
+Route::middleware(['auth', 'admin', EnsureFederationEnabled::class])->group(function () {
+    Route::post('/admin/federation/api/test-peer', [FederationController::class, 'testPeer'])->name('federation.api.testPeer');
+    Route::post('/admin/federation/harvest', [FederationController::class, 'runHarvest'])->name('federation.api.harvest');
+    // GET /admin/federation/harvest/ - legacy page URL (AtoM used admin prefix)
+    Route::get('/admin/federation/harvest', [FederationController::class, 'harvest'])->name('federation.harvest.legacy');
+});
+
+// Europeana EDM publish - #670 Phase 4. New, unlocked controller; lives
+// at /federation/europeana to sit alongside the rest of the federation
+// admin surface but is wired through its own controller class so the
+// locked F3 FederationController stays untouched.
+Route::middleware(['auth', 'admin', EnsureFederationEnabled::class])->prefix('federation/europeana')->group(function () {
+    Route::get('/', [EuropeanaController::class, 'index'])->name('federation.europeana.index');
+    Route::post('/run', [EuropeanaController::class, 'run'])->name('federation.europeana.run');
+    Route::get('/download', [EuropeanaController::class, 'download'])->name('federation.europeana.download');
+});
+
+// Legacy /admin/federation/europeana alias for parity with the rest of
+// the admin URL family.
+Route::middleware(['auth', 'admin', EnsureFederationEnabled::class])->group(function () {
+    Route::get('/admin/federation/europeana', [EuropeanaController::class, 'index'])->name('federation.europeana.legacy');
+});

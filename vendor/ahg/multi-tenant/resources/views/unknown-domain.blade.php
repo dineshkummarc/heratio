@@ -1,0 +1,16 @@
+@extends('theme::layouts.1col')
+
+@section('title', 'Unknown Domain')
+
+@section('content')
+<h1>{{ __('Unknown Domain') }}</h1>
+
+<div class="card">
+  <div class="card-header" style="background:var(--ahg-primary);color:#fff">
+    <h5 class="mb-0">{{ __('Unknown Domain') }}</h5>
+  </div>
+  <div class="card-body">
+    <p class="text-muted">{{ __('Content for Unknown Domain.') }}</p>
+  </div>
+</div>
+@endsection

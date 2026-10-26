@@ -1,0 +1,166 @@
+<?php
+
+/**
+ * ImpactTrackingController - Heratio ahg-research
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace AhgResearch\Controllers;
+
+use App\Http\Controllers\Controller;
+use AhgResearch\Services\ImpactTrackingService;
+use AhgResearch\Services\ResearchService;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use AhgResearch\Controllers\Concerns\ChecksProjectAccess;
+use AhgResearch\Controllers\Concerns\RendersResearchSidebar;
+use AhgResearch\Controllers\Concerns\GuardsProjectView;
+use AhgResearch\Controllers\Concerns\ResolvesResearchProject;
+
+/**
+ * heratio#1241 - Research OS #19 (moonshot 25): Impact Tracking.
+ *
+ * Per-project Impact panel: the downstream citations, mentions and dataset
+ * reuse of a project's PUBLISHED outputs. The signals are produced by the
+ * scheduled ahg:research-impact-refresh command (which polls the PUBLIC OpenAlex
+ * and Crossref Event Data APIs directly, never the AI gateway); this controller
+ * is the read/UI surface plus a manual refresh trigger.
+ *
+ * Auth-gated (routes carry the 'auth' middleware). Access mirrors the rest of
+ * the research portal: owner + collaborators may view; owner, editor
+ * collaborators and admins may trigger a refresh. Every action is resilient - a
+ * missing table or DB hiccup degrades to an empty state, never a 500.
+ */
+class ImpactTrackingController extends Controller
+{
+    use ResolvesResearchProject;
+
+    use GuardsProjectView;
+
+    use RendersResearchSidebar;
+
+    use ChecksProjectAccess;
+
+    public function __construct(
+        private ImpactTrackingService $service,
+        private ResearchService $research,
+    ) {}
+
+    // =========================================================================
+    // Impact panel
+    // =========================================================================
+
+    /** Per-project Impact panel grouping signals by type with counts. */
+    public function index(Request $request, int $projectId)
+    {
+        [$project, $researcher, $access] = $this->guardView($projectId);
+        if ($project instanceof \Illuminate\Http\RedirectResponse) {
+            return $project;
+        }
+
+        $type = (string) $request->query('type', '');
+
+        $outputs = $this->service->publishedOutputs($projectId);
+        $signals = $this->service->listSignals($projectId, $type !== '' ? $type : null);
+        $counts  = $this->service->countsByType($projectId);
+
+        // Group the visible signals by type for the panel sections.
+        $grouped = [];
+        foreach ($signals as $sig) {
+            $code = (string) ($sig->signal_type ?? 'other');
+            $grouped[$code][] = $sig;
+        }
+
+        return view('research::research.impact-tracking', array_merge(
+            $this->sidebar(),
+            [
+                'project'      => $project,
+                'researcher'   => $researcher,
+                'outputs'      => $outputs,
+                'signals'      => $signals,
+                'grouped'      => $grouped,
+                'types'        => ImpactTrackingService::TYPES,
+                'counts'       => $counts,
+                'citationCount'=> $this->service->citationCount($projectId),
+                'totalCount'   => $this->service->totalCount($projectId),
+                'lastScanned'  => $this->service->lastScannedAt($projectId),
+                'activeType'   => $type,
+                'canManage'    => $access['can_edit'],
+            ]
+        ));
+    }
+
+    /**
+     * Manual refresh: scan this project's published outputs now. Resilient - a
+     * failed fetch yields no new signals and never errors the request.
+     */
+    public function refresh(Request $request, int $projectId)
+    {
+        [$project, , $access] = $this->guardEdit($projectId);
+        if ($project instanceof \Illuminate\Http\RedirectResponse) {
+            return $project;
+        }
+
+        if (! $this->service->hasPublishedOutputs($projectId)) {
+            return redirect()->route('research.impact.index', $projectId)
+                ->with('error', __('No published outputs with a DOI yet. Record a published submission in Publication Studio first.'));
+        }
+
+        try {
+            $summary = $this->service->scanProject($projectId);
+            return redirect()->route('research.impact.index', $projectId)
+                ->with('success', __('Impact refresh complete. New signals found: :n', ['n' => (int) $summary['signals']]));
+        } catch (\Throwable $e) {
+            // Network or API hiccup must never 500 the user.
+            return redirect()->route('research.impact.index', $projectId)
+                ->with('error', __('Could not reach the bibliographic services just now. Please try again later.'));
+        }
+    }
+
+    // =========================================================================
+    // Helpers
+    // =========================================================================
+
+
+
+
+    /**
+     * Gate for mutating actions (manage = can_edit).
+     *
+     * @return array{0:object|\Illuminate\Http\RedirectResponse,1:object|null,2:array|null}
+     */
+    private function guardEdit(int $projectId): array
+    {
+        [$project, $researcher, $access] = $this->guardView($projectId);
+        if ($project instanceof \Illuminate\Http\RedirectResponse) {
+            return [$project, null, null];
+        }
+
+        if (! $access['can_edit']) {
+            abort(403, 'You cannot refresh this project\'s impact tracking.');
+        }
+
+        return [$project, $researcher, $access];
+    }
+
+}

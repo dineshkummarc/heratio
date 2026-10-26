@@ -1,0 +1,321 @@
+<?php
+
+/**
+ * ScanInstallCommand - Heratio ahg-scan
+ *
+ * Copyright (C) 2026 Johan Pieterse, Plain Sailing Information Systems
+ * Licensed under the GNU AGPL v3.
+ */
+
+namespace AhgScan\Console;
+
+use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+
+/**
+ * Apply the ahg-scan schema + dropdown seed, idempotently.
+ *
+ * Runs column-by-column checks against INFORMATION_SCHEMA so it's safe
+ * to re-run and doesn't trip over MySQL's prepared-statement buffering
+ * the way a raw install.sql with SET/PREPARE/EXECUTE blocks would.
+ */
+class ScanInstallCommand extends Command
+{
+    protected $signature = 'ahg:scan-install';
+
+    protected $description = 'Apply ahg-scan schema + dropdown seed (idempotent)';
+
+    public function handle(): int
+    {
+        $this->installSchema();
+        $this->installDropdowns();
+        $this->installCron();
+
+        return self::SUCCESS;
+    }
+
+    // ---------------------------------------------------------------------
+    // Schema
+    // ---------------------------------------------------------------------
+
+    protected function installSchema(): void
+    {
+        $this->line('Schema:');
+
+        $this->addColumn('ingest_session', 'session_kind',
+            "ALTER TABLE ingest_session ADD COLUMN session_kind VARCHAR(32) NOT NULL DEFAULT 'wizard' AFTER entity_type, ADD KEY ix_session_kind (session_kind)");
+        $this->addColumn('ingest_session', 'auto_commit',
+            'ALTER TABLE ingest_session ADD COLUMN auto_commit TINYINT(1) NOT NULL DEFAULT 0 AFTER session_kind');
+        $this->addColumn('ingest_session', 'source_ref',
+            'ALTER TABLE ingest_session ADD COLUMN source_ref VARCHAR(255) NULL AFTER auto_commit');
+
+        $this->addColumn('ingest_file', 'status',
+            "ALTER TABLE ingest_file ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'pending' AFTER extracted_path, ADD KEY ix_ingest_file_status (status)");
+        $this->addColumn('ingest_file', 'stage',
+            'ALTER TABLE ingest_file ADD COLUMN stage VARCHAR(32) NULL AFTER status');
+        $this->addColumn('ingest_file', 'source_hash',
+            'ALTER TABLE ingest_file ADD COLUMN source_hash CHAR(64) NULL AFTER stage, ADD KEY ix_ingest_file_hash (source_hash)');
+        $this->addColumn('ingest_file', 'error_message',
+            'ALTER TABLE ingest_file ADD COLUMN error_message TEXT NULL AFTER source_hash');
+        $this->addColumn('ingest_file', 'attempts',
+            'ALTER TABLE ingest_file ADD COLUMN attempts INT NOT NULL DEFAULT 0 AFTER error_message');
+        $this->addColumn('ingest_file', 'resolved_io_id',
+            'ALTER TABLE ingest_file ADD COLUMN resolved_io_id INT NULL AFTER attempts, ADD KEY ix_ingest_file_io (resolved_io_id)');
+        $this->addColumn('ingest_file', 'resolved_do_id',
+            'ALTER TABLE ingest_file ADD COLUMN resolved_do_id INT NULL AFTER resolved_io_id');
+        $this->addColumn('ingest_file', 'completed_at',
+            'ALTER TABLE ingest_file ADD COLUMN completed_at DATETIME NULL AFTER resolved_do_id');
+
+        // P5: per-file sidecar tracking
+        $this->addColumn('ingest_file', 'sidecar_path',
+            'ALTER TABLE ingest_file ADD COLUMN sidecar_path VARCHAR(1024) NULL AFTER completed_at');
+        $this->addColumn('ingest_file', 'sidecar_json',
+            'ALTER TABLE ingest_file ADD COLUMN sidecar_json JSON NULL AFTER sidecar_path');
+
+        // P3: sector routing flags (plan §12 Q#7 + Q#8)
+        $this->addColumn('ingest_session', 'spectrum_auto_enter',
+            'ALTER TABLE ingest_session ADD COLUMN spectrum_auto_enter TINYINT(1) NOT NULL DEFAULT 0 AFTER source_ref');
+        $this->addColumn('ingest_session', 'output_create_authorities',
+            'ALTER TABLE ingest_session ADD COLUMN output_create_authorities TINYINT(1) NOT NULL DEFAULT 1 AFTER spectrum_auto_enter');
+
+        // P6: per-folder notification settings
+        $this->addColumn('scan_folder', 'notify_emails',
+            'ALTER TABLE scan_folder ADD COLUMN notify_emails VARCHAR(1024) NULL AFTER last_scanned_at');
+        $this->addColumn('scan_folder', 'notify_on_failure',
+            'ALTER TABLE scan_folder ADD COLUMN notify_on_failure TINYINT(1) NOT NULL DEFAULT 0 AFTER notify_emails');
+
+        // #1281: per-folder path routing + provenance. processed_path / failed_path
+        // override the global config archive/quarantine dirs when set; created_by
+        // records the operator who registered the folder.
+        $this->addColumn('scan_folder', 'processed_path',
+            "ALTER TABLE scan_folder ADD COLUMN processed_path VARCHAR(1024) NULL COMMENT 'archive dir for successful files (default config heratio.scan.archive_path)' AFTER disposition_failure");
+        $this->addColumn('scan_folder', 'failed_path',
+            "ALTER TABLE scan_folder ADD COLUMN failed_path VARCHAR(1024) NULL COMMENT 'quarantine dir for failed files (default config heratio.scan.quarantine_path)' AFTER processed_path");
+        $this->addColumn('scan_folder', 'created_by',
+            'ALTER TABLE scan_folder ADD COLUMN created_by INT NULL AFTER updated_at');
+
+        // P6: retry/backoff - track when we last attempted a file so the
+        // scheduler can compute whether its next-attempt window has elapsed.
+        $this->addColumn('ingest_file', 'last_attempt_at',
+            'ALTER TABLE ingest_file ADD COLUMN last_attempt_at DATETIME NULL AFTER attempts');
+
+        $this->createTable('scan_folder', <<<'SQL'
+CREATE TABLE `scan_folder` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `code` VARCHAR(64) NOT NULL,
+  `label` VARCHAR(255) NOT NULL,
+  `path` VARCHAR(1024) NOT NULL,
+  `layout` VARCHAR(32) NOT NULL DEFAULT 'path',
+  `ingest_session_id` INT NOT NULL,
+  `disposition_success` VARCHAR(32) NOT NULL DEFAULT 'move',
+  `disposition_failure` VARCHAR(32) NOT NULL DEFAULT 'quarantine',
+  `processed_path` VARCHAR(1024) NULL,
+  `failed_path` VARCHAR(1024) NULL,
+  `min_quiet_seconds` INT NOT NULL DEFAULT 10,
+  `enabled` TINYINT(1) NOT NULL DEFAULT 1,
+  `last_scanned_at` DATETIME NULL,
+  `created_by` INT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NULL ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_scan_folder_code` (`code`),
+  KEY `ix_scan_folder_enabled` (`enabled`),
+  KEY `ix_scan_folder_session` (`ingest_session_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL
+        );
+
+        // P5: scan_session_token for Mode B (Scan API)
+        $this->createTable('scan_session_token', <<<'SQL'
+CREATE TABLE `scan_session_token` (
+  `token` VARCHAR(64) NOT NULL,
+  `ingest_session_id` INT NOT NULL,
+  `api_key_id` INT NULL,
+  `user_id` INT NULL,
+  `status` VARCHAR(16) NOT NULL DEFAULT 'open',
+  `expires_at` DATETIME NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `committed_at` DATETIME NULL,
+  PRIMARY KEY (`token`),
+  KEY `ix_scan_token_session` (`ingest_session_id`),
+  KEY `ix_scan_token_status` (`status`),
+  KEY `ix_scan_token_expires` (`expires_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL
+        );
+
+        // #1281: per-pass run-history log. One row per watched-folder scan pass,
+        // recording how many files were detected/enqueued/skipped/failed and the
+        // ingest_job opened for the pass. Drives the scan dashboard run history.
+        $this->createTable('scan_event', <<<'SQL'
+CREATE TABLE `scan_event` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `folder_id` INT NOT NULL,
+  `detected` INT NOT NULL DEFAULT 0,
+  `enqueued` INT NOT NULL DEFAULT 0,
+  `skipped_duplicate` INT NOT NULL DEFAULT 0,
+  `skipped_quiet` INT NOT NULL DEFAULT 0,
+  `failed` INT NOT NULL DEFAULT 0,
+  `job_id` INT NULL,
+  `status` VARCHAR(32) NOT NULL DEFAULT 'completed',
+  `message` TEXT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `ix_scan_event_folder` (`folder_id`),
+  KEY `ix_scan_event_created` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL
+        );
+    }
+
+    protected function addColumn(string $table, string $column, string $alterSql): void
+    {
+        if (! Schema::hasTable($table)) {
+            $this->warn("  skip {$table}.{$column} - table missing");
+
+            return;
+        }
+        if (Schema::hasColumn($table, $column)) {
+            $this->line("  {$table}.{$column} exists");
+
+            return;
+        }
+        try {
+            DB::statement($alterSql);
+            $this->info("  + {$table}.{$column} added");
+        } catch (\Throwable $e) {
+            $this->error("  ! {$table}.{$column}: ".$e->getMessage());
+        }
+    }
+
+    protected function createTable(string $table, string $createSql): void
+    {
+        if (Schema::hasTable($table)) {
+            $this->line("  {$table} exists");
+
+            return;
+        }
+        try {
+            DB::statement($createSql);
+            $this->info("  + {$table} created");
+        } catch (\Throwable $e) {
+            $this->error("  ! {$table}: ".$e->getMessage());
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Dropdowns
+    // ---------------------------------------------------------------------
+
+    // ---------------------------------------------------------------------
+    // Cron registration
+    // ---------------------------------------------------------------------
+
+    protected function installCron(): void
+    {
+        if (! \Illuminate\Support\Facades\Schema::hasTable('cron_schedule')) {
+            return;
+        }
+        $this->line('Cron:');
+        $entries = [
+            [
+                'slug' => 'scan-retry-failed',
+                'name' => 'Scanner retry failed files',
+                'description' => 'Re-dispatch failed scan files whose backoff window has elapsed.',
+                'category' => 'ingest',
+                'artisan_command' => 'ahg:scan-retry-failed',
+                'cron_expression' => '*/5 * * * *',
+                'duration_hint' => 'quick',
+            ],
+        ];
+        foreach ($entries as $e) {
+            $exists = DB::table('cron_schedule')->where('slug', $e['slug'])->exists();
+            if ($exists) {
+                $this->line('  '.$e['slug'].' exists');
+
+                continue;
+            }
+            DB::table('cron_schedule')->insert($e + ['is_enabled' => 1, 'timeout_minutes' => 30]);
+            $this->info('  + '.$e['slug'].' registered');
+        }
+    }
+
+    protected function installDropdowns(): void
+    {
+        $this->line('Dropdowns:');
+
+        if (! Schema::hasTable('ahg_dropdown')) {
+            $this->warn('  skip - ahg_dropdown table missing');
+
+            return;
+        }
+
+        $groups = [
+            ['taxonomy' => 'ingest_session_kind', 'label' => 'Ingest Session Kind', 'section' => 'ingest', 'rows' => [
+                ['wizard', 'Wizard (interactive)', '#0d6efd', 'hat-wizard', 10],
+                ['watched_folder', 'Watched folder', '#198754', 'folder-open', 20],
+                ['scan_api', 'Scan API', '#6f42c1', 'plug', 30],
+            ]],
+            ['taxonomy' => 'ingest_file_status', 'label' => 'Ingest File Status', 'section' => 'ingest', 'rows' => [
+                ['pending', 'Pending', '#6c757d', 'clock', 10],
+                ['processing', 'Processing', '#0d6efd', 'spinner', 20],
+                ['done', 'Done', '#198754', 'check-circle', 30],
+                ['failed', 'Failed', '#dc3545', 'exclamation-triangle', 40],
+                ['duplicate', 'Duplicate (already ingested)', '#ffc107', 'clone', 50],
+                ['quarantined', 'Quarantined', '#fd7e14', 'shield-virus', 60],
+                ['awaiting_rights', 'Awaiting rights review', '#6f42c1', 'user-shield', 70],
+            ]],
+            ['taxonomy' => 'ingest_file_stage', 'label' => 'Ingest File Stage', 'section' => 'ingest', 'rows' => [
+                ['virus', 'Virus scan', null, null, 10],
+                ['format', 'Format identification', null, null, 15],
+                ['meta', 'Extract metadata', null, null, 20],
+                ['io', 'Resolve / create IO', null, null, 30],
+                ['do', 'Create digital object', null, null, 40],
+                ['sector-route', 'Sector routing', null, null, 45],
+                ['rights', 'Rights enforcement', null, null, 48],
+                ['deriving', 'Generating derivatives', null, null, 50],
+                ['indexing', 'Indexing', null, null, 60],
+                ['packaging', 'OAIS packaging (SIP/AIP/DIP)', null, null, 70],
+            ]],
+            ['taxonomy' => 'scan_folder_layout', 'label' => 'Scan Folder Layout', 'section' => 'scan', 'rows' => [
+                ['path', 'Path as destination', null, null, 10],
+                ['flat-sidecar', 'Flat files with XML sidecar', null, null, 20],
+            ]],
+            ['taxonomy' => 'scan_disposition', 'label' => 'Scan Disposition', 'section' => 'scan', 'rows' => [
+                ['move', 'Move to archive folder', null, null, 10],
+                ['quarantine', 'Move to quarantine folder', null, null, 20],
+                ['leave', 'Leave in place', null, null, 30],
+                ['delete', 'Delete (not recommended)', null, null, 40],
+            ]],
+        ];
+
+        $inserted = 0;
+        foreach ($groups as $g) {
+            foreach ($g['rows'] as [$code, $label, $color, $icon, $order]) {
+                $exists = DB::table('ahg_dropdown')
+                    ->where('taxonomy', $g['taxonomy'])
+                    ->where('code', $code)
+                    ->exists();
+                if ($exists) {
+                    continue;
+                }
+                DB::table('ahg_dropdown')->insert([
+                    'taxonomy' => $g['taxonomy'],
+                    'taxonomy_label' => $g['label'],
+                    'taxonomy_section' => $g['section'],
+                    'code' => $code,
+                    'label' => $label,
+                    'color' => $color,
+                    'icon' => $icon,
+                    'sort_order' => $order,
+                    'is_active' => 1,
+                    'created_at' => now(),
+                ]);
+                $inserted++;
+            }
+        }
+
+        $this->info("  {$inserted} dropdown row(s) inserted");
+    }
+}

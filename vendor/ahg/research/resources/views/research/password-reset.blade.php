@@ -1,0 +1,16 @@
+{{-- Password Reset - Migrated from AtoM --}}
+@extends('theme::layouts.1col')
+@section('title', 'Set New Password')
+@section('content')
+<div class="row justify-content-center"><div class="col-md-6">
+<div class="card"><div class="card-header" style="background:var(--ahg-primary);color:#fff"><h5 class="mb-0"><i class="fas fa-key me-2"></i>{{ __('Set New Password') }}</h5></div>
+<div class="card-body">
+<form method="POST">@csrf
+        <input type="hidden" name="token" value="{{ $token ?? '' }}">
+        <div class="mb-3"><label class="form-label">{{ __('New Password') }} <span class="text-danger">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label><input type="password" name="password" class="form-control" required minlength="8"></div>
+        <div class="mb-3"><label class="form-label">{{ __('Confirm Password') }} <span class="text-danger">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label><input type="password" name="password_confirmation" class="form-control" required></div>
+        <button type="submit" class="btn atom-btn-white w-100"><i class="fas fa-save me-1"></i>{{ __('Reset Password') }}</button>
+    </form>
+</div></div>
+</div></div>
+@endsection

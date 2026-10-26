@@ -1,0 +1,2829 @@
+@extends('theme::layouts.1col')
+
+@section('title', 'FS Overlay Annotate')
+@section('body-class', 'admin ai htr')
+
+@push('css')
+<style>
+  .ba-wrap { position: relative; overflow: scroll; background: #1a1a2e; border-radius: 4px; height: 75vh; }
+  .ba-wrap.tool-hand { cursor: grab; }
+  .ba-wrap.tool-hand.panning { cursor: grabbing; }
+  .ba-wrap.tool-draw { cursor: crosshair; }
+  .ba-wrap.tool-select { cursor: default; }
+  .ba-wrap canvas { display: block; }
+  .ba-sidebar { max-height: 75vh; overflow-y: auto; }
+  .ba-field { padding: 6px 10px; border-left: 3px solid #ccc; margin-bottom: 4px; cursor: pointer; }
+  .ba-field.active { border-left-color: #0d6efd; background: #e8f0fe; }
+  .ba-field.done { border-left-color: #198754; background: #d1e7dd; }
+  .ba-field .ba-label { font-weight: 600; font-size: 0.8rem; color: #666; }
+  .ba-field .ba-value { font-size: 0.95rem; }
+  .ba-field .ba-coords { font-size: 0.7rem; color: #999; }
+  .ba-field.skipped { border-left-color: #adb5bd; background: #f8f9fa; opacity: 0.6; }
+  .ba-field.skipped .ba-value { text-decoration: line-through; }
+  .ba-field .ba-skip-btn { float: right; font-size: 0.7rem; padding: 0 6px; }
+  .ba-field .ba-edit-input { font-size: 0.85rem; padding: 2px 4px; width: 100%; border: 1px solid #dee2e6; border-radius: 3px; }
+  .ba-field .ba-edit-input:focus { border-color: #0d6efd; outline: none; }
+  .ba-wrap.dragging { cursor: move !important; }
+  .ba-progress { height: 4px; }
+  kbd { font-size: 0.75rem; }
+  .ba-auto-badge { display: inline-block; font-size: 0.65rem; font-weight: 700; background: #198754; color: #fff; padding: 1px 8px; border-radius: 3px; animation: baPulse 1.5s ease-in-out infinite; }
+  @keyframes baPulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+</style>
+@endpush
+
+@section('content')
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div>
+    <h1 class="mb-0"><i class="fas fa-layer-group me-2"></i>{{ __('FS Overlay Annotate') }}</h1>
+    <span class="small text-muted">{{ __('Position field labels on document images - drag boxes to correct locations') }}</span>
+  </div>
+  <div class="btn-group btn-group-sm">
+    <a href="{{ route('admin.ai.htr.bulkAnnotate') }}" class="btn atom-btn-white"><i class="fas fa-th me-1"></i>{{ __('Bulk Annotate') }}</a>
+    <a href="{{ route('admin.ai.htr.annotate') }}" class="btn atom-btn-white"><i class="fas fa-pencil-alt me-1"></i>{{ __('Manual') }}</a>
+  </div>
+</div>
+
+{{-- Folder + Spreadsheet Selection --}}
+<div class="card mb-3">
+  <div class="card-body py-2">
+    <div class="row align-items-end">
+      <div class="col-md-5">
+        <label class="form-label small fw-bold">{{ __('Folder with images + CSV') }}</label>
+        <input type="text" id="ba-folder" class="form-control form-control-sm" value="/usr/share/nginx/heratio/FamilySearch/" placeholder="{{ __('/path/to/images') }}">
+      </div>
+      <div class="col-md-5">
+        <label class="form-label small fw-bold">{{ __('Spreadsheet') }} <span class="text-muted fw-normal">(optional)</span></label>
+        <select id="ba-spreadsheet" class="form-select form-select-sm">
+          <option value="__none__">{{ __('No spreadsheet (images only)') }}</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small fw-bold">{{ __('Form type') }}</label>
+        <select id="ba-form-type" class="form-select form-select-sm">
+          <option value="auto">{{ __('Auto-detect') }}</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small fw-bold">&nbsp;</label>
+        <button id="ba-load-btn" class="btn btn-sm atom-btn-outline-success w-100" onclick="loadBulkData()">
+          <i class="fas fa-upload me-1"></i>{{ __('Load') }}
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{{-- FamilySearch Data Safe export bar (only for fs-scotland-* templates) --}}
+<div class="card mb-3 border-primary" id="ba-fs-bar" style="display:none;">
+  <div class="card-body py-2">
+    <div class="row align-items-end g-2">
+      <div class="col-auto"><span class="badge bg-primary"><i class="fas fa-id-card me-1"></i>{{ __('FamilySearch Data Safe') }}</span></div>
+      <div class="col-md-3">
+        <label class="form-label small fw-bold mb-0">{{ __('Collection ID') }}</label>
+        <input type="text" id="ba-fs-collection" class="form-control form-control-sm">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small fw-bold mb-0">{{ __('PPQ ID') }}</label>
+        <input type="text" id="ba-fs-ppq" class="form-control form-control-sm">
+      </div>
+      <div class="col-auto">
+        <label class="form-label small fw-bold mb-0">{{ __('Records / image') }}</label>
+        <select id="ba-fs-records" class="form-select form-select-sm" onchange="fsSetRecords()">
+          <option>1</option><option>2</option><option>3</option><option>4</option>
+          <option>5</option><option>6</option><option>7</option><option>8</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small fw-bold mb-0">{{ __('Image Type (this image - no record)') }}</label>
+        <select id="ba-fs-imagetype" class="form-select form-select-sm" onchange="fsSetImageType(this.value)">
+          <option value="">{{ __('(has a record - key fields)') }}</option>
+          <option value="No Extractable Data Image">{{ __('No Extractable Data Image') }}</option>
+          <option value="Blank Image">{{ __('Blank Image') }}</option>
+          <option value="Duplicate Image">{{ __('Duplicate Image') }}</option>
+          <option value="Unreadable Image">{{ __('Unreadable Image') }}</option>
+          <option value="Other Image">{{ __('Other Image') }}</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-sm btn-primary" onclick="fsDownloadDataSafeCsv()"><i class="fas fa-file-csv me-1"></i>{{ __('Download Data Safe CSV') }}</button>
+      </div>
+      <div class="col-12"><span id="ba-fs-status" class="small text-muted"></span></div>
+    </div>
+  </div>
+</div>
+
+{{-- Main workspace --}}
+<div class="row g-3" id="ba-workspace" style="display:none;">
+  {{-- Image canvas --}}
+  <div class="col-md-8">
+    <div class="card">
+      <div class="card-header py-1 d-flex justify-content-between align-items-center" style="background:var(--ahg-primary);color:#fff">
+        <span id="ba-image-name" class="small">{{ __('No image loaded') }}</span>
+        <span>
+          <span id="ba-counter" class="badge bg-light text-dark me-2">0/0</span>
+          <span id="ba-auto-status" class="ba-auto-badge d-none">{{ __('AUTO') }}</span>
+          <div class="btn-group btn-group-sm me-2">
+            <button class="btn btn-light" id="ba-tool-hand" title="{{ __('Pan (H)') }}" onclick="baSetTool('hand')"><i class="fas fa-hand-paper"></i></button>
+            <button class="btn btn-light" id="ba-tool-draw" title="{{ __('Draw (R)') }}" onclick="baSetTool('draw')"><i class="fas fa-vector-square"></i></button>
+            <button class="btn btn-light" id="ba-tool-select" title="{{ __('Select/Move (V)') }}" onclick="baSetTool('select')"><i class="fas fa-mouse-pointer"></i></button>
+          </div>
+          <button class="btn btn-sm btn-light" onclick="baZoomIn()"><i class="fas fa-search-plus"></i></button>
+          <button class="btn btn-sm btn-light" onclick="baZoomOut()"><i class="fas fa-search-minus"></i></button>
+          <button class="btn btn-sm btn-light" onclick="baZoomFit()"><i class="fas fa-expand"></i></button>
+        </span>
+      </div>
+      <div class="ba-wrap" id="ba-wrap">
+        <canvas id="ba-canvas"></canvas>
+      </div>
+    </div>
+    <div class="d-flex justify-content-between mt-2">
+      <button class="btn btn-sm atom-btn-white" onclick="baPrev()" id="ba-prev-btn" disabled><i class="fas fa-arrow-left me-1"></i>{{ __('Previous') }}</button>
+      <div>
+        <div class="form-check form-switch d-inline-block me-1" style="vertical-align:middle">
+          <input class="form-check-input" type="checkbox" id="ba-auto-detect" checked style="cursor:pointer">
+          <label class="form-check-label small" for="ba-auto-detect" style="cursor:pointer" title="{{ __('Auto-detect printed labels on each image') }}">{{ __('Detect') }}</label>
+        </div>
+        <div class="form-check form-switch d-inline-block me-1" style="vertical-align:middle">
+          <input class="form-check-input" type="checkbox" id="ba-auto-recog" onchange="baToggleAutoRecog(this.checked)" style="cursor:pointer">
+          <label class="form-check-label small" for="ba-auto-recog" style="cursor:pointer">{{ __('Auto') }}</label>
+        </div>
+        <div class="form-check form-switch d-inline-block me-1" style="vertical-align:middle">
+          <input class="form-check-input" type="checkbox" id="ba-numbers-only" onchange="baToggleNumbers()" style="cursor:pointer">
+          <label class="form-check-label small" for="ba-numbers-only" style="cursor:pointer" title="{{ __('Show only the box number on the image (field names stay in the list on the right)') }}">{{ __('Numbers only') }}</label>
+        </div>
+        <button class="btn btn-sm btn-outline-success" onclick="baDonutPrefill()" id="ba-donut-btn" title="{{ __('Donut: pre-fill ILM fields from document image') }}"><i class="fas fa-file-invoice me-1"></i>{{ __('Donut') }}</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="baRecognise()" id="ba-recognise-btn" title="{{ __('HTR: recognise text in drawn boxes') }}"><i class="fas fa-brain me-1"></i>{{ __('Recognise') }}</button>
+        <button class="btn btn-sm btn-outline-info" onclick="ocrAndPlace(images[imgIdx]); redraw();" title="{{ __('OCR the form to detect printed labels') }}"><i class="fas fa-eye me-1"></i>{{ __('Detect labels') }}</button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="baStartCropDraw()" id="ba-crop-draw-btn" title="{{ __('Draw crop rectangle') }}"><i class="fas fa-crop-alt me-1"></i>{{ __('Mark area') }}</button>
+        <button class="btn btn-sm btn-outline-dark d-none" onclick="baDoCrop()" id="ba-crop-do-btn" title="{{ __('Crop to marked area') }}"><i class="fas fa-cut me-1"></i>{{ __('Crop now') }}</button>
+        <button class="btn btn-sm btn-outline-primary" onclick="baAutoPlace()" id="ba-autoplace-btn" title="{{ __('Re-apply saved positions') }}"><i class="fas fa-magic me-1"></i>{{ __('Auto-place') }}</button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="baResetPositions()" title="{{ __('Clear saved positions') }}"><i class="fas fa-undo me-1"></i>{{ __('Reset') }}</button>
+        <button class="btn btn-sm btn-outline-warning" onclick="baMigrateToServer()" id="ba-migrate-btn" title="{{ __('Push browser positions to server') }}"><i class="fas fa-cloud-upload-alt me-1"></i>{{ __('Sync to server') }}</button>
+        <button class="btn btn-sm atom-btn-white" onclick="baSkip()"><i class="fas fa-forward me-1"></i>{{ __('Skip') }}</button>
+      </div>
+      <button class="btn btn-sm atom-btn-outline-success" onclick="baSaveAndNext()" id="ba-save-btn" disabled><i class="fas fa-save me-1"></i>{{ __('Save & Next') }}</button>
+    </div>
+  </div>
+
+  {{-- Field list sidebar --}}
+  <div class="col-md-4">
+    <div class="card">
+      <div class="card-header py-1" style="background:var(--ahg-primary);color:#fff">
+        <span class="small">{{ __('Fields - drag boxes to position on image') }}</span>
+      </div>
+      <div class="card-body p-2 ba-sidebar" id="ba-fields"></div>
+    </div>
+    <div class="progress ba-progress mt-2">
+      <div class="progress-bar bg-success" id="ba-progress" style="width:0%"></div>
+    </div>
+    <div class="mt-2 small text-muted">
+      <kbd>V</kbd> select & drag boxes to correct positions · Positions are <strong>remembered</strong> for next images · <kbd>R</kbd> draw new box · <kbd>{{ __('Ctrl+S') }}</kbd> save & next
+    </div>
+
+    {{-- Session stats --}}
+    <div class="card mt-3">
+      <div class="card-header py-1" style="background:var(--ahg-primary);color:#fff">
+        <span class="small">{{ __('Session') }}</span>
+      </div>
+      <div class="card-body p-2">
+        <div class="d-flex justify-content-between">
+          <span>{{ __('Images done') }}</span>
+          <span class="badge bg-success" id="ba-done-count">0</span>
+        </div>
+        <div class="d-flex justify-content-between mt-1">
+          <span>{{ __('Remaining') }}</span>
+          <span class="badge bg-warning text-dark" id="ba-remaining-count">0</span>
+        </div>
+        <div class="d-flex justify-content-between mt-1">
+          <span>{{ __('Fields annotated') }}</span>
+          <span class="badge bg-primary" id="ba-fields-count">0</span>
+        </div>
+      </div>
+    </div>
+
+    {{-- Donut ILM extraction results --}}
+    <div class="card mt-3" id="ba-donut-card" style="display:none">
+      <div class="card-header py-1" style="background:#2e7d32;color:#fff">
+        <span class="small"><i class="fas fa-file-invoice me-1"></i>{{ __('Donut ILM') }}</span>
+        <span class="badge bg-light text-dark float-end" id="ba-donut-conf"></span>
+      </div>
+      <div class="card-body p-2">
+        <table class="table table-sm table-borderless mb-0" style="font-size:12px">
+          <tr><td class="text-muted" style="width:40%">{{ __('Form Type') }}</td><td id="ba-donut-form-type" style="font-family:monospace">-</td></tr>
+          <tr><td class="text-muted">{{ __('Record Type') }}</td><td id="ba-donut-type">-</td></tr>
+          <tr><td class="text-muted">{{ __('Type ID') }}</td><td id="ba-donut-type-id" style="font-family:monospace">-</td></tr>
+          <tr><td class="text-muted">{{ __('Event Year') }}</td><td id="ba-donut-year">-</td></tr>
+          <tr><td class="text-muted">{{ __('Event Place') }}</td><td id="ba-donut-place">-</td></tr>
+          <tr><td class="text-muted">{{ __('Non-genealogical') }}</td><td id="ba-donut-nongeo">-</td></tr>
+          <tr><td class="text-muted">{{ __('Positions') }}</td><td id="ba-donut-positions">-</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+@endsection
+
+@push('js')
+<script>
+(function() {
+  let COLUMNS = [];
+  const COLORS = ['#cc0000','#cc0000','#cc0000','#cc0000','#cc0000','#cc0000','#cc0000','#cc0000','#cc0000'];
+
+  let images = [];
+  let imgIdx = -1;
+  let fieldIdx = 0;
+  let annotations = [];
+  let img = null;
+  let imgNatW = 0, imgNatH = 0; // store natural dimensions explicitly
+  let scale = 1;
+  let currentTool = 'select'; // default to select/move
+  let drawing = false, sx = 0, sy = 0;
+  let dragging = false, dragIdx = -1, dragOffX = 0, dragOffY = 0;
+  let resizing = false, resizeIdx = -1, resizeHandle = '';
+  let panning = false, panStartX = 0, panStartY = 0, panScrollX = 0, panScrollY = 0;
+  let offsetX = 0, offsetY = 0;
+  let skipped = [];
+  let sessionDone = 0, sessionFields = 0;
+
+  // Saved positions - per form type
+  let savedPositions = {};
+  let currentFolder = '';
+  let currentFormType = '';
+  let donutYear = ''; // Donut-extracted year for the current image
+  let autoRecogTimers = []; // track staggered HTR timeouts so we can cancel on save/next
+
+  // Fields to always skip
+  // Only these 5 fields are used - everything else is skipped
+  const ALLOWED_FIELDS = [
+    'Name', 'Sex', 'Age', 'Event Date', 'Event Year', 'Residence Place',
+    'Husband Name', 'Husband Race', 'Spouse', 'Spouse Race', 'Place of Marriage', 'District', 'Province', 'Marriage Date',
+    'Text Block',
+    // Church register fields (top-level place/district/year + 4 rows per page)
+    'Event Place', 'District', 'Event Year',
+    'R1 Name', 'R1 Birth Date', 'R1 Event Date', 'R1 Father', 'R1 Mother',
+    'R2 Name', 'R2 Birth Date', 'R2 Event Date', 'R2 Father', 'R2 Mother',
+    'R3 Name', 'R3 Birth Date', 'R3 Event Date', 'R3 Father', 'R3 Mother',
+    'R4 Name', 'R4 Birth Date', 'R4 Event Date', 'R4 Father', 'R4 Mother',
+    // FamilySearch Data Safe (Scotland) field labels -> mapped to FS system
+    // names via FS_SYS for the Data Safe CSV export. heratio#1336.
+    'Groom Surname', 'Groom Forename', 'Bride Surname', 'Bride Forename',
+    'Surname', 'Forename', 'Father', 'Mother',
+    'Event Day', 'Event Month', 'Birth Day', 'Birth Month', 'Birth Year',
+  ];
+
+  // FamilySearch Data Safe: human box label -> Data Safe system name. Drives the
+  // "Download Data Safe CSV" export from the fs-scotland-* templates (#1336).
+  // (Event date is the event itself for Birth/Marriage/Death; Baptism keeps a
+  // separate Birth date -> PR_BIR_*.)
+  // Box label -> Data Safe system name (full Data Safe matrix). Marriage uses
+  // Groom*=principal (PR_*), Bride*=spouse (SP_*); other events use the plain
+  // labels. Event date is the event itself (EVENT_*); Baptism adds Birth date
+  // (PR_BIR_*) and Burial adds Death date (PR_DEA_*).
+  const FS_SYS = {
+    // principal
+    'Forename': 'PR_NAME_GN_ORIG', 'Surname': 'PR_NAME_SURN_ORIG',
+    'Sex': 'PR_SEX_CODE_ORIG', 'Age': 'PR_AGE_ORIG',
+    'Occupation': 'PR_OCCUPATION_ORIG', 'Marital Status': 'PR_MARITAL_STATUS_ORIG',
+    'Father Forename': 'PR_FTHR_NAME_GN_ORIG', 'Father Surname': 'PR_FTHR_NAME_SURN_ORIG',
+    'Mother Forename': 'PR_MTHR_NAME_GN_ORIG', 'Mother Surname': 'PR_MTHR_NAME_SURN_ORIG',
+    // marriage groom (principal) aliases
+    'Groom Forename': 'PR_NAME_GN_ORIG', 'Groom Surname': 'PR_NAME_SURN_ORIG',
+    'Groom Age': 'PR_AGE_ORIG', 'Groom Occupation': 'PR_OCCUPATION_ORIG',
+    'Groom Marital Status': 'PR_MARITAL_STATUS_ORIG',
+    'Groom Father Forename': 'PR_FTHR_NAME_GN_ORIG', 'Groom Father Surname': 'PR_FTHR_NAME_SURN_ORIG',
+    'Groom Mother Forename': 'PR_MTHR_NAME_GN_ORIG', 'Groom Mother Surname': 'PR_MTHR_NAME_SURN_ORIG',
+    // spouse (bride for marriage)
+    'Spouse Forename': 'SP_NAME_GN_ORIG', 'Spouse Surname': 'SP_NAME_SURN_ORIG',
+    'Bride Forename': 'SP_NAME_GN_ORIG', 'Bride Surname': 'SP_NAME_SURN_ORIG',
+    'Bride Age': 'SP_AGE_ORIG', 'Bride Occupation': 'SP_OCCUPATION_ORIG',
+    'Bride Marital Status': 'SP_MARITAL_STATUS_ORIG',
+    'Bride Father Forename': 'SP_FTHR_NAME_GN_ORIG', 'Bride Father Surname': 'SP_FTHR_NAME_SURN_ORIG',
+    'Bride Mother Forename': 'SP_MTHR_NAME_GN_ORIG', 'Bride Mother Surname': 'SP_MTHR_NAME_SURN_ORIG',
+    'Spouse Age': 'SP_AGE_ORIG', 'Spouse Occupation': 'SP_OCCUPATION_ORIG',
+    'Spouse Marital Status': 'SP_MARITAL_STATUS_ORIG',
+    // dates
+    'Event Day': 'EVENT_DAY_ORIG', 'Event Month': 'EVENT_MONTH_ORIG', 'Event Year': 'EVENT_YEAR_ORIG',
+    'Birth Day': 'PR_BIR_DAY_ORIG', 'Birth Month': 'PR_BIR_MONTH_ORIG', 'Birth Year': 'PR_BIR_YEAR_ORIG',
+    'Death Day': 'PR_DEA_DAY_ORIG', 'Death Month': 'PR_DEA_MONTH_ORIG', 'Death Year': 'PR_DEA_YEAR_ORIG',
+  };
+  // Full per-record field set by event type (Data Safe matrix). One CSV record
+  // per block on the image; FS_RECORD_NBR increments 0,1,2… within the image.
+  const FS_RECORD_FIELDS = {
+    Marriage: ['Event Day','Event Month','Event Year',
+      'Groom Forename','Groom Surname','Groom Age','Groom Occupation','Groom Marital Status',
+      'Groom Father Forename','Groom Father Surname','Groom Mother Forename','Groom Mother Surname',
+      'Bride Forename','Bride Surname','Bride Age','Bride Occupation','Bride Marital Status',
+      'Bride Father Forename','Bride Father Surname','Bride Mother Forename','Bride Mother Surname'],
+    Birth: ['Event Day','Event Month','Event Year','Forename','Surname','Sex',
+      'Father Forename','Father Surname','Mother Forename','Mother Surname'],
+    Baptism: ['Event Day','Event Month','Event Year','Birth Day','Birth Month','Birth Year',
+      'Forename','Surname','Sex','Father Forename','Father Surname','Mother Forename','Mother Surname'],
+    Death: ['Event Day','Event Month','Event Year','Forename','Surname','Sex','Age',
+      'Occupation','Marital Status','Father Forename','Father Surname','Mother Forename','Mother Surname',
+      'Spouse Forename','Spouse Surname'],
+    Burial: ['Event Day','Event Month','Event Year','Death Day','Death Month','Death Year',
+      'Forename','Surname','Sex','Age','Occupation','Marital Status',
+      'Father Forename','Father Surname','Mother Forename','Mother Surname','Spouse Forename','Spouse Surname'],
+  };
+  const FS_EVENT_TYPE = {
+    'fs-scotland-marriage': 'Marriage', 'fs-scotland-birth': 'Birth',
+    'fs-scotland-death': 'Death', 'fs-scotland-baptism': 'Baptism', 'fs-scotland-burial': 'Burial',
+  };
+  function isFsTemplate(t) { return !!FS_EVENT_TYPE[t]; }
+  // The base label behind a possibly record-prefixed label ("R2 Groom Surname" -> "Groom Surname").
+  function fsBaseLabel(label) { const m = String(label).match(/^R\d+\s+(.*)$/); return m ? m[1] : label; }
+
+  // Allow every record-prefixed FS label through shouldSkip() (which gates on
+  // ALLOWED_FIELDS). Up to 8 records (blocks) per image.
+  (function () {
+    const set = new Set();
+    Object.values(FS_RECORD_FIELDS).forEach(arr => arr.forEach(f => set.add(f)));
+    set.forEach(f => { for (let n = 1; n <= 8; n++) ALLOWED_FIELDS.push('R' + n + ' ' + f); });
+  })();
+
+  // Generate flat box positions for N record bands: each record gets the full
+  // field set, auto-gridded within its band. Rough starting layout - the
+  // operator drags to the real columns and "Sync to server" saves it per form
+  // type (then reused on every image of that type).
+  function fsGenerateFields(eventType, nRecords) {
+    const base = FS_RECORD_FIELDS[eventType] || [];
+    const out = {};
+    const cols = 3;
+    const rows = Math.ceil(base.length / cols);
+    const band = Math.min(0.92 / Math.max(1, nRecords), 0.30);
+    for (let r = 0; r < nRecords; r++) {
+      const top = 0.04 + r * band;
+      const cellH = (band * 0.92) / rows;
+      base.forEach((f, idx) => {
+        const c = idx % cols, rr = Math.floor(idx / cols);
+        out['R' + (r + 1) + ' ' + f] = {
+          x: 0.02 + c * 0.325, y: top + rr * cellH,
+          w: 0.30, h: Math.max(0.018, cellH * 0.8),
+        };
+      });
+    }
+    return out;
+  }
+
+  // Populate the active FS template's fields for the current "records per image" count.
+  function fsEnsureFields() {
+    const t = document.getElementById('ba-form-type').value;
+    if (!isFsTemplate(t)) return;
+    const n = parseInt(document.getElementById('ba-fs-records') ? document.getElementById('ba-fs-records').value : '1', 10) || 1;
+    FORM_TEMPLATES[t].fields = fsGenerateFields(FS_EVENT_TYPE[t], n);
+  }
+
+  // Records-per-image changed: regenerate the bands and re-apply to the image.
+  window.fsSetRecords = function () {
+    fsEnsureFields();
+    const t = document.getElementById('ba-form-type').value;
+    if (!isFsTemplate(t) || typeof images === 'undefined' || !img || !images[imgIdx]) return;
+    currentFormType = t;
+    COLUMNS = Object.keys(FORM_TEMPLATES[t].fields).filter(c => !shouldSkip(c));
+    const e = images[imgIdx];
+    COLUMNS.forEach(c => { if (!e.fields[c]) e.fields[c] = ''; });
+    loadSavedPositions(() => { applyFormTemplate(t); buildFieldList(); redraw(); });
+  };
+  // Display names - rename fields for the UI
+  const FIELD_LABELS = {
+    'Residence Place': 'Duration of last Illness',
+    'Event Year': 'Year (digits)',
+  };
+  function displayLabel(col) { return FIELD_LABELS[col] || col; }
+  function shouldSkip(col) { return !ALLOWED_FIELDS.includes(col); }
+  // Check if a field was pre-filled from CSV - never overwrite these
+  function hasCsvValue(col) {
+    if (imgIdx < 0 || !images[imgIdx]) return false;
+    return !!(images[imgIdx]._csvFields && images[imgIdx]._csvFields[col]);
+  }
+
+  // ── De-duplicate repeated text (TrOCR decoder loop bug) ──
+  // "Femalefemalefemalefemale" → "Female"
+  // "John SmithJohn SmithJohn Smith" → "John Smith"
+  function dedupeRepeats(text) {
+    if (!text || text.length < 4) return text;
+    const s = text.trim();
+    // Try pattern lengths from 1 to half the string
+    for (let len = 1; len <= Math.floor(s.length / 2); len++) {
+      const pattern = s.substring(0, len);
+      // Check if the entire string is just this pattern repeated (case-insensitive)
+      const regex = new RegExp('^(' + pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')+$', 'i');
+      if (regex.test(s)) {
+        return pattern;
+      }
+    }
+    // Also try: "Value value value" with spaces
+    const words = s.split(/\s+/);
+    if (words.length >= 2) {
+      for (let wLen = 1; wLen <= Math.floor(words.length / 2); wLen++) {
+        const chunk = words.slice(0, wLen).join(' ');
+        const repeated = Array(Math.ceil(words.length / wLen)).fill(chunk).join(' ');
+        if (repeated.toLowerCase().startsWith(s.toLowerCase()) || s.toLowerCase().startsWith(repeated.toLowerCase())) {
+          return chunk;
+        }
+      }
+    }
+    return s;
+  }
+
+  // ── Levenshtein distance (used by autoFixDate + spellcheckAge) ──
+  function levenshtein(a, b) {
+    const m = a.length, n = b.length;
+    const dp = Array.from({length: m + 1}, (_, i) => Array(n + 1).fill(0));
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    for (let i = 1; i <= m; i++)
+      for (let j = 1; j <= n; j++)
+        dp[i][j] = Math.min(
+          dp[i-1][j] + 1, dp[i][j-1] + 1,
+          dp[i-1][j-1] + (a[i-1].toLowerCase() !== b[j-1].toLowerCase() ? 1 : 0)
+        );
+    return dp[m][n];
+  }
+
+  // ── Auto-fix date spelling ──
+  // Corrects common OCR/handwriting misreads in dates
+  function autoFixDate(text) {
+    if (!text) return text;
+    let s = text.trim();
+
+    // Fix month names (common OCR errors + Afrikaans variants)
+    const monthFixes = {
+      // January
+      'januray':'January','janury':'January','januery':'January','janaury':'January',
+      'janauray':'January','januarie':'January','jan':'January',
+      // February
+      'febuary':'February','feburary':'February','februray':'February','febriary':'February',
+      'februari':'February','feb':'February',
+      // March
+      'marck':'March','mach':'March','maart':'March','mar':'March',
+      // April
+      'apirl':'April','aprile':'April','apr':'April',
+      // May
+      'mei':'May',
+      // June
+      'juen':'June','jnue':'June','junie':'June','jun':'June',
+      // July
+      'jully':'July','juley':'July','julie':'July','jul':'July',
+      // August
+      'augst':'August','agust':'August','auguts':'August','augustus':'August','aug':'August',
+      // September
+      'septmber':'September','setember':'September','septemer':'September',
+      'sept':'September','sep':'September',
+      // October
+      'ocotber':'October','octber':'October','oktober':'October','oct':'October',
+      // November
+      'novmber':'November','noveber':'November','novemeber':'November',
+      'nov':'November',
+      // December
+      'decmber':'December','deceber':'December','desember':'December','dec':'December',
+    };
+
+    // Fix ordinal words (common on SA death certs)
+    const ordinalFixes = {
+      'frist':'First','forst':'First','firat':'First',
+      'secnd':'Second','secord':'Second','seccond':'Second',
+      'thrid':'Third','thirc':'Third','thrd':'Third',
+      'foruth':'Fourth','fouth':'Fourth','fourht':'Fourth',
+      'fith':'Fifth','fifht':'Fifth',
+      'sxith':'Sixth','sixht':'Sixth',
+      'sevnth':'Seventh','sevenh':'Seventh',
+      'eigth':'Eighth','eightb':'Eighth','eigthh':'Eighth',
+      'nineth':'Ninth','ninth':'Ninth','nith':'Ninth',
+      'teth':'Tenth','tenht':'Tenth',
+      'elevnth':'Eleventh','elevenh':'Eleventh',
+      'twelfth':'Twelfth','twelvth':'Twelfth','twelth':'Twelfth',
+      'therteenth':'Thirteenth','thirteeth':'Thirteenth',
+      'fourteeth':'Fourteenth','fourtheenth':'Fourteenth',
+      'fifteeth':'Fifteenth','fiftheenth':'Fifteenth',
+      'sixteeth':'Sixteenth',
+      'seventeeth':'Seventeenth',
+      'eighteeth':'Eighteenth',
+      'nineteeth':'Nineteenth',
+      'twenteth':'Twentieth','twentieh':'Twentieth',
+      'twentyfirst':'Twenty First','twenty-first':'Twenty First',
+      'twentysecond':'Twenty Second','twenty-second':'Twenty Second',
+      'twentythird':'Twenty Third','twenty-third':'Twenty Third',
+      'twentyfourth':'Twenty Fourth','twenty-fourth':'Twenty Fourth',
+      'twentyfifth':'Twenty Fifth','twenty-fifth':'Twenty Fifth',
+      'twentysixth':'Twenty Sixth','twenty-sixth':'Twenty Sixth',
+      'twentyseventh':'Twenty Seventh','twenty-seventh':'Twenty Seventh',
+      'twentyeighth':'Twenty Eighth','twenty-eighth':'Twenty Eighth',
+      'twentyninth':'Twenty Ninth','twenty-ninth':'Twenty Ninth',
+      'thirteth':'Thirtieth','thirtyeth':'Thirtieth',
+      'thirtyfirst':'Thirty First','thirty-first':'Thirty First',
+      // Afrikaans ordinals
+      'eerste':'Eerste','tweede':'Tweede','derde':'Derde','vierde':'Vierde',
+      'vyfde':'Vyfde','sesde':'Sesde','sewende':'Sewende','agste':'Agste',
+      'negende':'Negende','tiende':'Tiende','elfde':'Elfde','twaalfde':'Twaalfde',
+      'dertiende':'Dertiende','veertiende':'Veertiende','vyftiende':'Vyftiende',
+      'sestiende':'Sestiende','sewentiende':'Sewentiende','agtiende':'Agtiende',
+      'negentiende':'Negentiende','twintigste':'Twintigste',
+      'een-en-twintigste':'Een-en-twintigste','twee-en-twintigste':'Twee-en-twintigste',
+      'drie-en-twintigste':'Drie-en-twintigste','vier-en-twintigste':'Vier-en-twintigste',
+      'vyf-en-twintigste':'Vyf-en-twintigste','ses-en-twintigste':'Ses-en-twintigste',
+      'sewe-en-twintigste':'Sewe-en-twintigste','ag-en-twintigste':'Ag-en-twintigste',
+      'nege-en-twintigste':'Nege-en-twintigste','dertigste':'Dertigste',
+      'een-en-dertigste':'Een-en-dertigste',
+      // Afrikaans months
+      'januarie':'Januarie','februarie':'Februarie','maart':'Maart','april':'April',
+      'mei':'Mei','junie':'Junie','julie':'Julie','augustus':'Augustus',
+      'september':'September','oktober':'Oktober','november':'November','desember':'Desember',
+    };
+
+    // All valid date words for fuzzy matching
+    const validMonths = ['January','February','March','April','May','June','July','August','September','October','November','December',
+      'Januarie','Februarie','Maart','April','Mei','Junie','Julie','Augustus','September','Oktober','November','Desember'];
+    const validOrdinals = [
+      'First','Second','Third','Fourth','Fifth','Sixth','Seventh','Eighth','Ninth','Tenth',
+      'Eleventh','Twelfth','Thirteenth','Fourteenth','Fifteenth','Sixteenth','Seventeenth',
+      'Eighteenth','Nineteenth','Twentieth','Twenty','Thirty','One','Two','Three','Four',
+      'Five','Six','Seven','Eight','Nine',
+      'Eerste','Tweede','Derde','Vierde','Vyfde','Sesde','Sewende','Agste','Negende','Tiende',
+      'Elfde','Twaalfde','Dertiende','Veertiende','Vyftiende','Sestiende','Sewentiende',
+      'Agtiende','Negentiende','Twintigste','Dertigste',
+    ];
+    const allValidWords = [...validMonths, ...validOrdinals];
+
+    // Find closest valid word (max distance = 40% of word length)
+    function fuzzyMatch(word) {
+      if (!word || word.length < 3) return word;
+      let best = null, bestDist = Infinity;
+      const maxDist = Math.max(2, Math.floor(word.length * 0.4));
+      for (const valid of allValidWords) {
+        const d = levenshtein(word, valid);
+        if (d < bestDist) { bestDist = d; best = valid; }
+      }
+      return (bestDist <= maxDist) ? best : word;
+    }
+
+    // Apply fixes word by word
+    const words = s.split(/\s+/);
+    const skipWords = ['of','the','and','in','on','at','to','van','die','en','op','te'];
+    const fixed = words.map(w => {
+      const clean = w.replace(/[.,;:]/g, '');
+      // Skip pure numbers (years like 1920)
+      if (/^\d+$/.test(clean)) return w;
+      // Skip common short words that aren't date components
+      if (skipWords.includes(clean.toLowerCase())) return w;
+      const lower = clean.toLowerCase();
+      // Check exact fixes first
+      if (monthFixes[lower]) return monthFixes[lower];
+      if (ordinalFixes[lower]) return ordinalFixes[lower];
+      // Fuzzy match against fix keys (e.g. "twentyfirstl" → "twentyfirst" → "Twenty First")
+      let bestFixKey = null, bestFixDist = Infinity;
+      for (const key of Object.keys(ordinalFixes)) {
+        const d = levenshtein(lower, key);
+        if (d < bestFixDist) { bestFixDist = d; bestFixKey = key; }
+      }
+      for (const key of Object.keys(monthFixes)) {
+        const d = levenshtein(lower, key);
+        if (d < bestFixDist) { bestFixDist = d; bestFixKey = key; }
+      }
+      const maxFixDist = Math.max(2, Math.floor(lower.length * 0.4));
+      if (bestFixKey && bestFixDist <= maxFixDist && bestFixDist > 0) {
+        return ordinalFixes[bestFixKey] || monthFixes[bestFixKey];
+      }
+      // Fuzzy match against valid single date words
+      const matched = fuzzyMatch(clean);
+      if (matched !== clean) return matched;
+      // Capitalise first letter
+      if (w.length > 2 && /^[a-z]/.test(w)) return w.charAt(0).toUpperCase() + w.slice(1);
+      return w;
+    });
+
+    return fixed.join(' ');
+  }
+
+  // Spellcheck age unit - keep the number as-is, just fix the unit text
+  // Valid units: Days, Months, Years (and common OCR misreads)
+  function spellcheckAge(ageStr) {
+    if (!ageStr) return '';
+    const s = ageStr.trim();
+
+    // Already just a number - return as-is
+    if (/^\d+$/.test(s)) return s;
+
+    // Split into number part and unit part
+    const m = s.match(/^(\d+)\s*(.*)/);
+    if (!m) {
+      // No number - might be all text like "Six Months", return as-is
+      return s;
+    }
+
+    const num = m[1];
+    const unitRaw = (m[2] || '').trim().toLowerCase();
+    if (!unitRaw) return num;
+
+    // Fuzzy match unit against known valid values
+    const validUnits = {
+      'days': 'Days', 'day': 'Days', 'dys': 'Days', 'das': 'Days', 'dae': 'Days', 'dag': 'Days', 'dage': 'Days',
+      'months': 'Months', 'month': 'Months', 'mnths': 'Months', 'mths': 'Months', 'mos': 'Months', 'maande': 'Months', 'maand': 'Months',
+      'years': 'Years', 'year': 'Years', 'yrs': 'Years', 'yr': 'Years', 'yeas': 'Years', 'jaar': 'Years', 'jare': 'Years',
+      'weeks': 'Weeks', 'week': 'Weeks', 'wks': 'Weeks', 'weke': 'Weeks',
+      'hours': 'Hours', 'hour': 'Hours', 'hrs': 'Hours', 'ure': 'Hours', 'uur': 'Hours',
+    };
+
+    // Exact match first
+    if (validUnits[unitRaw]) return num + ' ' + validUnits[unitRaw];
+
+    // Levenshtein fuzzy match
+    let bestUnit = unitRaw.charAt(0).toUpperCase() + unitRaw.slice(1);
+    let bestDist = 999;
+    for (const [key, val] of Object.entries(validUnits)) {
+      const d = levenshtein(unitRaw, key);
+      if (d < bestDist) { bestDist = d; bestUnit = val; }
+    }
+    // Accept fuzzy match if distance <= 2
+    if (bestDist <= 2) return num + ' ' + bestUnit;
+
+    // Can't fix - return capitalised
+    return num + ' ' + unitRaw.charAt(0).toUpperCase() + unitRaw.slice(1);
+  }
+
+  // ── Known form templates (positions as % of image width/height) ──
+  // Form templates - positions as % of image width/height
+  // Calibrated from actual scanned SA death certificates
+  // Form templates with anchor-relative positioning:
+  // - anchor: keywords to find the form title via OCR
+  // - anchorRef: expected position of the anchor on the reference/calibration image (as % of image)
+  // - fields: positions relative to the anchor reference
+  // On each image, OCR finds the anchor, computes offset + scale vs anchorRef, then shifts all fields
+  const FORM_TEMPLATES = {
+    'sa-death-1923': {
+      label: 'SA Death - Informasievorm (1923 Act, EN/AF bilingual)',
+      detect: ['informasievorm', 'sterfgeval'],
+      anchor: ['informasievorm', 'sterfgeval'],
+      anchorRef: { x: 0.22, y: 0.04, w: 0.56, h: 0.02 }, // title position on reference image
+      fields: {
+        'Name':           { x: 0.25, y: 0.08, w: 0.45, h: 0.06 },
+        'Residence Place':{ x: 0.25, y: 0.15, w: 0.55, h: 0.04 },
+        'Sex':            { x: 0.25, y: 0.22, w: 0.15, h: 0.03 },
+        'Age':            { x: 0.25, y: 0.25, w: 0.20, h: 0.03 },
+        'Event Date':     { x: 0.25, y: 0.38, w: 0.45, h: 0.03 },
+      }
+    },
+    'sa-death-1894': {
+      label: 'SA Death - Form of Information / Kennisgewing (Act/Wet 7 of 1894)',
+      detect: ['1894', 'act no', 'deceased', 'kennisgewing', 'oorledene', 'wet no'],
+      anchor: ['death:', 'act'],  // "DEATH: ACT No. 7 OF 1894" - compact, consistent
+      anchorRef: { x: 0.63, y: 0.09, w: 0.19, h: 0.01 },
+      fields: {
+        'Name':           { x: 0.51, y: 0.19, w: 0.42, h: 0.04 },  // 1. Christian Names and Surname
+        'Residence Place':{ x: 0.51, y: 0.22, w: 0.42, h: 0.03 },  // 2. Usual place of Residence
+        'Age':            { x: 0.51, y: 0.24, w: 0.20, h: 0.02 },  // 3. Age
+        'Sex':            { x: 0.51, y: 0.26, w: 0.15, h: 0.02 },  // 4. Race(a) - Sex
+        'Event Date':     { x: 0.51, y: 0.32, w: 0.40, h: 0.03 },  // 8. Date of Death
+      }
+    },
+    'sa-death-generic': {
+      label: 'SA Death - Generic (fallback)',
+      detect: ['death', 'dood', 'form of information'],
+      anchor: ['form', 'death'],
+      anchorRef: { x: 0.22, y: 0.04, w: 0.56, h: 0.02 },
+      fields: {
+        'Name':           { x: 0.25, y: 0.08, w: 0.45, h: 0.06 },
+        'Residence Place':{ x: 0.25, y: 0.15, w: 0.55, h: 0.04 },
+        'Sex':            { x: 0.25, y: 0.22, w: 0.15, h: 0.03 },
+        'Age':            { x: 0.25, y: 0.25, w: 0.20, h: 0.03 },
+        'Event Date':     { x: 0.25, y: 0.38, w: 0.45, h: 0.03 },
+      }
+    },
+    'sa-marriage-register': {
+      label: 'SA Marriage - Duplicate Original Marriage Register (EN/AF)',
+      detect: ['marriage', 'huwelik', 'huweliksregister', 'duplicate original marriage', 'duplikaat origineel'],
+      anchor: ['duplicate', 'marriage', 'register'],
+      anchorRef: { x: 0.12, y: 0.04, w: 0.50, h: 0.02 },
+      fields: {
+        'Husband Name':      { x: 0.08, y: 0.275, w: 0.19, h: 0.068 },   // husband name
+        'Husband Race':      { x: 0.05, y: 0.13, w: 0.10, h: 0.05 },    // race column
+        'Spouse':            { x: 0.19, y: 0.385, w: 0.19, h: 0.058 },  // wife/spouse name
+        'Spouse Race':       { x: 0.16, y: 0.20, w: 0.10, h: 0.05 },    // spouse race
+        'Place of Marriage': { x: 0.452, y: 0.175, w: 0.134, h: 0.055 },  // bottom-aligned at 0.23
+        'District':          { x: 0.628, y: 0.175, w: 0.128, h: 0.055 },  // bottom-aligned at 0.23
+        'Province':          { x: 0.817, y: 0.175, w: 0.13, h: 0.055 },   // bottom-aligned at 0.23
+        'Event Date':        { x: 0.16, y: 0.70, w: 0.29, h: 0.05 },     // "solemnized by me on this the ..."
+        'Marriage Date':     { x: 0.0, y: 0.43, w: 0.085, h: 0.14 },      // left edge of image
+      }
+    },
+    'sa-church-baptism': {
+      label: 'SA Church - Register of Baptisms (4 rows per page)',
+      detect: ['baptism', 'register of baptisms', 'diocese', 'doop', 'doopregister', 'gedoop'],
+      anchor: ['register', 'baptism'],
+      anchorRef: { x: 0.40, y: 0.03, w: 0.30, h: 0.03 },
+      fields: {
+        // Top of page: place, district, year
+        'Event Place':    { x: 0.10, y: 0.05, w: 0.30, h: 0.05 },
+        'District':       { x: 0.42, y: 0.05, w: 0.25, h: 0.05 },
+        'Event Year':     { x: 0.70, y: 0.05, w: 0.20, h: 0.05 },
+        // Row 1
+        'R1 Name':        { x: 0.11, y: 0.18, w: 0.13, h: 0.15 },
+        'R1 Birth Date':  { x: 0.25, y: 0.18, w: 0.10, h: 0.15 },
+        'R1 Event Date':  { x: 0.02, y: 0.18, w: 0.08, h: 0.15 },
+        'R1 Father':      { x: 0.36, y: 0.18, w: 0.16, h: 0.08 },
+        'R1 Mother':      { x: 0.36, y: 0.26, w: 0.16, h: 0.07 },
+        // Row 2
+        'R2 Name':        { x: 0.11, y: 0.35, w: 0.13, h: 0.15 },
+        'R2 Birth Date':  { x: 0.25, y: 0.35, w: 0.10, h: 0.15 },
+        'R2 Event Date':  { x: 0.02, y: 0.35, w: 0.08, h: 0.15 },
+        'R2 Father':      { x: 0.36, y: 0.35, w: 0.16, h: 0.08 },
+        'R2 Mother':      { x: 0.36, y: 0.43, w: 0.16, h: 0.07 },
+        // Row 3
+        'R3 Name':        { x: 0.11, y: 0.52, w: 0.13, h: 0.15 },
+        'R3 Birth Date':  { x: 0.25, y: 0.52, w: 0.10, h: 0.15 },
+        'R3 Event Date':  { x: 0.02, y: 0.52, w: 0.08, h: 0.15 },
+        'R3 Father':      { x: 0.36, y: 0.52, w: 0.16, h: 0.08 },
+        'R3 Mother':      { x: 0.36, y: 0.60, w: 0.16, h: 0.07 },
+        // Row 4
+        'R4 Name':        { x: 0.11, y: 0.69, w: 0.13, h: 0.15 },
+        'R4 Birth Date':  { x: 0.25, y: 0.69, w: 0.10, h: 0.15 },
+        'R4 Event Date':  { x: 0.02, y: 0.69, w: 0.08, h: 0.15 },
+        'R4 Father':      { x: 0.36, y: 0.69, w: 0.16, h: 0.08 },
+        'R4 Mother':      { x: 0.36, y: 0.77, w: 0.16, h: 0.07 },
+      }
+    },
+    'narrative': {
+      label: 'Narrative - Free-form handwritten text (letters, diaries, notes)',
+      detect: ['dear', 'sir', 'madam', 'letter', 'diary', 'note', 'beloved'],
+      anchor: [],
+      anchorRef: {},
+      fields: {
+        'Text Block': { x: 0.02, y: 0.02, w: 0.96, h: 0.96 },
+      }
+    },
+    // ── FamilySearch Data Safe (Scotland) templates (heratio#1336) ──
+    // Multi-record: `fields` is generated at runtime by fsGenerateFields() for
+    // the chosen "records per image" count (each block = one Data Safe record),
+    // using the full per-event field set in FS_RECORD_FIELDS. The operator drags
+    // the boxes and "Sync to server" saves the real layout per form type.
+    'fs-scotland-marriage': {
+      label: 'FamilySearch Data Safe - Scotland Marriage',
+      detect: ['marriage', 'married', 'when married', 'spinster', 'bachelor', 'register of marriages'],
+      anchor: ['marriage'], anchorRef: { x: 0.10, y: 0.05, w: 0.50, h: 0.03 }, fields: {},
+    },
+    'fs-scotland-birth': {
+      label: 'FamilySearch Data Safe - Scotland Birth',
+      detect: ['birth', 'born', 'when and where born', 'register of births'],
+      anchor: ['birth'], anchorRef: { x: 0.10, y: 0.05, w: 0.50, h: 0.03 }, fields: {},
+    },
+    'fs-scotland-death': {
+      label: 'FamilySearch Data Safe - Scotland Death',
+      detect: ['death', 'died', 'when and where died', 'deceased', 'register of deaths'],
+      anchor: ['death'], anchorRef: { x: 0.10, y: 0.05, w: 0.50, h: 0.03 }, fields: {},
+    },
+    'fs-scotland-baptism': {
+      label: 'FamilySearch Data Safe - Scotland Baptism',
+      detect: ['baptism', 'baptised', 'baptized', 'christened'],
+      anchor: ['baptism'], anchorRef: { x: 0.10, y: 0.05, w: 0.50, h: 0.03 }, fields: {},
+    },
+    'fs-scotland-burial': {
+      label: 'FamilySearch Data Safe - Scotland Burial',
+      detect: ['burial', 'buried', 'interment', 'interred'],
+      anchor: ['burial'], anchorRef: { x: 0.10, y: 0.05, w: 0.50, h: 0.03 }, fields: {},
+    },
+    'manual': {
+      label: 'Manual positioning (no template)',
+      detect: [],
+      fields: {}
+    }
+  };
+
+  // Populate form type dropdown + change handler
+  (function() {
+    const sel = document.getElementById('ba-form-type');
+    for (const [key, tpl] of Object.entries(FORM_TEMPLATES)) {
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = tpl.label;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', function() {
+      fsUpdateBar();
+      fsEnsureFields(); // generate FS record-band fields before they're read
+      if (img && images[imgIdx]) {
+        const newType = this.value === 'auto' ? 'sa-death-generic' : this.value;
+        currentFormType = newType;
+
+        // Rebuild COLUMNS from the new template's fields
+        const tpl = FORM_TEMPLATES[newType];
+        if (tpl && tpl.fields && Object.keys(tpl.fields).length > 0) {
+          COLUMNS = Object.keys(tpl.fields).filter(col => !shouldSkip(col));
+          // Ensure empty field values exist on current image
+          const entry = images[imgIdx];
+          if (entry) {
+            COLUMNS.forEach(col => { if (!entry.fields[col]) entry.fields[col] = ''; });
+          }
+        }
+
+        loadSavedPositions(() => {
+          applyFormTemplate(newType);
+          buildFieldList();
+          redraw();
+        });
+      }
+    });
+    fsUpdateBar(); // reflect initial selection
+  })();
+
+  // ── FamilySearch Data Safe (#1336): show the export bar for fs-scotland-*,
+  // and export one Data Safe row per image (entry.fields -> FS system names via
+  // FS_SYS, base fields from the filename), normalised server-side. ──
+  function fsUpdateBar() {
+    const t = document.getElementById('ba-form-type').value;
+    const bar = document.getElementById('ba-fs-bar');
+    if (bar) bar.style.display = isFsTemplate(t) ? '' : 'none';
+  }
+
+  // Mark the CURRENT image as a non-record of a given FS Image Type (No
+  // Extractable Data / Blank / Duplicate / Unreadable / Other). Stored on the
+  // image; the Data Safe export emits it as a non-record row (no event fields,
+  // Language 'und'). Per the FamilySearch rules, every image needs a row.
+  window.fsSetImageType = function(v) {
+    const st = document.getElementById('ba-fs-status');
+    if (typeof images === 'undefined' || !images || !images[imgIdx]) {
+      if (st) st.textContent = 'Load an image first.';
+      return;
+    }
+    images[imgIdx]._imageType = v;
+    const nm = images[imgIdx].fname || 'image';
+    if (st) st.textContent = v
+      ? ('Marked "' + nm + '" as ' + v + ' (no record) - it will be in the CSV with Language "und".')
+      : ('"' + nm + '" set back to a data record.');
+  };
+
+  window.fsDownloadDataSafeCsv = function() {
+    const t = document.getElementById('ba-form-type').value;
+    const st = document.getElementById('ba-fs-status');
+    if (!isFsTemplate(t)) { if (st) st.textContent = 'Select a FamilySearch Data Safe form type first.'; return; }
+    if (!images || !images.length) { if (st) st.textContent = 'No images loaded.'; return; }
+    const eventType = FS_EVENT_TYPE[t];
+    const coll = document.getElementById('ba-fs-collection').value.trim();
+    const ppq = document.getElementById('ba-fs-ppq').value.trim();
+    const base = (fname, dgs, imgNbr) => ({ _src: fname, FS_COLLECTION_ID: coll, FS_PPQ_ID: ppq, FS_DIGITAL_FILM_NBR: dgs, FS_IMAGE_NBR: imgNbr });
+    const rows = [];
+    images.forEach(entry => {
+      const fname = entry.fname || '';
+      const dgs = (fname.match(/(\d{9})/) || [])[1] || '';
+      let imgNbr = (fname.match(/_(\d{1,5})\.[A-Za-z]+$/) || fname.match(/(\d{1,5})\.[A-Za-z]+$/) || [])[1] || '';
+      if (imgNbr) imgNbr = imgNbr.padStart(5, '0');
+
+      // Non-record image (operator marked an Image Type): no event fields,
+      // Language 'und', Event Type blank - per the FamilySearch rules.
+      if (entry._imageType) {
+        rows.push(Object.assign(base(fname, dgs, imgNbr), {
+          EVENT_TYPE: '', FS_IMAGE_TYPE: entry._imageType, FS_LANGUAGE: 'und', FS_RECORD_NBR: '',
+        }));
+        return;
+      }
+
+      // Group the R{n} fields into one Data Safe record per block.
+      const f = entry.fields || {};
+      const recs = {};
+      Object.keys(f).forEach(label => {
+        const m = label.match(/^R(\d+)\s+(.*)$/);
+        if (!m) return;
+        const sys = FS_SYS[m[2]];
+        const val = (f[label] || '').toString().trim();
+        if (sys && val) { (recs[m[1]] = recs[m[1]] || {})[sys] = val; }
+      });
+      // One CSV row per block that has a name; FS_RECORD_NBR resets per image.
+      let rnbr = 0;
+      Object.keys(recs).sort((a, b) => a - b).forEach(n => {
+        const rec = recs[n];
+        const hasName = rec.PR_NAME_GN_ORIG || rec.PR_NAME_SURN_ORIG || rec.SP_NAME_GN_ORIG || rec.SP_NAME_SURN_ORIG;
+        if (!hasName) return; // rule: a record is only created when there is a name
+        rows.push(Object.assign(base(fname, dgs, imgNbr), {
+          EVENT_TYPE: eventType, FS_LANGUAGE: 'en', FS_IMAGE_TYPE: '', FS_RECORD_NBR: String(rnbr++),
+        }, rec));
+      });
+    });
+    if (!rows.length) { if (st) st.textContent = 'Nothing to export - key at least one name, or set an Image Type.'; return; }
+    const dgsName = (document.getElementById('ba-folder').value.split('/').filter(Boolean).pop() || 'export');
+    if (st) st.textContent = 'Building CSV for ' + rows.length + ' image(s)…';
+    fetch('{{ route("admin.ai.htr.fsIndexCsvRows") }}', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
+      body: JSON.stringify({ rows, dgs: dgsName, normalize: true }),
+    }).then(r => r.blob()).then(b => {
+      const a = document.createElement('a'); a.href = URL.createObjectURL(b);
+      a.download = 'fs-scotland-' + dgsName + '.csv';
+      document.body.appendChild(a); a.click(); a.remove();
+      if (st) st.textContent = 'Downloaded Data Safe CSV (' + rows.length + ' rows).';
+    }).catch(e => { if (st) st.textContent = 'Export failed: ' + e.message; });
+  };
+
+  // Auto-detect form type from first image OCR
+  function detectFormType(ocrWords) {
+    const allText = ocrWords.map(w => (typeof w === 'string' ? w : (w.text || '')).toLowerCase()).join(' ');
+    let bestType = 'manual';
+    let bestScore = 0;
+
+    for (const [key, tpl] of Object.entries(FORM_TEMPLATES)) {
+      if (!tpl.detect || !tpl.detect.length) continue;
+      let score = 0;
+      for (const kw of tpl.detect) {
+        if (allText.includes(kw)) score++;
+      }
+      // Normalize score by number of detect keywords (higher % match = better fit)
+      const normalized = score / tpl.detect.length;
+      if (score > 0 && (score > bestScore || (score === bestScore && normalized > (bestScore / (FORM_TEMPLATES[bestType]?.detect?.length || 1))))) {
+        bestScore = score;
+        bestType = key;
+      }
+    }
+
+    if (bestScore === 0) {
+      bestType = 'sa-death-generic'; // fallback only when nothing matches at all
+      document.getElementById('ba-image-name').textContent += ' - UNRECOGNISED FORM (using generic, select form type manually)';
+    } else {
+      const tpl = FORM_TEMPLATES[bestType];
+      document.getElementById('ba-image-name').textContent += ' - Detected: ' + (tpl ? tpl.label : bestType);
+    }
+
+    return bestType;
+  }
+
+  // Current anchor detection result (set by OCR)
+  let detectedAnchor = null;
+
+  // Apply form template - positions fields relative to detected anchor
+  function applyFormTemplate(templateKey, anchor) {
+    const tpl = FORM_TEMPLATES[templateKey];
+    if (!tpl) return;
+
+    currentFormType = templateKey;
+    document.getElementById('ba-form-type').value = templateKey;
+
+    // FS: restore the records-per-image count from the saved layout (highest
+    // R{n} in savedPositions) so every saved band reappears, then regenerate the
+    // band fields before COLUMNS is rebuilt. Without this a multi-record layout
+    // collapses to 1 record on reload and looks like the save was lost. #1336.
+    if (isFsTemplate(templateKey)) {
+      let maxR = 1;
+      Object.keys(savedPositions || {}).forEach(k => { const m = k.match(/^R(\d+)\s/); if (m) maxR = Math.max(maxR, +m[1]); });
+      const recSel = document.getElementById('ba-fs-records');
+      if (recSel) recSel.value = String(Math.min(maxR, 8));
+      fsEnsureFields();
+    }
+
+    // Rebuild COLUMNS from the template's fields so the correct fields appear
+    if (tpl.fields && Object.keys(tpl.fields).length > 0) {
+      COLUMNS = Object.keys(tpl.fields).filter(col => !shouldSkip(col));
+      // Ensure empty field values exist on current image
+      const entry = images[imgIdx];
+      if (entry) {
+        COLUMNS.forEach(col => { if (!entry.fields[col]) entry.fields[col] = ''; });
+      }
+    }
+
+    // If we have a detected anchor AND the template has an anchor reference,
+    // compute offset + scale to adjust all field positions
+    // Anchor-relative adjustment: shift field positions based on where the title was found
+    let offsetXPct = 0, offsetYPct = 0, scaleX = 1, scaleY = 1;
+    if (anchor && tpl.anchorRef && anchor.w_pct > 0.1) {
+      // Only trust anchor if it's wide enough (>10% of image = real title, not a stray word)
+      offsetXPct = anchor.x_pct - tpl.anchorRef.x;
+      offsetYPct = anchor.y_pct - tpl.anchorRef.y;
+      if (tpl.anchorRef.w > 0) {
+        scaleX = anchor.w_pct / tpl.anchorRef.w;
+        scaleY = scaleX;
+      }
+      // Sanity check: if offset or scale is too extreme, ignore anchor
+      if (Math.abs(offsetXPct) > 0.3 || Math.abs(offsetYPct) > 0.3 || scaleX < 0.5 || scaleX > 2) {
+        console.log('[FS Overlay] Anchor unreliable, ignoring. offset=(' + offsetXPct.toFixed(3) + ',' + offsetYPct.toFixed(3) + ') scale=' + scaleX.toFixed(3));
+        offsetXPct = 0; offsetYPct = 0; scaleX = 1; scaleY = 1;
+      } else {
+        console.log('[FS Overlay] Anchor adjustment: offset=(' + offsetXPct.toFixed(3) + ',' + offsetYPct.toFixed(3) + ') scale=' + scaleX.toFixed(3));
+      }
+    }
+
+    const entry = images[imgIdx];
+    annotations = [];
+    skipped = [];
+
+    COLUMNS.forEach(function(col, i) {
+      const val = entry.fields[col] || '';
+      if (shouldSkip(col)) { skipped.push(i); annotations.push(null); return; }
+
+      // Priority: 1) server-saved positions, 2) anchor-adjusted template, 3) raw template, 4) default
+      if (savedPositions[col]) {
+        const sp = savedPositions[col];
+        annotations.push({ label: col, value: val,
+          x: Math.round(sp.x * imgNatW), y: Math.round(sp.y * imgNatH),
+          w: Math.round(sp.w * imgNatW), h: Math.round(sp.h * imgNatH),
+        });
+      } else if (tpl.fields[col]) {
+        const f = tpl.fields[col];
+        // Apply anchor offset + scale
+        const adjX = (f.x + offsetXPct) * scaleX + (1 - scaleX) * tpl.anchorRef.x;
+        const adjY = (f.y + offsetYPct) * scaleY + (1 - scaleY) * tpl.anchorRef.y;
+        const adjW = f.w * scaleX;
+        const adjH = f.h * scaleY;
+        annotations.push({
+          label: col, value: val,
+          x: Math.round(adjX * imgNatW),
+          y: Math.round(adjY * imgNatH),
+          w: Math.round(adjW * imgNatW),
+          h: Math.round(adjH * imgNatH),
+        });
+      } else {
+        // No template position - stack below others
+        const activeIdx = annotations.filter(a => a).length;
+        annotations.push({
+          label: col, value: val,
+          x: Math.round(imgNatW * 0.05),
+          y: Math.round(imgNatH * 0.08) + activeIdx * Math.round(imgNatH / 15),
+          w: Math.round(imgNatW * 0.45),
+          h: Math.round(imgNatH * 0.04),
+        });
+      }
+    });
+
+    highlightField();
+    updateProgress();
+    annotations.forEach(function(ann, i) {
+      if (!ann) return;
+      const c = document.getElementById('ba-coords-' + i);
+      if (c) c.textContent = Math.round(ann.x) + ',' + Math.round(ann.y) + ' ' + Math.round(ann.w) + '×' + Math.round(ann.h);
+    });
+  }
+
+  window.baSetTool = function(t) {
+    currentTool = t;
+    document.getElementById('ba-tool-hand').classList.toggle('active', t === 'hand');
+    document.getElementById('ba-tool-draw').classList.toggle('active', t === 'draw');
+    document.getElementById('ba-tool-select').classList.toggle('active', t === 'select');
+    cvs.style.setProperty('cursor', t === 'hand' ? 'grab' : (t === 'draw' ? 'crosshair' : 'default'), 'important');
+  };
+
+  function hitTest(px, py) {
+    for (let i = annotations.length - 1; i >= 0; i--) {
+      const a = annotations[i];
+      if (!a) continue;
+      if (px >= a.x && px <= a.x + a.w && py >= a.y && py <= a.y + a.h) return i;
+    }
+    return -1;
+  }
+
+  function hitResize(px, py) {
+    const margin = 8 / scale;
+    for (let i = annotations.length - 1; i >= 0; i--) {
+      const a = annotations[i];
+      if (!a) continue;
+      // Corners
+      if (Math.abs(px - a.x) < margin && Math.abs(py - a.y) < margin) return {idx: i, handle: 'tl'};
+      if (Math.abs(px - (a.x + a.w)) < margin && Math.abs(py - a.y) < margin) return {idx: i, handle: 'tr'};
+      if (Math.abs(px - a.x) < margin && Math.abs(py - (a.y + a.h)) < margin) return {idx: i, handle: 'bl'};
+      if (Math.abs(px - (a.x + a.w)) < margin && Math.abs(py - (a.y + a.h)) < margin) return {idx: i, handle: 'br'};
+      // Edges
+      if (Math.abs(px - a.x) < margin && py >= a.y && py <= a.y + a.h) return {idx: i, handle: 'left'};
+      if (Math.abs(px - (a.x + a.w)) < margin && py >= a.y && py <= a.y + a.h) return {idx: i, handle: 'right'};
+      if (Math.abs(py - a.y) < margin && px >= a.x && px <= a.x + a.w) return {idx: i, handle: 'top'};
+      if (Math.abs(py - (a.y + a.h)) < margin && px >= a.x && px <= a.x + a.w) return {idx: i, handle: 'bottom'};
+    }
+    return null;
+  }
+
+  const cvs = document.getElementById('ba-canvas');
+  const ctx = cvs.getContext('2d');
+  const wrap = document.getElementById('ba-wrap');
+
+  // ── Auto-refresh spreadsheet dropdown when folder changes ──
+  let folderRefreshTimer = null;
+  document.getElementById('ba-folder').addEventListener('change', refreshSpreadsheets);
+  document.getElementById('ba-folder').addEventListener('blur', refreshSpreadsheets);
+  document.getElementById('ba-folder').addEventListener('keyup', function() {
+    clearTimeout(folderRefreshTimer);
+    folderRefreshTimer = setTimeout(refreshSpreadsheets, 500);
+  });
+
+  function refreshSpreadsheets() {
+    const folder = document.getElementById('ba-folder').value.trim();
+    if (!folder) return;
+    const ssSelect = document.getElementById('ba-spreadsheet');
+
+    fetch('{{ route("admin.ai.htr.fsOverlayLoad") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}'},
+      body: JSON.stringify({ folder: folder }),
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.needsSelection) {
+        ssSelect.innerHTML = '<option value="__none__">No spreadsheet (images only)</option>';
+        (data.spreadsheets || []).forEach(name => {
+          const opt = document.createElement('option');
+          opt.value = name;
+          opt.textContent = name;
+          ssSelect.appendChild(opt);
+        });
+        // Auto-select the spreadsheet if only one exists
+        if (data.spreadsheets && data.spreadsheets.length === 1) {
+          ssSelect.value = data.spreadsheets[0];
+        }
+        // If no spreadsheets at all, auto-select "No spreadsheet"
+        if (data.noSpreadsheets) {
+          ssSelect.value = '__none__';
+        }
+      }
+    })
+    .catch(() => {});
+  }
+
+  // Load spreadsheets on page load
+  refreshSpreadsheets();
+
+  // ── Load data (two-step: list spreadsheets → select → load) ──
+  window.loadBulkData = function() {
+    const folder = document.getElementById('ba-folder').value.trim();
+    if (!folder) { alert('Enter folder path'); return; }
+
+    const btn = document.getElementById('ba-load-btn');
+    const ssSelect = document.getElementById('ba-spreadsheet');
+    const selectedSS = ssSelect.value;
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Loading...';
+
+    fetch('{{ route("admin.ai.htr.fsOverlayLoad") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}'},
+      body: JSON.stringify({ folder: folder, spreadsheet: selectedSS }),
+    })
+    .then(r => r.json())
+    .then(data => {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-upload me-1"></i>Load';
+      if (!data.success) { alert(data.error || 'Load failed'); return; }
+
+      // Step 1: populate spreadsheet dropdown
+      if (data.needsSelection) {
+        ssSelect.innerHTML = '<option value="__none__">No spreadsheet (images only)</option>';
+        (data.spreadsheets || []).forEach(name => {
+          const opt = document.createElement('option');
+          opt.value = name;
+          opt.textContent = name;
+          ssSelect.appendChild(opt);
+        });
+        // Auto-select if only one spreadsheet
+        if (data.spreadsheets && data.spreadsheets.length === 1) {
+          ssSelect.value = data.spreadsheets[0];
+          loadBulkData(); // re-call with selection
+        }
+        // If no spreadsheets at all, auto-load in images-only mode
+        if (data.noSpreadsheets) {
+          ssSelect.value = '__none__';
+          loadBulkData(); // re-call with __none__
+        }
+        return;
+      }
+
+      // Step 2: data loaded
+      images = data.images;
+      // Snapshot original CSV values - these are ground truth, never overwrite
+      // Exclude fields that are always cleared (user reads from document)
+      const CSV_CLEAR = ['Event Date'];
+      images.forEach(img => {
+        img._csvFields = {};
+        for (const [k, v] of Object.entries(img.fields || {})) {
+          if (v && v.trim() && !CSV_CLEAR.includes(k)) img._csvFields[k] = v.trim();
+        }
+      });
+      COLUMNS = (data.columns || []).filter(col => !shouldSkip(col));
+      imgIdx = -1;
+      document.getElementById('ba-workspace').style.display = '';
+      document.getElementById('ba-remaining-count').textContent = images.length;
+
+      if (COLUMNS.length === 0 && images.length > 0) {
+        COLUMNS = Object.keys(images[0].fields).filter(col => !shouldSkip(col));
+      }
+
+      // Ensure all template fields are in COLUMNS (even if not in CSV)
+      // So user can always draw boxes for Name, Cause of Death, etc.
+      const selFormType = document.getElementById('ba-form-type').value;
+      const tplKey = (selFormType && selFormType !== 'auto') ? selFormType : 'sa-death-generic';
+      const tpl = FORM_TEMPLATES[tplKey];
+      if (tpl && tpl.fields) {
+        for (const fieldName of Object.keys(tpl.fields)) {
+          if (shouldSkip(fieldName)) continue;
+          if (!COLUMNS.includes(fieldName)) {
+            COLUMNS.push(fieldName);
+            // Add empty field value to all images
+            images.forEach(img => { if (!img.fields[fieldName]) img.fields[fieldName] = ''; });
+          }
+        }
+      }
+
+      currentFolder = folder;
+
+      // Resume from where we left off (saved in localStorage per folder)
+      const resumeKey = 'fs-overlay-resume-' + folder.replace(/[^a-zA-Z0-9]/g, '_');
+      const resumeIdx = parseInt(localStorage.getItem(resumeKey) || '0', 10);
+      if (resumeIdx > 0 && resumeIdx < images.length) {
+        imgIdx = resumeIdx - 1; // nextImage() will increment
+        console.log('[FS Overlay] Resuming from image', resumeIdx + 1, '/', images.length);
+      }
+
+      // Form type: use dropdown selection or default
+      const selType = document.getElementById('ba-form-type').value;
+      if (selType && selType !== 'auto') {
+        currentFormType = selType;
+      } else {
+        currentFormType = 'sa-death-generic'; // will be refined by auto-detect
+      }
+
+      // Load saved positions for current form type from server
+      loadSavedPositions(() => {
+        console.log('[FS Overlay] Starting with form type:', currentFormType, 'saved fields:', Object.keys(savedPositions));
+        nextImage();
+        baSetTool('select');
+      });
+    })
+    .catch(err => {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-upload me-1"></i>Load';
+      alert(err.message);
+    });
+  };
+
+  function nextImage() {
+    imgIdx++;
+    if (imgIdx >= images.length) { alert('All images annotated!'); return; }
+    fieldIdx = 0;
+    annotations = [];
+    skipped = [];
+    const donutCard = document.getElementById('ba-donut-card');
+    if (donutCard) donutCard.style.display = 'none';
+    donutYear = '';
+    autoRecogTimers.forEach(t => clearTimeout(t));
+    autoRecogTimers = [];
+    loadImage(); // buildFieldList() is called inside afterFieldsPlaced() after image loads
+    updateCounters();
+  }
+
+  function loadImage() {
+    const entry = images[imgIdx];
+    document.getElementById('ba-image-name').textContent = entry.fname + ' (' + (imgIdx + 1) + '/' + images.length + ')';
+    document.getElementById('ba-counter').textContent = (imgIdx + 1) + '/' + images.length;
+
+    img = new Image();
+    img.onload = function() {
+      imgNatW = img.naturalWidth || img.width;
+      imgNatH = img.naturalHeight || img.height;
+      offsetX = 0; offsetY = 0; cvs.style.transform = '';
+      scale = wrap.clientWidth / imgNatW;
+      cvs.width = imgNatW * scale;
+      cvs.height = imgNatH * scale;
+
+      const selectedType = document.getElementById('ba-form-type').value;
+
+      function afterFieldsPlaced() {
+        // Debug: show what we have
+        const annCount = annotations.filter(a => a).length;
+        console.log('[FS Overlay] COLUMNS:', COLUMNS, 'annotations:', annCount, 'skipped:', skipped.length, 'img:', img.width, 'x', img.height, 'savedPos:', Object.keys(savedPositions));
+        if (annCount === 0) {
+          console.warn('[FS Overlay] No annotations created. COLUMNS:', COLUMNS.join(', '), 'Form type:', currentFormType);
+        }
+        buildFieldList();
+        redraw();
+        if (autoRecogEnabled) setTimeout(baRecognise, 500);
+        // Auto-trigger Donut to pre-fill ILM values + positions
+        setTimeout(baDonutPrefill, 300);
+      }
+
+      // If a specific form type is selected, always use template positions
+      if (selectedType && selectedType !== 'auto') {
+        currentFormType = selectedType;
+        // Always rebuild COLUMNS + apply template for the selected form type
+        const tpl = FORM_TEMPLATES[selectedType];
+        if (tpl && tpl.fields && Object.keys(tpl.fields).length > 0) {
+          COLUMNS = Object.keys(tpl.fields).filter(col => !shouldSkip(col));
+          const e = images[imgIdx];
+          if (e) COLUMNS.forEach(col => { if (!e.fields[col]) e.fields[col] = ''; });
+        }
+        applyFormTemplate(selectedType);
+        afterFieldsPlaced();
+      } else if (COLUMNS.some(col => savedPositions[col])) {
+        autoPlaceFields();
+        afterFieldsPlaced();
+      } else {
+        // No form type selected - use OCR label detection if Detect is on
+        const autoDetectLabels = document.getElementById('ba-auto-detect')?.checked;
+        if (autoDetectLabels) {
+          ocrAndPlace(entry);
+          if (autoRecogEnabled) setTimeout(baRecognise, 1500);
+          return;
+        }
+        // Auto-detect: quick OCR to identify form type, then apply template
+        document.getElementById('ba-image-name').textContent += ' - detecting form type...';
+        fetch('{{ route("admin.ai.htr.fsOverlayOcr") }}', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}'},
+          body: JSON.stringify({ image_path: entry.path, fields: [] }),
+        })
+        .then(r => r.json())
+        .then(data => {
+          if (data.success && data.words) {
+            const formType = detectFormType(data.words);
+            detectedAnchor = data.anchor || null;
+            currentFormType = formType;
+            loadSavedPositions(() => {
+              applyFormTemplate(formType, detectedAnchor);
+              afterFieldsPlaced();
+            });
+          } else {
+            currentFormType = 'sa-death-generic';
+            detectedAnchor = null;
+            loadSavedPositions(() => {
+              applyFormTemplate('sa-death-generic');
+              afterFieldsPlaced();
+            });
+          }
+        })
+        .catch(() => { applyFormTemplate('sa-death-generic'); afterFieldsPlaced(); });
+      }
+    };
+    img.src = '{{ route("admin.ai.htr.serveCroppedImage") }}?path=' + encodeURIComponent(entry.path) + '&_=' + Date.now();
+  }
+
+  // ── Auto-place: position all field boxes on the image ──
+  // Priority: 1) saved positions from previous images, 2) smart defaults
+  function autoPlaceFields() {
+    const entry = images[imgIdx];
+    annotations = [];
+
+    // Count non-empty fields to calculate spacing
+    const activeFields = COLUMNS.filter(col => entry.fields[col]);
+    const fieldCount = activeFields.length;
+
+    // Smart default sizing - spread fields vertically across the document
+    const imgW = img.width;
+    const imgH = img.height;
+    const boxW = Math.round(imgW * 0.45);  // ~45% of image width
+    const boxH = Math.round(Math.min(60, imgH / (fieldCount + 2))); // tall enough to read
+    const startX = Math.round(imgW * 0.05); // 5% margin from left
+    const startY = Math.round(imgH * 0.08); // start 8% from top
+    const spacing = Math.round((imgH * 0.85) / Math.max(fieldCount, 1)); // even vertical spacing
+    let activeIdx = 0;
+
+    COLUMNS.forEach(function(col, i) {
+      const val = entry.fields[col] || '';
+      if (shouldSkip(col)) { skipped.push(i); annotations.push(null); return; }
+
+      // Use saved position if we have one for this column
+      if (savedPositions[col]) {
+        const sp = savedPositions[col];
+        annotations.push({
+          label: col,
+          value: val,
+          x: Math.round(sp.x * imgNatW),
+          y: Math.round(sp.y * imgNatH),
+          w: Math.round(sp.w * imgNatW),
+          h: Math.round(sp.h * imgNatH),
+        });
+      } else {
+        // Smart default: distribute evenly down the page
+        annotations.push({
+          label: col,
+          value: val,
+          x: startX,
+          y: startY + activeIdx * spacing,
+          w: boxW,
+          h: boxH,
+        });
+      }
+      activeIdx++;
+    });
+
+    highlightField();
+    updateProgress();
+
+    // Update coord displays
+    annotations.forEach(function(ann, i) {
+      if (!ann) return;
+      const c = document.getElementById('ba-coords-' + i);
+      if (c) c.textContent = Math.round(ann.x) + ',' + Math.round(ann.y) + ' ' + Math.round(ann.w) + '×' + Math.round(ann.h);
+    });
+  }
+
+  // ── OCR labels: detect printed form labels and position boxes there ──
+  function ocrAndPlace(entry) {
+    // Capture the form type this OCR run is for; its async response must not
+    // clobber a different/restored layout if the operator switches templates.
+    const _ocrStartedFor = currentFormType;
+    document.getElementById('ba-image-name').textContent += ' - OCR detecting labels...';
+
+    // Send ALL allowed fields for detection, not just ones with CSV data
+    const activeFields = ALLOWED_FIELDS.slice();
+
+    fetch('{{ route("admin.ai.htr.fsOverlayOcr") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}'},
+      body: JSON.stringify({
+        image_path: entry.path,
+        fields: activeFields,
+      }),
+    })
+    .then(r => r.json())
+    .then(data => {
+      // #1331/#1336: ignore a stale OCR result. If the operator switched form
+      // types since this run started, or the active template is an FS Data Safe
+      // one (which uses the saved manual layout, not printed-label OCR), this
+      // late response would wipe the restored/saved positions ("Sync not saving").
+      if (currentFormType !== _ocrStartedFor || isFsTemplate(currentFormType)) {
+        console.log('[FS Overlay] OCR result ignored (form type changed or FS template)');
+        return;
+      }
+      if (data.success && data.positions) {
+        // Apply OCR-detected positions
+        const positions = data.positions;
+        annotations = [];
+        let phraseCount = 0, contextCount = 0, kwCount = 0;
+        COLUMNS.forEach(function(col, i) {
+          const val = entry.fields[col] || '';
+          if (shouldSkip(col)) { skipped.push(i); annotations.push(null); return; }
+
+          if (positions[col]) {
+            const p = positions[col];
+            const ann = {
+              label: col,
+              value: val,
+              x: p.x,
+              y: p.y,
+              w: p.w,
+              h: p.h,
+              // Store detected label position for highlighting
+              labelBox: p.label_x !== undefined ? { x: p.label_x, y: p.label_y, w: p.label_w, h: p.label_h } : null,
+              labelText: p.label_text || null,
+              matchStrategy: p.match_strategy || null,
+            };
+            annotations.push(ann);
+            // Save as reference for next images
+            savedPositions[col] = { x: p.x / imgNatW, y: p.y / imgNatH, w: p.w / imgNatW, h: p.h / imgNatH };
+            // Track match quality
+            if (p.match_strategy === 'phrase') phraseCount++;
+            else if (p.match_strategy === 'keyword+context') contextCount++;
+            else kwCount++;
+            // Show match info in sidebar
+            const coordsEl = document.getElementById('ba-coords-' + i);
+            if (coordsEl) {
+              const prev = coordsEl.parentNode.querySelector('.ba-recog');
+              if (prev) prev.remove();
+              const badge = document.createElement('div');
+              badge.className = 'ba-recog';
+              const color = p.match_strategy === 'phrase' ? '#198754' : (p.match_strategy === 'keyword+context' ? '#0d6efd' : '#6c757d');
+              badge.style.cssText = 'font-size:0.7rem; color:' + color + ';';
+              badge.innerHTML = '<i class="fas fa-crosshairs" style="font-size:0.6rem"></i> ' + (p.match_strategy || 'keyword') + ': "' + (p.label_text || '').replace(/</g,'&lt;') + '"';
+              coordsEl.parentNode.appendChild(badge);
+            }
+          } else {
+            // No OCR match - use default position
+            const activeIdx = annotations.filter(a => a).length;
+            annotations.push({
+              label: col,
+              value: val,
+              x: 20,
+              y: 50 + activeIdx * Math.round(imgNatH / (activeFields.length + 2)),
+              w: Math.round(imgNatW * 0.45),
+              h: 40,
+            });
+          }
+        });
+
+        // Persist the OCR-detected positions to server
+        persistPositions();
+
+        highlightField();
+        updateProgress();
+        annotations.forEach(function(ann, i) {
+          if (!ann) return;
+          const c = document.getElementById('ba-coords-' + i);
+          if (c) c.textContent = Math.round(ann.x) + ',' + Math.round(ann.y) + ' ' + Math.round(ann.w) + '×' + Math.round(ann.h);
+        });
+        redraw();
+
+        const summary = phraseCount + ' phrase, ' + contextCount + ' context, ' + kwCount + ' keyword';
+        document.getElementById('ba-image-name').textContent = entry.fname + ' (' + (imgIdx + 1) + '/' + images.length + ') - ' + Object.keys(positions).length + ' labels detected (' + summary + ')';
+      } else {
+        // OCR failed - fall back to default placement
+        autoPlaceFields();
+        redraw();
+      }
+    })
+    .catch(() => {
+      autoPlaceFields();
+      redraw();
+    });
+  }
+
+  // Reset saved positions (start fresh)
+  // Save the current layout (and any localStorage positions) to the server, and
+  // report the REAL result - awaited, status-checked, no blocking alert. The old
+  // version fired POSTs without awaiting and always claimed success, so a 419
+  // (stale CSRF) silently lost the layout. #1336.
+  window.baMigrateToServer = async function() {
+    const btn = document.getElementById('ba-migrate-btn');
+    const csrf = document.querySelector('meta[name="csrf-token"]')?.content || '{{ csrf_token() }}';
+    const fsStatus = document.getElementById('ba-fs-status');
+    const setStatus = m => { if (fsStatus) fsStatus.textContent = m; };
+    const save = (formType, positions) => fetch('{{ route("admin.ai.htr.fsOverlaySavePositions") }}', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf, 'Accept': 'application/json' },
+      body: JSON.stringify({ form_type: formType, positions }),
+    }).then(r => r.ok).catch(() => false);
+
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Syncing...';
+
+    // savedPositions must be a plain object - a stray [] eats string-keyed writes.
+    if (! savedPositions || typeof savedPositions !== 'object' || Array.isArray(savedPositions)) savedPositions = {};
+
+    // Capture the CURRENT position of EVERY placed box. Template/auto-grid boxes
+    // live in `annotations` but were never written to savedPositions, so a plain
+    // Sync used to persist only the boxes the operator had dragged - the rest
+    // reverted to the grid on reload ("Sync not saving field positions"). Snapshot
+    // all annotations into savedPositions so Sync saves the full visible layout. #1331.
+    if (typeof annotations !== 'undefined' && Array.isArray(annotations) && imgNatW > 0 && imgNatH > 0) {
+      annotations.forEach(function (a) {
+        if (a && a.label && a.w > 0 && a.h > 0) {
+          savedPositions[a.label] = { x: a.x / imgNatW, y: a.y / imgNatH, w: a.w / imgNatW, h: a.h / imgNatH };
+        }
+      });
+    }
+
+    const jobs = [];
+    // Current in-memory layout first (the most up-to-date).
+    if (currentFormType && Object.keys(savedPositions).length) jobs.push(save(currentFormType, savedPositions));
+    // Plus any localStorage-only layouts (e.g. saved while the session was expired).
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith('fs-overlay-pos-')) continue;
+      if (key === 'fs-overlay-pos-' + currentFormType) continue;
+      try { jobs.push(save(key.replace('fs-overlay-pos-', ''), JSON.parse(localStorage.getItem(key)))); } catch (e) {}
+    }
+    const results = await Promise.all(jobs);
+    const ok = results.filter(Boolean).length, fail = results.length - ok;
+    btn.disabled = false;
+    if (fail === 0 && ok > 0) {
+      btn.innerHTML = '<i class="fas fa-check me-1"></i>Synced (' + ok + ')';
+      setStatus('Saved ' + ok + ' layout(s) to the server.');
+    } else if (ok > 0) {
+      btn.innerHTML = '<i class="fas fa-cloud-upload-alt me-1"></i>Sync to server';
+      setStatus('Saved ' + ok + ', FAILED ' + fail + ' (session may have expired - refresh and retry).');
+    } else {
+      btn.innerHTML = '<i class="fas fa-cloud-upload-alt me-1"></i>Sync to server';
+      setStatus(jobs.length ? 'Save FAILED (session expired? refresh the page and retry).' : 'Nothing to sync - position some boxes first.');
+    }
+  };
+
+  window.baResetPositions = function() {
+    if (!confirm('Clear all saved field positions? You will need to reposition on the next image.')) return;
+    savedPositions = {};
+    persistPositions(); // clear on server too
+    autoPlaceFields();
+    redraw();
+  };
+
+  // ── Manual crop: mark area, then crop ──
+  let cropMode = false;
+  let cropRect = null; // {x, y, w, h} in image coords
+
+  window.baStartCropDraw = function() {
+    cropMode = true;
+    cropRect = null;
+    baSetTool('draw');
+    const drawBtn = document.getElementById('ba-crop-draw-btn');
+    drawBtn.innerHTML = '<i class="fas fa-crop-alt me-1"></i>Drawing...';
+    drawBtn.classList.add('active');
+    document.getElementById('ba-crop-do-btn').classList.add('d-none');
+    document.getElementById('ba-image-name').textContent += ' - DRAW CROP RECTANGLE';
+  };
+
+  // Called from draw mouseup when cropMode is on - just stores the rect and shows it
+  function handleCropDraw(x, y, w, h) {
+    cropMode = false;
+    cropRect = { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
+
+    const drawBtn = document.getElementById('ba-crop-draw-btn');
+    drawBtn.innerHTML = '<i class="fas fa-crop-alt me-1"></i>Mark area';
+    drawBtn.classList.remove('active');
+
+    // Show the "Crop now" button
+    const doBtn = document.getElementById('ba-crop-do-btn');
+    doBtn.classList.remove('d-none');
+    doBtn.innerHTML = '<i class="fas fa-cut me-1"></i>Crop now (' + cropRect.w + '×' + cropRect.h + ')';
+
+    // Draw the crop rect on canvas
+    redraw();
+    ctx.save();
+    // Dim everything outside the crop rect
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, cvs.width, cropRect.y * scale);
+    ctx.fillRect(0, (cropRect.y + cropRect.h) * scale, cvs.width, cvs.height);
+    ctx.fillRect(0, cropRect.y * scale, cropRect.x * scale, cropRect.h * scale);
+    ctx.fillRect((cropRect.x + cropRect.w) * scale, cropRect.y * scale, cvs.width, cropRect.h * scale);
+    // Green border on crop rect
+    ctx.strokeStyle = '#00ff00';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(cropRect.x * scale, cropRect.y * scale, cropRect.w * scale, cropRect.h * scale);
+    ctx.restore();
+
+    baSetTool('select');
+  };
+
+  window.baDoCrop = function() {
+    if (!cropRect) { alert('Draw a crop area first'); return; }
+
+    const entry = images[imgIdx];
+    const doBtn = document.getElementById('ba-crop-do-btn');
+    doBtn.disabled = true;
+    doBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Cropping...';
+
+    fetch('{{ route("admin.ai.htr.fsOverlayManualCrop") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}'},
+      body: JSON.stringify({
+        image_path: entry.path,
+        x: cropRect.x,
+        y: cropRect.y,
+        w: cropRect.w,
+        h: cropRect.h,
+      }),
+    })
+    .then(async r => { const t = await r.text(); try { return JSON.parse(t); } catch (e) { return { success: false, error: 'Server error ' + r.status }; } })
+    .then(data => {
+      doBtn.disabled = false;
+      doBtn.classList.add('d-none');
+      cropRect = null;
+      if (data.success) {
+        loadImage();
+        buildFieldList();
+      } else {
+        alert(data.error || 'Crop failed');
+      }
+    })
+    .catch(err => {
+      doBtn.disabled = false;
+      alert('Crop error: ' + err.message);
+    });
+  };
+
+  // ── Auto-recognise toggle ──
+  let autoRecogEnabled = localStorage.getItem('fs-overlay-auto-recog') !== 'false';
+
+  // Set initial state
+  (function() {
+    const cb = document.getElementById('ba-auto-recog');
+    if (cb) cb.checked = autoRecogEnabled;
+  })();
+
+  window.baToggleAutoRecog = function(on) {
+    autoRecogEnabled = on;
+    localStorage.setItem('fs-overlay-auto-recog', on ? 'true' : 'false');
+  };
+
+  // "Numbers only" toggle - redraw the canvas (redraw is IIFE-scoped, so the
+  // inline onchange must call this global wrapper, not redraw() directly).
+  // Persisted so the choice sticks across page loads / images.
+  window.baToggleNumbers = function() {
+    try { localStorage.setItem('fs-overlay-numbers-only', document.getElementById('ba-numbers-only').checked ? '1' : '0'); } catch (e) {}
+    redraw();
+  };
+  // Restore the saved preference on load (the checkbox exists even while the
+  // workspace is hidden; redraw later reads it).
+  try {
+    var _noChk = document.getElementById('ba-numbers-only');
+    if (_noChk && localStorage.getItem('fs-overlay-numbers-only') === '1') _noChk.checked = true;
+  } catch (e) {}
+
+  // ── Recognise: send field crops to HTR service ──
+  window.baRecognise = function() {
+    const entry = images[imgIdx];
+    const btn = document.getElementById('ba-recognise-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Recognising...';
+
+    // Build annotations list with current positions
+    const anns = annotations.filter(a => a).map(a => ({
+      label: a.label, x: a.x, y: a.y, w: a.w, h: a.h,
+    }));
+
+    fetch('{{ route("admin.ai.htr.fsOverlayRecognise") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}'},
+      body: JSON.stringify({
+        image_path: entry.path,
+        annotations: anns,
+      }),
+    })
+    .then(r => r.json())
+    .then(data => {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-brain me-1"></i>Recognise';
+
+      if (data.success && data.results) {
+        // Show recognised text under each field - click to accept
+        let count = 0;
+        for (const [label, result] of Object.entries(data.results)) {
+          const idx = COLUMNS.indexOf(label);
+          if (idx < 0) continue;
+          count++;
+          const text = result.text || '';
+          const error = result.error || '';
+
+          // Find the coords div and add recognised text below it
+          const coordsEl = document.getElementById('ba-coords-' + idx);
+          if (!coordsEl) continue;
+
+          // Remove any previous recognition result
+          const prev = coordsEl.parentNode.querySelector('.ba-recog');
+          if (prev) prev.remove();
+
+          if (text) {
+            // De-duplicate repeated text (TrOCR loop bug)
+            let cleanText = dedupeRepeats(text);
+            // Auto-fix: dates get date spellcheck, age gets unit spellcheck
+            let fixedText = cleanText;
+            if (label === 'Event Date') {
+              fixedText = autoFixDate(cleanText);
+              // Replace year with Donut's year (far more accurate than OCR)
+              if (donutYear) {
+                fixedText = fixedText.replace(/\b(1[6-9]\d{2}|20[0-2]\d)\b\s*$/, donutYear);
+                if (!/\b(1[6-9]\d{2}|20[0-2]\d)\b/.test(fixedText)) {
+                  fixedText = fixedText.replace(/\s*$/, ' ' + donutYear);
+                }
+              }
+            }
+            else if (label === 'Age') fixedText = spellcheckAge(cleanText);
+
+            // Auto-populate - never overwrite CSV spreadsheet values (ground truth)
+            const inp = document.querySelector('.ba-edit-input[data-field-idx="' + idx + '"]');
+            if (inp && !hasCsvValue(label)) {
+              inp.value = fixedText;
+              entry.fields[label] = fixedText;
+              if (annotations[idx]) annotations[idx].value = fixedText;
+            }
+
+            // Always show the recognised text below for reference / click to replace
+            const recogDiv = document.createElement('div');
+            recogDiv.className = 'ba-recog';
+            recogDiv.style.cssText = 'font-size:0.75rem; color:#c00; cursor:pointer; padding:2px 0; border-top:1px dashed #ddd; margin-top:2px;';
+            recogDiv.title = 'Click to use this value';
+            recogDiv.innerHTML = '<i class="fas fa-robot" style="font-size:0.6rem"></i> ' +
+              '<span style="text-decoration:underline dotted">' + fixedText.replace(/</g,'&lt;') + '</span>' +
+              (fixedText !== text ? ' <span style="font-size:0.6rem;color:#999">(was: ' + text.replace(/</g,'&lt;') + ')</span>' : '');
+            recogDiv.addEventListener('click', function() {
+              if (inp) {
+                inp.value = fixedText;
+                entry.fields[label] = fixedText;
+                if (annotations[idx]) annotations[idx].value = fixedText;
+                redraw();
+                this.style.color = '#198754';
+                this.innerHTML = '<i class="fas fa-check"></i> Accepted';
+              }
+            });
+            coordsEl.parentNode.appendChild(recogDiv);
+
+            // Place match: "Add to dictionary" for place fields - only when NOT already in dict
+            const bulkPlaceLabels = ['Place of Marriage', 'District', 'Province'];
+            const bulkIsExact = result.place_match && result.place_match.match_type === 'exact';
+            if (bulkPlaceLabels.includes(label) && fixedText.length >= 2 && !bulkIsExact) {
+              const hasGoodMatch = result.place_match && (result.place_match.confidence || 0) >= 0.9;
+              if (!hasGoodMatch) {
+                const addDiv = document.createElement('div');
+                addDiv.style.cssText = 'font-size:0.65rem; color:#6c757d; cursor:pointer; padding:1px 0;';
+                addDiv.title = 'Add "' + fixedText + '" to SA towns dictionary';
+                addDiv.innerHTML = '<i class="fas fa-plus-circle" style="font-size:0.55rem"></i> Add "' + fixedText.replace(/</g,'&lt;') + '" to dictionary';
+                addDiv.addEventListener('click', function() {
+                  const townName = inp ? inp.value.trim() : fixedText;
+                  if (!townName) return;
+                  this.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:0.55rem"></i> Adding...';
+                  fetch('{{ route("admin.ai.htr.addTown") }}', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json','X-CSRF-TOKEN':document.querySelector('meta[name="csrf-token"]')?.content||'{{ csrf_token() }}'},
+                    body: JSON.stringify({ name: townName, province: '', district: '' }),
+                  })
+                  .then(r => r.json())
+                  .then(d => {
+                    if (d.success) { this.style.color = '#198754'; this.innerHTML = '<i class="fas fa-check"></i> Added (' + (d.stats?.sa_towns || '') + ' towns)'; }
+                    else { this.style.color = '#dc3545'; this.innerHTML = '<i class="fas fa-times"></i> ' + (d.error || 'Failed'); }
+                  })
+                  .catch(() => { this.innerHTML = '<i class="fas fa-times"></i> Error'; });
+                });
+                coordsEl.parentNode.appendChild(addDiv);
+              }
+            }
+
+            // Place match badge - clickable to replace text
+            if (result.place_match) {
+              const pm = result.place_match;
+              const pmDiv = document.createElement('div');
+              pmDiv.style.cssText = 'font-size:0.7rem; color:#0d6efd; padding:1px 0; cursor:pointer;';
+              pmDiv.title = 'Click to use: ' + (pm.name || '');
+              const conf = Math.round((pm.confidence || 0) * 100);
+              const icon = pm.match_type === 'exact' ? 'fa-map-marker-alt' : 'fa-search-location';
+              let info = '<i class="fas ' + icon + '" style="font-size:0.6rem"></i> <span style="text-decoration:underline dotted">' + (pm.name || '').replace(/</g,'&lt;') + '</span>';
+              if (pm.province) info += ' <span style="color:#666">(' + (pm.historical_province || pm.province) + ')</span>';
+              info += ' <span style="font-size:0.6rem;color:#999">' + conf + '%</span>';
+              pmDiv.innerHTML = info;
+              pmDiv.addEventListener('click', function() {
+                if (inp && pm.name) {
+                  inp.value = pm.name;
+                  entry.fields[label] = pm.name;
+                  if (annotations[idx]) annotations[idx].value = pm.name;
+                  redraw();
+                  this.style.color = '#198754';
+                  this.innerHTML = '<i class="fas fa-check"></i> ' + pm.name;
+                }
+              });
+              coordsEl.parentNode.appendChild(pmDiv);
+            }
+
+            // Blur handler: when user edits to a new value, offer "Add to dict"
+            if (inp) {
+              inp.setAttribute('data-orig-recog', fixedText);
+              inp.addEventListener('blur', function() {
+                const newVal = this.value.trim();
+                const origVal = this.getAttribute('data-orig-recog') || '';
+                const parent = coordsEl ? coordsEl.parentNode : null;
+                if (!parent) return;
+                const prevWd = parent.querySelector('.ba-add-word');
+                if (prevWd) prevWd.remove();
+                if (newVal.length >= 2 && newVal !== origVal) {
+                  const wdDiv = document.createElement('div');
+                  wdDiv.className = 'ba-add-word';
+                  wdDiv.style.cssText = 'font-size:0.6rem; color:#6c757d; cursor:pointer; padding:1px 0;';
+                  wdDiv.innerHTML = '<i class="fas fa-spell-check" style="font-size:0.5rem"></i> Add "' + newVal.replace(/</g,'&lt;') + '" to dict';
+                  wdDiv.addEventListener('click', function() {
+                    this.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:0.5rem"></i> Adding...';
+                    const isPlace = bulkPlaceLabels.includes(label);
+                    const url = isPlace ? '{{ route("admin.ai.htr.addTown") }}' : '{{ route("admin.ai.htr.addWord") }}';
+                    const body = isPlace ? { name: newVal, province: '', district: '' } : { word: newVal };
+                    fetch(url, { method:'POST', headers:{'Content-Type':'application/json','X-CSRF-TOKEN':document.querySelector('meta[name="csrf-token"]')?.content||'{{ csrf_token() }}'}, body:JSON.stringify(body) })
+                    .then(r => r.json())
+                    .then(d => { this.style.color = d.success ? '#198754' : '#dc3545'; this.innerHTML = d.success ? '<i class="fas fa-check"></i> Added' : '<i class="fas fa-times"></i> ' + (d.error||'Failed'); })
+                    .catch(() => { this.innerHTML = '<i class="fas fa-times"></i> Error'; });
+                  });
+                  parent.appendChild(wdDiv);
+                }
+              });
+            }
+          } else if (error) {
+            const errDiv = document.createElement('div');
+            errDiv.className = 'ba-recog';
+            errDiv.style.cssText = 'font-size:0.7rem; color:#999;';
+            errDiv.textContent = '⚠ ' + error;
+            coordsEl.parentNode.appendChild(errDiv);
+          }
+        }
+        redraw();
+        btn.innerHTML = '<i class="fas fa-brain me-1"></i>Done (' + count + ')';
+        setTimeout(() => { btn.innerHTML = '<i class="fas fa-brain me-1"></i>Recognise'; }, 5000);
+      } else {
+        // Non-blocking: no alert box. When there are no boxes (e.g. an
+        // unreadable image), nudge the operator to mark its Image Type instead.
+        const msg = (data.error || 'Recognition failed');
+        const st = document.getElementById('ba-fs-status');
+        const hint = /no annotations/i.test(msg)
+          ? 'No boxes to recognise - if the image has no record, set its Image Type (right) to add it to the CSV.'
+          : msg;
+        if (st) st.textContent = hint; else { btn.title = hint; }
+        btn.innerHTML = '<i class="fas fa-brain me-1"></i>Recognise';
+      }
+    })
+    .catch(err => {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-brain me-1"></i>Recognise';
+      const st = document.getElementById('ba-fs-status');
+      if (st) st.textContent = 'Recognise error: ' + err.message; else btn.title = err.message;
+    });
+  };
+
+  // Recognise a single field after drag/resize/draw
+  function recogniseSingleField(annIdx) {
+    const ann = annotations[annIdx];
+    if (!ann || !images[imgIdx]) return;
+    const entry = images[imgIdx];
+    const label = ann.label;
+
+    // Show "Recognising..." badge on the field
+    const coordsEl = document.getElementById('ba-coords-' + annIdx);
+    if (coordsEl) {
+      const prev = coordsEl.parentNode.querySelector('.ba-recog');
+      if (prev) prev.remove();
+      const badge = document.createElement('div');
+      badge.className = 'ba-recog';
+      badge.style.cssText = 'font-size:0.75rem; color:#0d6efd;';
+      badge.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:0.6rem"></i> Recognising...';
+      coordsEl.parentNode.appendChild(badge);
+    }
+
+    fetch('{{ route("admin.ai.htr.fsOverlayRecognise") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.content || '{{ csrf_token() }}'},
+      body: JSON.stringify({
+        image_path: entry.path,
+        annotations: [{ label: ann.label, x: ann.x, y: ann.y, w: ann.w, h: ann.h }],
+      }),
+    })
+    .then(r => r.ok ? r.json() : Promise.reject('Server error'))
+    .then(data => {
+      if (!data.success || !data.results || !data.results[label]) return;
+      const result = data.results[label];
+      const text = result.text || '';
+      if (!text) return;
+
+      let cleanText = dedupeRepeats(text);
+      let fixedText = cleanText;
+      if (label === 'Event Date') {
+        fixedText = autoFixDate(cleanText);
+        // Replace the year portion with Donut's year (far more accurate than OCR)
+        if (donutYear) {
+          fixedText = fixedText.replace(/\b(1[6-9]\d{2}|20[0-2]\d)\b\s*$/, donutYear);
+          // If no year found at end, append it
+          if (!/\b(1[6-9]\d{2}|20[0-2]\d)\b/.test(fixedText)) {
+            fixedText = fixedText.replace(/\s*$/, ' ' + donutYear);
+          }
+        }
+      }
+      else if (label === 'Age') fixedText = spellcheckAge(cleanText);
+
+      // Never overwrite CSV spreadsheet values (ground truth)
+      const inp = document.querySelector('.ba-edit-input[data-field-idx="' + annIdx + '"]');
+      if (inp && !hasCsvValue(label)) {
+        inp.value = fixedText;
+        entry.fields[label] = fixedText;
+        if (annotations[annIdx]) annotations[annIdx].value = fixedText;
+      }
+
+      // Show result below coords
+      if (coordsEl) {
+        const prev = coordsEl.parentNode.querySelector('.ba-recog');
+        if (prev) prev.remove();
+        const recogDiv = document.createElement('div');
+        recogDiv.className = 'ba-recog';
+        recogDiv.style.cssText = 'font-size:0.75rem; color:#c00; cursor:pointer; padding:2px 0; border-top:1px dashed #ddd; margin-top:2px;';
+        recogDiv.title = 'Click to use this value';
+        recogDiv.innerHTML = '<i class="fas fa-robot" style="font-size:0.6rem"></i> ' +
+          '<span style="text-decoration:underline dotted">' + fixedText.replace(/</g,'&lt;') + '</span>' +
+          (fixedText !== text ? ' <span style="font-size:0.6rem;color:#999">(was: ' + text.replace(/</g,'&lt;') + ')</span>' : '');
+        recogDiv.addEventListener('click', function() {
+          if (inp) {
+            inp.value = fixedText;
+            entry.fields[label] = fixedText;
+            if (annotations[annIdx]) annotations[annIdx].value = fixedText;
+            redraw();
+            this.style.color = '#198754';
+            this.innerHTML = '<i class="fas fa-check"></i> Accepted';
+          }
+        });
+        coordsEl.parentNode.appendChild(recogDiv);
+
+        // "Add to dictionary" button for place fields - only when NOT already in dict
+        const placeLabels = ['Place of Marriage', 'District', 'Province'];
+        const isExactPlaceMatch = result.place_match && result.place_match.match_type === 'exact';
+        if (placeLabels.includes(label) && fixedText.length >= 2 && !isExactPlaceMatch) {
+          const hasGoodMatch = result.place_match && (result.place_match.confidence || 0) >= 0.9;
+          if (!hasGoodMatch) {
+            const addDiv = document.createElement('div');
+            addDiv.style.cssText = 'font-size:0.65rem; color:#6c757d; cursor:pointer; padding:1px 0;';
+            addDiv.title = 'Add "' + fixedText + '" to SA towns dictionary';
+            addDiv.innerHTML = '<i class="fas fa-plus-circle" style="font-size:0.55rem"></i> Add "' + fixedText.replace(/</g,'&lt;') + '" to dictionary';
+            addDiv.addEventListener('click', function() {
+              const townName = inp ? inp.value.trim() : fixedText;
+              if (!townName) return;
+              this.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:0.55rem"></i> Adding...';
+              fetch('{{ route("admin.ai.htr.addTown") }}', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json','X-CSRF-TOKEN':document.querySelector('meta[name="csrf-token"]')?.content||'{{ csrf_token() }}'},
+                body: JSON.stringify({ name: townName, province: '', district: '' }),
+              })
+              .then(r => r.json())
+              .then(d => {
+                if (d.success) {
+                  this.style.color = '#198754';
+                  this.innerHTML = '<i class="fas fa-check"></i> Added (' + (d.stats?.sa_towns || '') + ' towns)';
+                } else {
+                  this.style.color = '#dc3545';
+                  this.innerHTML = '<i class="fas fa-times"></i> ' + (d.error || 'Failed');
+                }
+              })
+              .catch(() => { this.innerHTML = '<i class="fas fa-times"></i> Error'; });
+            });
+            coordsEl.parentNode.appendChild(addDiv);
+          }
+        }
+
+        // Show place match badge if available - clickable to replace text
+        if (result.place_match) {
+          const pm = result.place_match;
+          const pmDiv = document.createElement('div');
+          pmDiv.style.cssText = 'font-size:0.7rem; color:#0d6efd; padding:1px 0; cursor:pointer;';
+          pmDiv.title = 'Click to use: ' + (pm.name || '');
+          const conf = Math.round((pm.confidence || 0) * 100);
+          const icon = pm.match_type === 'exact' ? 'fa-map-marker-alt' : 'fa-search-location';
+          let info = '<i class="fas ' + icon + '" style="font-size:0.6rem"></i> <span style="text-decoration:underline dotted">' + (pm.name || '').replace(/</g,'&lt;') + '</span>';
+          if (pm.province) info += ' <span style="color:#666">(' + (pm.historical_province || pm.province) + ')</span>';
+          info += ' <span style="font-size:0.6rem;color:#999">' + conf + '%</span>';
+          pmDiv.innerHTML = info;
+          pmDiv.addEventListener('click', function() {
+            if (inp && pm.name) {
+              inp.value = pm.name;
+              entry.fields[label] = pm.name;
+              if (annotations[annIdx]) annotations[annIdx].value = pm.name;
+              redraw();
+              this.style.color = '#198754';
+              this.innerHTML = '<i class="fas fa-check"></i> ' + pm.name;
+            }
+          });
+          coordsEl.parentNode.appendChild(pmDiv);
+        }
+
+        // Attach blur handler: when user edits field to a new value, offer "Add to dict"
+        if (inp) {
+          inp.setAttribute('data-orig-recog', fixedText);
+          inp.addEventListener('blur', function() {
+            const newVal = this.value.trim();
+            const origVal = this.getAttribute('data-orig-recog') || '';
+            const parent = coordsEl ? coordsEl.parentNode : null;
+            if (!parent) return;
+            // Remove previous add-word-dict element
+            const prevWd = parent.querySelector('.ba-add-word');
+            if (prevWd) prevWd.remove();
+            // Show "Add to dict" if edited value differs from recognition and is >= 2 chars
+            if (newVal.length >= 2 && newVal !== origVal) {
+              const wdDiv = document.createElement('div');
+              wdDiv.className = 'ba-add-word';
+              wdDiv.style.cssText = 'font-size:0.6rem; color:#6c757d; cursor:pointer; padding:1px 0;';
+              wdDiv.title = 'Add "' + newVal + '" to dictionary';
+              wdDiv.innerHTML = '<i class="fas fa-spell-check" style="font-size:0.5rem"></i> Add "' + newVal.replace(/</g,'&lt;') + '" to dict';
+              wdDiv.addEventListener('click', function() {
+                this.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:0.5rem"></i> Adding...';
+                const isPlace = ['Place of Marriage', 'District', 'Province'].includes(label);
+                const url = isPlace ? '{{ route("admin.ai.htr.addTown") }}' : '{{ route("admin.ai.htr.addWord") }}';
+                const body = isPlace ? { name: newVal, province: '', district: '' } : { word: newVal };
+                fetch(url, {
+                  method: 'POST',
+                  headers: {'Content-Type':'application/json','X-CSRF-TOKEN':document.querySelector('meta[name="csrf-token"]')?.content||'{{ csrf_token() }}'},
+                  body: JSON.stringify(body),
+                })
+                .then(r => r.json())
+                .then(d => {
+                  if (d.success) { this.style.color = '#198754'; this.innerHTML = '<i class="fas fa-check"></i> Added'; }
+                  else { this.style.color = '#dc3545'; this.innerHTML = '<i class="fas fa-times"></i> ' + (d.error || 'Failed'); }
+                })
+                .catch(() => { this.innerHTML = '<i class="fas fa-times"></i> Error'; });
+              });
+              parent.appendChild(wdDiv);
+            }
+          });
+        }
+      }
+      redraw();
+    })
+    .catch(() => {
+      if (coordsEl) {
+        const prev = coordsEl.parentNode.querySelector('.ba-recog');
+        if (prev) prev.remove();
+      }
+    });
+  }
+
+  window.baAutoPlace = function() {
+    autoPlaceFields();
+    redraw();
+  };
+
+  // ── Donut pre-fill: extract ILM fields from document image ──
+  // Fills empty fields only - never overwrites CSV data
+  window.baDonutPrefill = function() {
+    if (imgIdx < 0 || !images[imgIdx]) return;
+    const entry = images[imgIdx];
+    const btn = document.getElementById('ba-donut-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Donut...';
+    const imgPath = entry.path.startsWith('/') ? entry.path : '/' + entry.path;
+
+    // Fetch ILM values AND field positions in parallel
+    Promise.all([
+      fetch('{{ route("admin.ai.donut.prefill") }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}'},
+        body: JSON.stringify({ image_path: imgPath }),
+      }).then(r => r.json()),
+      fetch('{{ route("admin.ai.donut.positions") }}?doc_type=type_a').then(r => r.json()),
+    ])
+    .then(([data, posData]) => {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-file-invoice me-1"></i>Donut';
+
+      let filled = 0;
+      let positioned = 0;
+
+      // --- 1. Apply field positions from training data ---
+      if (posData.success && posData.fields) {
+        // Map annotation labels → FS Overlay field names
+        const posMap = {
+          'EVENT_YEAR_ORIG': 'Event Date',
+          'EVENT_PLACE_ORIG': 'Event Place',
+          'Name': 'Name',
+          'Sex': 'Sex',
+          'Age': 'Age',
+          'Residence Place': 'Residence Place',
+          'Place of Marriage': 'Place of Marriage',
+          'District': 'District',
+          'Province': 'Province',
+        };
+
+        COLUMNS.forEach((col, i) => {
+          if (skipped.includes(i)) return;
+          // Find matching position from training data
+          let posKey = null;
+          for (const [annLabel, fieldName] of Object.entries(posMap)) {
+            if (fieldName === col) { posKey = annLabel; break; }
+          }
+          // Also try direct match on column name
+          if (!posKey && posData.fields[col]) posKey = col;
+          if (!posKey) return;
+
+          const pos = posData.fields[posKey];
+          if (!pos) return;
+
+          // Only apply if no saved position exists or box not yet drawn
+          if (!annotations[i] || (annotations[i].w < 5 && annotations[i].h < 5)) {
+            const sx = scale;
+            annotations[i] = {
+              label: col,
+              value: entry.fields[col] || '',
+              x: Math.round(pos.x * sx),
+              y: Math.round(pos.y * sx),
+              w: Math.round(pos.w * sx),
+              h: Math.round(pos.h * sx),
+            };
+            positioned++;
+          }
+        });
+
+        if (positioned > 0) {
+          redraw();
+          updateProgress();
+        }
+      }
+
+      // --- 2. Fill ILM field values ---
+      if (data.success) {
+        const donutFields = {};
+        if (data.FS_RECORD_TYPE) {
+          const typeMap = {
+            'Death Records': 'Death', 'Birth Records': 'Birth',
+            'Marriage Records': 'Marriage', 'Christenings': 'Baptism',
+            'Burials': 'Burial', 'Church Records': 'Church',
+            'Civil Registration': 'Civil', 'Census': 'Census',
+          };
+          donutFields['Event Type'] = typeMap[data.FS_RECORD_TYPE] || data.FS_RECORD_TYPE;
+        }
+        if (data.EVENT_YEAR_ORIG) {
+          donutFields['Event Year'] = data.EVENT_YEAR_ORIG;
+          donutYear = data.EVENT_YEAR_ORIG;
+        }
+        if (data.EVENT_PLACE_ORIG) {
+          donutFields['Event Place'] = data.EVENT_PLACE_ORIG;
+          donutFields['Place of Marriage'] = data.EVENT_PLACE_ORIG;
+          donutFields['District'] = data.EVENT_PLACE_ORIG;
+        }
+
+        COLUMNS.forEach((col, i) => {
+          if (!donutFields[col]) return;
+          if (hasCsvValue(col)) return; // CSV is ground truth - never overwrite
+
+          entry.fields[col] = donutFields[col];
+          filled++;
+
+          const inp = document.querySelector('.ba-edit-input[data-field-idx="' + i + '"]');
+          if (inp) {
+            inp.value = donutFields[col];
+            inp.style.background = '#e8f5e9';
+            setTimeout(() => { inp.style.background = ''; }, 3000);
+          }
+          if (annotations[i]) annotations[i].value = donutFields[col];
+        });
+      }
+
+      const conf = data.confidence ? (data.confidence * 100).toFixed(0) + '%' : '?';
+      console.log('[Donut] Values:', filled, 'Positions:', positioned, '(confidence:', conf + ')');
+
+      // Auto-recognise each field individually (better accuracy than bulk)
+      const fieldsWithBoxes = [];
+      annotations.forEach((a, i) => {
+        if (a && a.w > 5 && a.h > 5 && !hasCsvValue(a.label)) fieldsWithBoxes.push(i);
+      });
+      if (fieldsWithBoxes.length > 0) {
+        console.log('[Donut] Auto-triggering HTR on', fieldsWithBoxes.length, 'fields');
+        autoRecogTimers.forEach(t => clearTimeout(t));
+        autoRecogTimers = [];
+        let delay = 300;
+        fieldsWithBoxes.forEach(idx => {
+          const t = setTimeout(() => recogniseSingleField(idx), delay);
+          autoRecogTimers.push(t);
+          delay += 200;
+        });
+      }
+
+      // Fix Event Date year with Donut's year if HTR already filled it (skip if CSV had Event Date)
+      if (donutYear) {
+        COLUMNS.forEach((col, i) => {
+          if (col !== 'Event Date') return;
+          if (hasCsvValue(col)) return;
+          const currentVal = (entry.fields[col] || '').trim();
+          if (!currentVal) return;
+          const fixed = currentVal.replace(/\b(1[6-9]\d{2}|20[0-2]\d)\b\s*$/, donutYear);
+          if (fixed !== currentVal) {
+            entry.fields[col] = fixed;
+            const inp = document.querySelector('.ba-edit-input[data-field-idx="' + i + '"]');
+            if (inp) {
+              inp.value = fixed;
+              inp.style.background = '#e8f5e9';
+              setTimeout(() => { inp.style.background = ''; }, 3000);
+            }
+            if (annotations[i]) annotations[i].value = fixed;
+            console.log('[Donut] Fixed Event Date year:', currentVal, '→', fixed);
+          }
+        });
+      }
+
+      // Update Donut card in sidebar
+      const card = document.getElementById('ba-donut-card');
+      card.style.display = '';
+      document.getElementById('ba-donut-conf').textContent = conf;
+      document.getElementById('ba-donut-form-type').textContent = data.FORM_TYPE || '-';
+      document.getElementById('ba-donut-type').textContent = data.FS_RECORD_TYPE || '-';
+      document.getElementById('ba-donut-type-id').textContent = data.FS_RECORD_TYPE_ID || '-';
+      document.getElementById('ba-donut-year').textContent = data.EVENT_YEAR_ORIG || '-';
+      document.getElementById('ba-donut-place').textContent = data.EVENT_PLACE_ORIG || '-';
+      document.getElementById('ba-donut-nongeo').innerHTML = data.non_genealogical
+        ? '<span class="badge bg-secondary">Yes</span>'
+        : '<span class="badge bg-success">No</span>';
+      document.getElementById('ba-donut-positions').textContent = positioned > 0
+        ? positioned + ' fields placed'
+        : 'Using saved positions';
+
+      // Auto-select form type from Donut classification
+      const donutFormType = data.FORM_TYPE || '';
+      if (donutFormType && FORM_TEMPLATES[donutFormType]) {
+        const formSelect = document.getElementById('ba-form-type');
+        if (formSelect && formSelect.value === 'auto') {
+          formSelect.value = donutFormType;
+          currentFormType = donutFormType;
+          console.log('[Donut] Auto-selected form type:', donutFormType);
+          // Apply the template positions if we don't have saved positions
+          if (!Object.keys(savedPositions).length) {
+            applyFormTemplate(donutFormType);
+            buildFieldList();
+            redraw();
+          }
+        }
+      }
+
+      const label = [];
+      if (filled > 0) label.push(filled + ' values');
+      if (positioned > 0) label.push(positioned + ' boxes');
+      if (label.length > 0) {
+        btn.innerHTML = '<i class="fas fa-check me-1"></i>' + label.join(', ');
+        setTimeout(() => { btn.innerHTML = '<i class="fas fa-file-invoice me-1"></i>Donut'; }, 4000);
+      }
+    })
+    .catch(err => {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-file-invoice me-1"></i>Donut';
+      console.error('[Donut] Error:', err);
+    });
+  };
+
+  function buildFieldList() {
+    const entry = images[imgIdx];
+    const container = document.getElementById('ba-fields');
+    container.innerHTML = '';
+
+    // Reflect this image's FS Image Type marking (non-record) in the selector.
+    const itSel = document.getElementById('ba-fs-imagetype');
+    if (itSel && entry) itSel.value = entry._imageType || '';
+
+    // Fields to clear (don't pre-fill from CSV - user reads from document)
+    const CLEAR_FIELDS = ['Event Date'];
+
+    COLUMNS.forEach(function(col, i) {
+      let val = entry.fields[col] || '';
+      if (CLEAR_FIELDS.includes(col)) val = '';
+      // Don't modify Age CSV value - display as-is from spreadsheet
+      const div = document.createElement('div');
+      div.className = 'ba-field' + (i === fieldIdx ? ' active' : '');
+      div.dataset.idx = i;
+
+      const skipBtn = '<button class="btn btn-sm btn-outline-secondary ba-skip-btn" onclick="event.stopPropagation(); baSkipField(' + i + ')" title="Skip / unskip"><i class="fas fa-forward"></i></button>';
+      const escapedVal = (val || '').replace(/"/g, '&quot;');
+
+      div.innerHTML = skipBtn +
+        '<div class="ba-label" style="color:' + COLORS[i % COLORS.length] + '">' + (i + 1) + '. ' + displayLabel(col) + '</div>' +
+        '<input class="ba-edit-input" type="text" value="' + escapedVal + '" data-field-idx="' + i + '" placeholder="Type value..." onclick="event.stopPropagation()">' +
+        '<div class="ba-coords" id="ba-coords-' + i + '"></div>';
+
+      const input = div.querySelector('.ba-edit-input');
+      input.addEventListener('change', function() {
+        const idx = parseInt(this.dataset.fieldIdx);
+        entry.fields[COLUMNS[idx]] = this.value;
+        if (annotations[idx]) annotations[idx].value = this.value;
+        redraw();
+      });
+      input.addEventListener('keydown', function(e) {
+        e.stopPropagation();
+        if (e.key === 'Enter') { this.blur(); advanceToNextField(); highlightField(); }
+      });
+      div.onclick = function() {
+        if (!skipped.includes(i)) { fieldIdx = i; highlightField(); }
+      };
+      container.appendChild(div);
+    });
+
+    // Auto-skip non-allowed fields
+    COLUMNS.forEach(function(col, i) {
+      if (shouldSkip(col)) skipped.push(i);
+    });
+
+    highlightField();
+    updateProgress();
+  }
+
+  window.baSkipField = function(idx) {
+    if (!skipped.includes(idx)) {
+      skipped.push(idx);
+      annotations[idx] = null;
+    } else {
+      skipped = skipped.filter(i => i !== idx);
+    }
+    if (skipped.includes(fieldIdx)) advanceToNextField();
+    highlightField();
+    updateProgress();
+    redraw();
+  };
+
+  function advanceToNextField() {
+    let next = fieldIdx + 1;
+    while (next < COLUMNS.length && skipped.includes(next)) next++;
+    if (next < COLUMNS.length) fieldIdx = next;
+  }
+
+  function highlightField() {
+    document.querySelectorAll('.ba-field').forEach(function(el, i) {
+      el.classList.toggle('active', i === fieldIdx && !skipped.includes(i));
+      el.classList.toggle('done', annotations[i] && annotations[i] !== null);
+      el.classList.toggle('skipped', skipped.includes(i));
+    });
+    const active = document.querySelector('.ba-field.active');
+    if (active) active.scrollIntoView({ block: 'nearest' });
+    // Auto-select text in the active field's input
+    const inp = document.querySelector('.ba-edit-input[data-field-idx="' + fieldIdx + '"]');
+    if (inp) { inp.focus(); inp.select(); }
+  }
+
+  function updateProgress() {
+    const active = COLUMNS.length - skipped.length;
+    const done = annotations.filter(a => a !== null && a !== undefined).length;
+    const pct = active > 0 ? (done / active * 100) : 100;
+    document.getElementById('ba-progress').style.width = pct + '%';
+    document.getElementById('ba-save-btn').disabled = done < 1;
+  }
+
+  function updateCounters() {
+    document.getElementById('ba-done-count').textContent = sessionDone;
+    document.getElementById('ba-remaining-count').textContent = Math.max(0, images.length - imgIdx - 1);
+    document.getElementById('ba-fields-count').textContent = sessionFields;
+    document.getElementById('ba-prev-btn').disabled = imgIdx <= 0;
+  }
+
+  // ── Drawing ──
+  function pos(e) {
+    const r = cvs.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale };
+  }
+
+  cvs.addEventListener('mousedown', function(e) {
+    if (e.button !== 0) return;
+    const p = pos(e);
+
+    if (currentTool === 'hand') {
+      panning = true;
+      panStartX = e.clientX; panStartY = e.clientY;
+      panScrollX = offsetX; panScrollY = offsetY;
+      cvs.style.cursor = 'grabbing';
+      e.preventDefault();
+      return;
+    }
+
+    if (currentTool === 'select') {
+      const rh = hitResize(p.x, p.y);
+      if (rh) { resizing = true; resizeIdx = rh.idx; resizeHandle = rh.handle; return; }
+      const hit = hitTest(p.x, p.y);
+      if (hit >= 0) {
+        dragging = true; dragIdx = hit;
+        dragOffX = p.x - annotations[hit].x;
+        dragOffY = p.y - annotations[hit].y;
+        fieldIdx = hit;
+        highlightField();
+        return;
+      }
+      return;
+    }
+
+    if (currentTool === 'draw') { drawing = true; sx = p.x; sy = p.y; }
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (panning) {
+      offsetX = panScrollX + (e.clientX - panStartX);
+      offsetY = panScrollY + (e.clientY - panStartY);
+      cvs.style.transform = 'translate(' + offsetX + 'px, ' + offsetY + 'px)';
+    }
+  });
+  document.addEventListener('mouseup', function(e) {
+    if (panning) { panning = false; cvs.style.cursor = 'grab'; }
+  });
+
+  cvs.addEventListener('mousemove', function(e) {
+    if (panning) return;
+    const p = pos(e);
+
+    if (resizing && annotations[resizeIdx]) {
+      const a = annotations[resizeIdx];
+      if (resizeHandle === 'right' || resizeHandle === 'br' || resizeHandle === 'tr') a.w = Math.max(10, p.x - a.x);
+      if (resizeHandle === 'bottom' || resizeHandle === 'br' || resizeHandle === 'bl') a.h = Math.max(10, p.y - a.y);
+      if (resizeHandle === 'left' || resizeHandle === 'tl' || resizeHandle === 'bl') { const oldRight = a.x + a.w; a.x = Math.min(p.x, oldRight - 10); a.w = oldRight - a.x; }
+      if (resizeHandle === 'top' || resizeHandle === 'tl' || resizeHandle === 'tr') { const oldBottom = a.y + a.h; a.y = Math.min(p.y, oldBottom - 10); a.h = oldBottom - a.y; }
+      redraw(); return;
+    }
+
+    if (dragging && annotations[dragIdx]) {
+      annotations[dragIdx].x = Math.max(0, p.x - dragOffX);
+      annotations[dragIdx].y = Math.max(0, p.y - dragOffY);
+      redraw(); return;
+    }
+
+    if (drawing) {
+      redraw();
+      ctx.save();
+      ctx.strokeStyle = COLORS[fieldIdx % COLORS.length];
+      ctx.lineWidth = 2 / scale;
+      ctx.setLineDash([4 / scale, 4 / scale]);
+      ctx.strokeRect(sx * scale, sy * scale, (p.x - sx) * scale, (p.y - sy) * scale);
+      ctx.restore();
+      return;
+    }
+
+    if (currentTool === 'select') {
+      const rh = hitResize(p.x, p.y);
+      if (rh) {
+        const cursors = { left:'ew-resize', right:'ew-resize', top:'ns-resize', bottom:'ns-resize', tl:'nwse-resize', br:'nwse-resize', tr:'nesw-resize', bl:'nesw-resize' };
+        cvs.style.cursor = cursors[rh.handle] || 'nwse-resize';
+      }
+      else if (hitTest(p.x, p.y) >= 0) { cvs.style.cursor = 'move'; }
+      else { cvs.style.cursor = 'default'; }
+    }
+  });
+
+  cvs.addEventListener('mouseup', function(e) {
+    if (panning) { panning = false; return; }
+
+    if (resizing) {
+      resizing = false;
+      const a = annotations[resizeIdx];
+      if (a) {
+        savedPositions[a.label] = { x: a.x / imgNatW, y: a.y / imgNatH, w: a.w / imgNatW, h: a.h / imgNatH };
+        const c = document.getElementById('ba-coords-' + resizeIdx);
+        if (c) c.textContent = Math.round(a.x) + ',' + Math.round(a.y) + ' ' + Math.round(a.w) + '×' + Math.round(a.h);
+        persistPositions();
+        recogniseSingleField(resizeIdx);
+      }
+      fieldIdx = resizeIdx;
+      highlightField();
+      const inp = document.querySelector('.ba-edit-input[data-field-idx="' + resizeIdx + '"]');
+      if (inp) { inp.focus(); inp.select(); }
+      redraw(); return;
+    }
+
+    if (dragging) {
+      dragging = false;
+      const a = annotations[dragIdx];
+      if (a) {
+        a.x = Math.round(a.x); a.y = Math.round(a.y);
+        savedPositions[a.label] = { x: a.x / imgNatW, y: a.y / imgNatH, w: a.w / imgNatW, h: a.h / imgNatH };
+        const c = document.getElementById('ba-coords-' + dragIdx);
+        if (c) c.textContent = Math.round(a.x) + ',' + Math.round(a.y) + ' ' + Math.round(a.w) + '×' + Math.round(a.h);
+        persistPositions();
+        recogniseSingleField(dragIdx);
+      }
+      // Focus the field input in the sidebar
+      fieldIdx = dragIdx;
+      highlightField();
+      const inp = document.querySelector('.ba-edit-input[data-field-idx="' + dragIdx + '"]');
+      if (inp) { inp.focus(); inp.select(); }
+      redraw(); return;
+    }
+
+    if (!drawing) return;
+    drawing = false;
+    const p = pos(e);
+    let x = Math.min(sx, p.x), y = Math.min(sy, p.y);
+    let w = Math.abs(p.x - sx), h = Math.abs(p.y - sy);
+    if (w < 5 || h < 5) { redraw(); return; }
+
+    // If in crop mode, do manual crop instead of annotation
+    if (cropMode) {
+      handleCropDraw(x, y, w, h);
+      return;
+    }
+
+    const entry = images[imgIdx];
+    const col = COLUMNS[fieldIdx];
+    const val = entry.fields[col] || '';
+
+    annotations[fieldIdx] = { label: col, value: val, x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
+    savedPositions[col] = { x: x / imgNatW, y: y / imgNatH, w: w / imgNatW, h: h / imgNatH };
+    persistPositions();
+    recogniseSingleField(fieldIdx);
+
+    const coordsEl = document.getElementById('ba-coords-' + fieldIdx);
+    if (coordsEl) coordsEl.textContent = Math.round(x) + ',' + Math.round(y) + ' ' + Math.round(w) + '×' + Math.round(h);
+
+    advanceToNextField();
+    highlightField();
+    updateProgress();
+    updateCounters();
+    redraw();
+  });
+
+  function persistPositions() {
+    if (!currentFormType) return;
+    // Also save to localStorage as fallback in case session expires
+    try { localStorage.setItem('fs-overlay-pos-' + currentFormType, JSON.stringify(savedPositions)); } catch(e) {}
+    fetch('{{ route("admin.ai.htr.fsOverlaySavePositions") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.content || '{{ csrf_token() }}'},
+      body: JSON.stringify({ form_type: currentFormType, positions: savedPositions }),
+    })
+    .then(r => {
+      if (!r.ok) {
+        // Session expired (419) or other error - refresh CSRF token
+        if (r.status === 419) {
+          console.warn('[FS Overlay] CSRF expired - positions saved to localStorage, refresh page to re-sync');
+          const bar = document.getElementById('ba-image-name');
+          if (bar) bar.textContent = bar.textContent.replace(/ - CSRF expired.*/, '') + ' - CSRF expired, refresh page to save to server';
+        }
+        return;
+      }
+      return r.json();
+    })
+    .catch(() => {});
+  }
+
+  function loadSavedPositions(cb) {
+    if (!currentFormType) { savedPositions = {}; if (cb) cb(); return; }
+    fetch('{{ route("admin.ai.htr.fsOverlayLoadPositions") }}?form_type=' + encodeURIComponent(currentFormType), {
+      credentials: 'same-origin',
+    })
+    .then(r => r.json())
+    .then(data => {
+      // load-positions returns [] (PHP empty array) when nothing is saved. An
+      // ARRAY silently drops string-keyed writes on JSON.stringify (savedPositions
+      // ['Groom Surname']=... vanishes), which is why layouts never persisted -
+      // coerce to a plain object. #1331.
+      savedPositions = (data.positions && typeof data.positions === 'object' && !Array.isArray(data.positions)) ? data.positions : {};
+      // Fallback: merge localStorage positions if server is empty
+      if (!Object.keys(savedPositions).length) {
+        try {
+          const ls = JSON.parse(localStorage.getItem('fs-overlay-pos-' + currentFormType) || '{}');
+          if (ls && typeof ls === 'object' && !Array.isArray(ls) && Object.keys(ls).length) {
+            savedPositions = ls;
+            console.log('[FS Overlay] Loaded positions from localStorage fallback');
+          }
+        } catch(e) {}
+      }
+      console.log('[FS Overlay] Loaded positions for:', currentFormType, 'fields:', Object.keys(savedPositions));
+      if (cb) cb();
+    })
+    .catch(() => {
+      // Server unreachable - try localStorage (coerce to a plain object).
+      try {
+        const ls = JSON.parse(localStorage.getItem('fs-overlay-pos-' + currentFormType) || '{}');
+        savedPositions = (ls && typeof ls === 'object' && !Array.isArray(ls)) ? ls : {};
+      } catch(e) { savedPositions = {}; }
+      if (cb) cb();
+    });
+  }
+
+  function redraw() {
+    if (!img) return;
+    ctx.clearRect(0, 0, cvs.width, cvs.height);
+    ctx.drawImage(img, 0, 0, img.width * scale, img.height * scale);
+
+    annotations.forEach(function(ann, i) {
+      if (!ann) return;
+      const color = COLORS[i % COLORS.length];
+      const isActive = i === fieldIdx;
+      ctx.save();
+
+      // Box fill (semi-transparent)
+      ctx.fillStyle = color;
+      ctx.globalAlpha = isActive ? 0.15 : 0.08;
+      ctx.fillRect(ann.x * scale, ann.y * scale, ann.w * scale, ann.h * scale);
+
+      // Box border
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isActive ? 3 : 1.5;
+      ctx.strokeRect(ann.x * scale, ann.y * scale, ann.w * scale, ann.h * scale);
+
+      // Label background (bigger, bolder). "Numbers only" toggle draws just the
+      // box number on the image (the field names stay in the right-hand list).
+      const numbersOnly = document.getElementById('ba-numbers-only')?.checked;
+      const labelText = numbersOnly ? String(i + 1) : ((i + 1) + '. ' + displayLabel(ann.label));
+      ctx.font = (isActive ? 'bold 14px' : '13px') + ' sans-serif';
+      const tw = ctx.measureText(labelText).width + 12;
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.92;
+      ctx.fillRect(ann.x * scale, ann.y * scale - 20, tw, 20);
+
+      // Label text
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#fff';
+      ctx.fillText(labelText, ann.x * scale + 5, ann.y * scale - 5);
+
+      // Value preview below box (bigger)
+      if (ann.value) {
+        ctx.font = 'bold 12px sans-serif';
+        const vw = ctx.measureText(ann.value).width + 10;
+        ctx.fillStyle = 'rgba(255,255,255,0.92)';
+        ctx.fillRect(ann.x * scale, (ann.y + ann.h) * scale + 2, vw, 16);
+        ctx.fillStyle = '#333';
+        ctx.fillText(ann.value, ann.x * scale + 4, (ann.y + ann.h) * scale + 14);
+      }
+
+      // Highlight detected printed label (dashed blue box around the label text)
+      if (ann.labelBox) {
+        const lb = ann.labelBox;
+        ctx.strokeStyle = '#0d6efd';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 3]);
+        ctx.globalAlpha = 0.8;
+        ctx.strokeRect(lb.x * scale, lb.y * scale, lb.w * scale, lb.h * scale);
+        ctx.setLineDash([]);
+        // Label tag above the printed label box
+        const tagText = '⎯ ' + (ann.labelText || 'label');
+        ctx.font = '10px sans-serif';
+        const tagW = ctx.measureText(tagText).width + 6;
+        ctx.fillStyle = '#0d6efd';
+        ctx.globalAlpha = 0.85;
+        ctx.fillRect(lb.x * scale, lb.y * scale - 14, tagW, 14);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#fff';
+        ctx.fillText(tagText, lb.x * scale + 3, lb.y * scale - 3);
+        // Draw a connecting line from label to answer box
+        ctx.strokeStyle = '#0d6efd';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 2]);
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        ctx.moveTo((lb.x + lb.w) * scale, (lb.y + lb.h / 2) * scale);
+        ctx.lineTo(ann.x * scale, (ann.y + ann.h / 2) * scale);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      ctx.restore();
+    });
+  }
+
+  // ── Keyboard shortcuts ──
+  document.addEventListener('keydown', function(e) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'Enter') {
+      // If Event Date is filled in, Save & Next
+      const eventDateInput = document.querySelector('.ba-edit-input[data-field-idx]');
+      const eventDateIdx = COLUMNS.indexOf('Event Date');
+      let eventDateFilled = false;
+      if (eventDateIdx >= 0) {
+        const inp = document.querySelector('.ba-edit-input[data-field-idx="' + eventDateIdx + '"]');
+        eventDateFilled = inp && inp.value.trim().length > 0;
+      }
+      if (eventDateFilled) {
+        e.preventDefault();
+        baSaveAndNext();
+      } else {
+        advanceToNextField(); highlightField(); e.preventDefault();
+      }
+    }
+    if (e.key === 'Backspace') {
+      if (annotations[fieldIdx]) { annotations[fieldIdx] = null; highlightField(); updateProgress(); redraw(); }
+      e.preventDefault();
+    }
+    if (e.key === 'ArrowRight') {
+      if (!skipped.includes(fieldIdx)) { skipped.push(fieldIdx); annotations[fieldIdx] = null; }
+      advanceToNextField(); highlightField(); updateProgress(); redraw(); e.preventDefault();
+    }
+    if (e.key === 'ArrowLeft') { fieldIdx = Math.max(0, fieldIdx - 1); highlightField(); e.preventDefault(); }
+    if (e.ctrlKey && e.key === 's') { e.preventDefault(); baSaveAndNext(); }
+    if (e.key === 'h' || e.key === 'H') baSetTool('hand');
+    if (e.key === 'r' || e.key === 'R') baSetTool('draw');
+    if (e.key === 'v' || e.key === 'V') baSetTool('select');
+  });
+
+  // ── Zoom ──
+  window.baZoomIn = function() { scale *= 1.2; cvs.width = imgNatW * scale; cvs.height = imgNatH * scale; redraw(); };
+  window.baZoomOut = function() { scale = Math.max(0.1, scale / 1.2); cvs.width = imgNatW * scale; cvs.height = imgNatH * scale; redraw(); };
+  window.baZoomFit = function() { scale = wrap.clientWidth / imgNatW; cvs.width = imgNatW * scale; cvs.height = imgNatH * scale; offsetX = 0; offsetY = 0; cvs.style.transform = ''; redraw(); };
+
+  wrap.addEventListener('wheel', function(e) {
+    if (!img) return;
+    e.preventDefault();
+    const rect = wrap.getBoundingClientRect();
+    const mx = e.clientX - rect.left + wrap.scrollLeft;
+    const my = e.clientY - rect.top + wrap.scrollTop;
+    const oldScale = scale;
+    scale = e.deltaY < 0 ? Math.min(scale * 1.15, 10) : Math.max(scale / 1.15, 0.1);
+    cvs.width = imgNatW * scale; cvs.height = imgNatH * scale;
+    redraw();
+    const ratio = scale / oldScale;
+    wrap.scrollLeft = mx * ratio - (e.clientX - rect.left);
+    wrap.scrollTop = my * ratio - (e.clientY - rect.top);
+  }, { passive: false });
+
+  // ── Navigation ──
+  window.baPrev = function() { if (imgIdx > 0) { imgIdx -= 2; nextImage(); } };
+  window.baSkip = function() {
+    const entry = images[imgIdx];
+    const folder = document.getElementById('ba-folder').value.trim();
+    // Move to rework folder
+    fetch('{{ route("admin.ai.htr.fsOverlayManualCrop") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}'},
+      body: JSON.stringify({ action: 'skip', image_path: entry.path, folder: folder }),
+    }).catch(() => {});
+    nextImage();
+  };
+
+  // ── Save ──
+  window.baSaveAndNext = function() {
+    const entry = images[imgIdx];
+    const btn = document.getElementById('ba-save-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Saving...';
+
+    // Update savedPositions from ALL current annotations - save as % of image
+    console.log('[FS Overlay] Saving positions, image size:', imgNatW, 'x', imgNatH);
+    annotations.forEach(function(ann) {
+      if (ann && imgNatW > 0 && imgNatH > 0) {
+        savedPositions[ann.label] = {
+          x: ann.x / imgNatW,
+          y: ann.y / imgNatH,
+          w: ann.w / imgNatW,
+          h: ann.h / imgNatH,
+        };
+      }
+    });
+
+    // Save positions to server, then save annotation
+    persistPositions();
+
+    fetch('{{ route("admin.ai.htr.fsOverlaySave") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}'},
+      body: JSON.stringify({
+        image_path: entry.path,
+        fname: entry.fname,
+        fields: entry.fields,
+        annotations: annotations.filter(a => a),
+        folder: document.getElementById('ba-folder').value.trim(),
+      }),
+    })
+    .then(r => r.json())
+    .then(data => {
+      btn.innerHTML = '<i class="fas fa-save me-1"></i>Save & Next';
+      btn.disabled = false;
+      if (data.success) {
+        sessionDone++;
+        sessionFields += annotations.filter(a => a).length;
+        updateCounters();
+        // Remember position for resume
+        const resumeKey = 'fs-overlay-resume-' + currentFolder.replace(/[^a-zA-Z0-9]/g, '_');
+        localStorage.setItem(resumeKey, String(imgIdx + 1));
+        nextImage();
+      } else {
+        alert(data.error || 'Save failed');
+      }
+    })
+    .catch(err => {
+      btn.innerHTML = '<i class="fas fa-save me-1"></i>Save & Next';
+      btn.disabled = false;
+      alert(err.message);
+    });
+  };
+})();
+</script>
+@endpush

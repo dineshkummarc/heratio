@@ -1,0 +1,794 @@
+{{--
+  GLAM Browser - _browse_content.blade.php
+  Shared content partial for browse (used by both 2-col and full-width layouts)
+--}}
+@php
+  // Normalise a browse image src. A relative path like "uploads/images/f.jpg"
+  // or "uploads/r/123/thumb.jpg" would otherwise resolve against the current
+  // /glam/ route ("/glam/uploads/...") and 404. Force it to an application-root
+  // URL; pass absolute / protocol-relative / data: / blob: URLs through as-is.
+  // (ported from the artorius production fix, 2026-07-16)
+  $normalizeBrowseImageUrl = static function ($path) {
+      if (! is_string($path) || trim($path) === '') {
+          return null;
+      }
+      $path = trim($path);
+      if (preg_match('#^https?://#i', $path)
+          || str_starts_with($path, '//')
+          || str_starts_with($path, 'data:')
+          || str_starts_with($path, 'blob:')) {
+          return $path;
+      }
+      return url('/' . ltrim($path, '/'));
+  };
+
+  // Re-establish helpers if not already set (when included from browse.blade.php they are available)
+  $typeConfig = $typeConfig ?? [
+      'archive' => ['icon' => 'fa-archive',  'color' => 'success', 'label' => 'Archive'],
+      'museum'  => ['icon' => 'fa-landmark', 'color' => 'warning', 'label' => 'Museum'],
+      'gallery' => ['icon' => 'fa-palette',  'color' => 'info',    'label' => 'Gallery'],
+      'library' => ['icon' => 'fa-book',     'color' => 'primary', 'label' => 'Library'],
+      'dam'     => ['icon' => 'fa-images',   'color' => 'danger',  'label' => 'Photo/DAM'],
+  ];
+  $sortLabels = $sortLabels ?? [
+      'lastUpdated' => 'Date created',
+      'alphabetic'  => 'Title',
+      'identifier'  => 'Identifier',
+      'refcode'     => 'Reference code',
+      'startdate'   => 'Start date',
+      'enddate'     => 'End date',
+  ];
+  $fp   = $filterParams ?? [];
+  $from = (($page ?? 1) - 1) * ($limit ?? 30) + 1;
+  $to   = min(($page ?? 1) * ($limit ?? 30), $total ?? 0);
+@endphp
+
+{{-- ========== TOP SEARCH BLOCK ========== --}}
+{{-- Keep the query visible and refinable on the results page instead of only
+     inside the Semantic Search modal. Preserves all active filters. --}}
+<form method="GET" action="{{ route('glam.browse') }}" class="mb-3">
+  @foreach(($fp ?? []) as $__k => $__v)
+    @if(!in_array($__k, ['query','page'], true) && $__v !== null && $__v !== '')
+      <input type="hidden" name="{{ $__k }}" value="{{ is_array($__v) ? implode(',', $__v) : $__v }}">
+    @endif
+  @endforeach
+  <div class="input-group input-group-lg">
+    <span class="input-group-text"><i class="fas fa-search" aria-hidden="true"></i></span>
+    <input type="text" class="form-control" name="query"
+           value="{{ $fp['query'] ?? ($queryFilter ?? '') }}"
+           placeholder="{{ __('Search the catalogue...') }}" aria-label="{{ __('Search') }}">
+    <button class="btn atom-btn-secondary" type="submit">{{ __('Search') }}</button>
+  </div>
+</form>
+
+{{-- ========== TITLE SECTION ========== --}}
+<div class="multiline-header d-flex align-items-center mb-3">
+  <i class="fas fa-folder-open fa-2x text-muted me-3" aria-hidden="true"></i>
+  <div class="flex-grow-1">
+    <h1 class="mb-0 text-success">
+      @if(($total ?? 0) > 0)
+        Showing {{ number_format($total) }} results
+      @else
+        No results found
+      @endif
+    </h1>
+    <span class="small text-muted">{{ __('GLAM Browser') }}</span>
+  </div>
+  <button type="button" class="btn atom-btn-white ms-3" id="openSemanticSearchBtn" data-bs-toggle="modal" data-bs-target="#semanticSearchModal">
+    <i class="fas fa-brain me-1"></i>
+    <span class="d-none d-md-inline">{{ __('Semantic Search') }}</span>
+    <span class="d-md-none">{{ __('Search') }}</span>
+  </button>
+</div>
+
+{{-- ========== BREADCRUMB (if browsing within a parent) ========== --}}
+@if(!empty($breadcrumb) && count($breadcrumb) > 0)
+  <nav aria-label="{{ __('Hierarchy breadcrumb') }}" class="mb-2">
+    <ol class="breadcrumb mb-0 small">
+      <li class="breadcrumb-item">
+        <a href="{{ route('glam.browse') }}"><i class="fas fa-home"></i></a>
+      </li>
+      @foreach($breadcrumb as $crumb)
+        @if(!$loop->last)
+          <li class="breadcrumb-item">
+            <a href="{{ glamBrowseUrl($fp, ['parent' => is_array($crumb) ? ($crumb['id'] ?? '') : ($crumb->id ?? '')]) }}">{{ is_array($crumb) ? ($crumb['title'] ?? '[Untitled]') : ($crumb->title ?? '[Untitled]') }}</a>
+          </li>
+        @else
+          <li class="breadcrumb-item active" aria-current="page">{{ is_array($crumb) ? ($crumb['title'] ?? '[Untitled]') : ($crumb->title ?? '[Untitled]') }}</li>
+        @endif
+      @endforeach
+    </ol>
+  </nav>
+@endif
+
+{{-- ========== ACTIVE FILTERS BAR ========== --}}
+@php
+  $hasActiveFilters = !empty($typeFilter) || !empty($creatorFilter) || !empty($levelFilter) || !empty($repoFilter) || !empty($hasDigital) || !empty($parentId) || !empty($subjectFilter) || !empty($placeFilter) || !empty($genreFilter) || !empty($mediaFilter) || !empty($queryFilter);
+@endphp
+@if($hasActiveFilters)
+  <div class="d-flex flex-wrap align-items-center gap-2 mb-3 p-2 bg-light border rounded">
+    <span class="small fw-bold text-muted me-1"><i class="fas fa-filter me-1"></i> {{ __('Active:') }}</span>
+
+    @if(!empty($queryFilter))
+      <a href="{{ glamBrowseUrl($fp, [], ['query', 'semantic']) }}" class="badge bg-dark text-decoration-none">
+        <i class="fas fa-search me-1"></i> "{{ e($queryFilter) }}" <i class="fas fa-times ms-1"></i>
+      </a>
+    @endif
+
+    @if(!empty($typeFilter))
+      @php $tcActive = $typeConfig[$typeFilter] ?? ['icon' => 'fa-question', 'color' => 'secondary', 'label' => ucfirst($typeFilter)]; @endphp
+      <a href="{{ glamBrowseUrl($fp, [], ['type']) }}" class="badge bg-{{ $tcActive['color'] }} text-decoration-none">
+        <i class="fas {{ $tcActive['icon'] }} me-1"></i> {{ $tcActive['label'] }} <i class="fas fa-times ms-1"></i>
+      </a>
+    @endif
+
+    @if(!empty($creatorFilter))
+      <a href="{{ glamBrowseUrl($fp, [], ['creator']) }}" class="badge bg-info text-decoration-none">
+        <i class="fas fa-user me-1"></i> {{ __('Creator') }} <i class="fas fa-times ms-1"></i>
+      </a>
+    @endif
+
+    @if(!empty($subjectFilter))
+      <a href="{{ glamBrowseUrl($fp, [], ['subject']) }}" class="badge bg-primary text-decoration-none">
+        <i class="fas fa-tag me-1"></i> {{ __('Subject') }} <i class="fas fa-times ms-1"></i>
+      </a>
+    @endif
+
+    @if(!empty($placeFilter))
+      <a href="{{ glamBrowseUrl($fp, [], ['place']) }}" class="badge bg-secondary text-decoration-none">
+        <i class="fas fa-map-marker-alt me-1"></i> {{ __('Place') }} <i class="fas fa-times ms-1"></i>
+      </a>
+    @endif
+
+    @if(!empty($genreFilter))
+      <a href="{{ glamBrowseUrl($fp, [], ['genre']) }}" class="badge bg-warning text-dark text-decoration-none">
+        <i class="fas fa-theater-masks me-1"></i> {{ __('Genre') }} <i class="fas fa-times ms-1"></i>
+      </a>
+    @endif
+
+    @if(!empty($levelFilter))
+      <a href="{{ glamBrowseUrl($fp, [], ['level']) }}" class="badge bg-secondary text-decoration-none">
+        <i class="fas fa-sitemap me-1"></i> {{ __('Level') }} <i class="fas fa-times ms-1"></i>
+      </a>
+    @endif
+
+    @if(!empty($mediaFilter))
+      <a href="{{ glamBrowseUrl($fp, [], ['media']) }}" class="badge bg-danger text-decoration-none">
+        <i class="fas fa-photo-video me-1"></i> {{ __('Media') }} <i class="fas fa-times ms-1"></i>
+      </a>
+    @endif
+
+    @if(!empty($repoFilter))
+      <a href="{{ glamBrowseUrl($fp, [], ['repo']) }}" class="badge bg-success text-decoration-none">
+        <i class="fas fa-building me-1"></i> {{ __('Repository') }} <i class="fas fa-times ms-1"></i>
+      </a>
+    @endif
+
+    @if(!empty($hasDigital))
+      <a href="{{ glamBrowseUrl($fp, [], ['hasDigital']) }}" class="badge bg-purple text-decoration-none" style="background-color:#6f42c1;">
+        <i class="fas fa-image me-1"></i> {{ __('Digital objects') }} <i class="fas fa-times ms-1"></i>
+      </a>
+    @endif
+
+    @if(!empty($parentId))
+      <a href="{{ glamBrowseUrl($fp, [], ['parent', 'topLevelOnly']) }}" class="badge bg-dark text-decoration-none">
+        <i class="fas fa-folder-open me-1"></i> In: {{ e(is_array($parent) ? ($parent['title'] ?? 'Parent #'.$parentId) : ($parent->title ?? 'Parent #'.$parentId)) }} <i class="fas fa-times ms-1"></i>
+      </a>
+    @endif
+
+    <a href="{{ route('glam.browse') }}" class="badge bg-outline-secondary border text-dark text-decoration-none ms-1" title="{{ __('Clear all filters') }}">
+      <i class="fas fa-times-circle me-1"></i> {{ __('Clear all') }}
+    </a>
+  </div>
+@endif
+
+{{-- ========== FUZZY SEARCH ALERTS ========== --}}
+{{-- Auto-corrected query --}}
+@if(!empty($correctedQuery))
+  <div class="alert alert-info alert-dismissible fade show mb-2" role="alert">
+    <i class="fas fa-spell-check me-1"></i>
+    {{ __('Showing results for') }} <strong>"{{ e($correctedQuery) }}"</strong>.
+    @if(!empty($originalQuery))
+      <a href="{{ glamBrowseUrl($fp, ['query' => $originalQuery, 'noCorrect' => 1]) }}" class="alert-link">
+        Search instead for "{{ e($originalQuery) }}"
+      </a>
+    @endif
+    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="{{ __('Close') }}"></button>
+  </div>
+@endif
+
+{{-- "Did you mean" suggestion --}}
+@if(!empty($didYouMean))
+  <div class="alert alert-warning alert-dismissible fade show mb-2" role="alert">
+    <i class="fas fa-lightbulb me-1"></i>
+    {{ __('Did you mean:') }}
+    <a href="{{ glamBrowseUrl($fp, ['query' => $didYouMean]) }}" class="alert-link fw-bold">
+      "{{ e($didYouMean) }}"
+    </a>?
+    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="{{ __('Close') }}"></button>
+  </div>
+@endif
+
+{{-- ES-assisted search warning --}}
+@if(!empty($esAssistedSearch))
+  <div class="alert alert-secondary alert-dismissible fade show mb-2" role="alert">
+    <i class="fas fa-info-circle me-1"></i>
+    {{ __('Results enhanced by Elasticsearch full-text search.') }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="{{ __('Close') }}"></button>
+  </div>
+@endif
+
+{{-- ========== DISCOVERY MODE ALERT ========== --}}
+@if(!empty($discoveryMode) && !empty($discoveryMeta))
+  <div class="alert alert-success alert-dismissible fade show mb-2" role="alert">
+    <div class="d-flex align-items-start">
+      <i class="fas fa-brain fa-lg me-2 mt-1"></i>
+      <div class="flex-grow-1">
+        <strong>{{ __('AI-powered discovery mode') }}</strong>
+        @if(!empty($discoveryMeta['synonyms']))
+          <div class="mt-1 small">
+            <i class="fas fa-exchange-alt me-1"></i> <strong>{{ __('Synonyms:') }}</strong>
+            @foreach($discoveryMeta['synonyms'] as $syn)
+              <span class="badge bg-light text-dark border me-1">{{ $syn }}</span>
+            @endforeach
+          </div>
+        @endif
+        @if(!empty($discoveryMeta['entities']))
+          <div class="mt-1 small">
+            <i class="fas fa-tag me-1"></i> <strong>{{ __('Entities:') }}</strong>
+            @foreach($discoveryMeta['entities'] as $ent)
+              <span class="badge bg-light text-dark border me-1">{{ $ent }}</span>
+            @endforeach
+          </div>
+        @endif
+        @if(!empty($discoveryMeta['expanded_query']))
+          <div class="mt-1 small">
+            <i class="fas fa-expand-arrows-alt me-1"></i> <strong>{{ __('Expanded:') }}</strong>
+            <em>{{ e($discoveryMeta['expanded_query']) }}</em>
+          </div>
+        @endif
+        @if(!empty($discoveryExpanded))
+          <div class="mt-1">
+            <a class="small" data-bs-toggle="collapse" href="#discoveryDetails" role="button" aria-expanded="false">
+              {{ __('Show details') }} <i class="fas fa-caret-down"></i>
+            </a>
+            <div class="collapse mt-1" id="discoveryDetails">
+              <pre class="bg-light p-2 rounded small mb-0">{{ json_encode($discoveryExpanded, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) }}</pre>
+            </div>
+          </div>
+        @endif
+      </div>
+    </div>
+    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="{{ __('Close') }}"></button>
+  </div>
+@endif
+
+{{-- ========== TOOLBAR ========== --}}
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+
+  {{-- Print --}}
+  <a href="{{ route('glam.print', array_filter($fp)) }}" target="_blank" class="btn atom-btn-outline-success btn-sm">
+    <i class="fas fa-print"></i> {{ __('Print') }}
+  </a>
+
+  {{-- CSV Export --}}
+  <a href="{{ route('glam.export.csv', array_filter($fp)) }}" class="btn atom-btn-outline-success btn-sm">
+    <i class="fas fa-download"></i> CSV
+  </a>
+
+  {{-- View mode buttons --}}
+  <a href="{{ glamBrowseUrl($fp, ['view' => 'card']) }}"
+     class="btn btn-sm {{ ($viewMode ?? 'card') === 'card' ? 'atom-btn-secondary' : 'atom-btn-white' }}" title="{{ __('Card view') }}" aria-label="{{ __('Card view') }}">
+    <i class="fas fa-th-large"></i>
+  </a>
+  <a href="{{ glamBrowseUrl($fp, ['view' => 'grid']) }}"
+     class="btn btn-sm {{ ($viewMode ?? 'card') === 'grid' ? 'atom-btn-secondary' : 'atom-btn-white' }}" title="{{ __('Grid view') }}" aria-label="{{ __('Grid view') }}">
+    <i class="fas fa-th"></i>
+  </a>
+  <a href="{{ glamBrowseUrl($fp, ['view' => 'table']) }}"
+     class="btn btn-sm {{ ($viewMode ?? 'card') === 'table' ? 'atom-btn-secondary' : 'atom-btn-white' }}" title="{{ __('Table view') }}" aria-label="{{ __('Table view') }}">
+    <i class="fas fa-list"></i>
+  </a>
+  <a href="{{ glamBrowseUrl($fp, ['view' => 'full']) }}"
+     class="btn btn-sm {{ ($viewMode ?? 'card') === 'full' ? 'atom-btn-secondary' : 'atom-btn-white' }}" title="{{ __('Full width') }}" aria-label="{{ __('Full width') }}">
+    <i class="fas fa-bars"></i>
+  </a>
+  <a href="{{ glamBrowseUrl($fp, ['view' => 'tile']) }}"
+     class="btn btn-sm {{ ($viewMode ?? 'card') === 'tile' ? 'atom-btn-secondary' : 'atom-btn-white' }}" title="{{ __('Marketplace-style tiles') }}" aria-label="{{ __('Marketplace-style tiles') }}">
+    <i class="fas fa-shopping-bag"></i>
+  </a>
+
+  {{-- Limit dropdown --}}
+  <div class="dropdown">
+    <button class="btn atom-btn-outline-success btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown">{{ $limit ?? 30 }}/page</button>
+    <ul class="dropdown-menu">
+      @foreach([10, 30, 50, 100] as $lim)
+        <li><a class="dropdown-item {{ ($limit ?? 30) == $lim ? 'active' : '' }}" href="{{ glamBrowseUrl($fp, ['limit' => $lim]) }}">{{ $lim }}</a></li>
+      @endforeach
+    </ul>
+  </div>
+
+  {{-- Sort dropdown --}}
+  <div class="dropdown ms-auto">
+    <button class="btn atom-btn-outline-success btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown">Sort: {{ $sortLabels[$sort ?? 'lastUpdated'] ?? 'Date created' }}</button>
+    <ul class="dropdown-menu dropdown-menu-end">
+      @foreach($sortLabels as $sKey => $sLabel)
+        <li>
+          <a class="dropdown-item {{ ($sort ?? 'lastUpdated') === $sKey ? 'active' : '' }}"
+             href="{{ glamBrowseUrl($fp, ['sort' => $sKey]) }}">
+            {{ $sLabel }}
+          </a>
+        </li>
+      @endforeach
+    </ul>
+  </div>
+
+  {{-- Sort direction dropdown --}}
+  <div class="dropdown">
+    <button class="btn atom-btn-outline-success btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown">{{ ($sortDir ?? 'asc') === 'asc' ? 'Asc' : 'Desc' }}</button>
+    <ul class="dropdown-menu dropdown-menu-end">
+      <li>
+        <a class="dropdown-item {{ ($sortDir ?? 'asc') === 'asc' ? 'active' : '' }}"
+           href="{{ glamBrowseUrl($fp, ['sortDir' => 'asc', 'dir' => 'asc']) }}">
+          <i class="fas fa-sort-amount-up-alt me-1"></i> {{ __('Ascending') }}
+        </a>
+      </li>
+      <li>
+        <a class="dropdown-item {{ ($sortDir ?? 'asc') === 'desc' ? 'active' : '' }}"
+           href="{{ glamBrowseUrl($fp, ['sortDir' => 'desc', 'dir' => 'desc']) }}">
+          <i class="fas fa-sort-amount-down me-1"></i> {{ __('Descending') }}
+        </a>
+      </li>
+    </ul>
+  </div>
+</div>
+
+{{-- ========== DIGITAL OBJECTS INFO ========== --}}
+@if(($digitalObjectCount ?? 0) > 0)
+  <div class="d-flex align-items-center gap-2 mb-2">
+    <span class="small text-muted">
+      <i class="fas fa-image me-1"></i> {{ number_format($digitalObjectCount) }} with digital objects
+    </span>
+    @if(empty($hasDigital))
+      <a href="{{ glamBrowseUrl($fp, ['hasDigital' => 1]) }}" class="btn atom-btn-outline-success btn-sm">
+        <i class="fas fa-image"></i> {{ __('With digital objects') }}
+      </a>
+    @else
+      <a href="{{ glamBrowseUrl($fp, [], ['hasDigital']) }}" class="btn atom-btn-outline-success btn-sm">
+        <i class="fas fa-times me-1"></i> {{ __('Showing digital only') }}
+      </a>
+    @endif
+  </div>
+@endif
+
+{{-- ========== TOP-LEVEL FILTER ========== --}}
+{{-- AtoM parity: browse can default to top-level descriptions and offers a
+     removable filter to show every description. Mirrors AtoM's
+     informationobject/browse `topLod` chip. --}}
+<div class="d-flex align-items-center gap-2 mb-2">
+  @if(($topLevelOnly ?? '0') === '1')
+    <a href="{{ glamBrowseUrl($fp, ['topLevel' => '0']) }}" class="btn atom-btn-outline-success btn-sm">
+      <i class="fas fa-times me-1"></i> {{ __('Only top-level descriptions') }}
+    </a>
+  @else
+    <a href="{{ glamBrowseUrl($fp, ['topLevel' => '1']) }}" class="btn atom-btn-outline-success btn-sm">
+      <i class="fas fa-layer-group me-1"></i> {{ __('Top-level descriptions only') }}
+    </a>
+  @endif
+</div>
+
+{{-- ========== RESULTS INFO ========== --}}
+@if(($total ?? 0) > 0)
+  <div class="small text-muted mb-2">
+    Results {{ number_format($from) }} to {{ number_format($to) }} of {{ number_format($total) }}
+  </div>
+@endif
+
+{{-- ========== RESULTS ========== --}}
+@if(($total ?? 0) > 0)
+
+  {{-- ===== TABLE VIEW ===== --}}
+  @if(($viewMode ?? 'card') === 'table')
+    <div class="table-responsive mb-3">
+      <table class="table table-bordered table-striped table-hover mb-0 browse-table" id="glam-browse-table">
+        <thead>
+          <tr>
+            <th class="col-thumb">
+              <span class="d-none d-md-inline">{{ __('Image') }}</span>
+              <div class="resize-handle"></div>
+            </th>
+            <th>
+              {{ __('Title') }}
+              <div class="resize-handle"></div>
+            </th>
+            <th class="col-identifier">
+              {{ __('Identifier') }}
+              <div class="resize-handle"></div>
+            </th>
+            <th class="col-level">
+              {{ __('Level') }}
+              <div class="resize-handle"></div>
+            </th>
+            <th>
+              {{ __('Type') }}
+              <div class="resize-handle"></div>
+            </th>
+            <th class="col-actions">
+              {{ __('Actions') }}
+              <div class="resize-handle"></div>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          @foreach($objects as $obj)
+            @php
+              $objType = $obj->glam_type ?? $obj->object_type ?? $obj->type ?? 'archive';
+              $otc = $typeConfig[$objType] ?? ['icon' => 'fa-question', 'color' => 'secondary', 'label' => ucfirst($objType)];
+              $objTitle = $obj->title ?? $obj->name ?? '[Untitled]';
+              $objSlug = $obj->slug ?? '';
+              $objThumb = $obj->thumbnail_path ?? $obj->thumbnail ?? null;
+              $objIdentifier = $obj->identifier ?? '';
+              $objLevel = $obj->level_of_description ?? $obj->level ?? '';
+              $objUrl = '/' . $objSlug;
+            @endphp
+            <tr>
+              {{-- Thumbnail --}}
+              <td class="col-thumb text-center">
+                @if($objThumb)
+                  <a href="{{ $objUrl }}">
+                    <img src="{{ $normalizeBrowseImageUrl($objThumb) }}" alt="" class="browse-thumb-lg" loading="lazy">
+                  </a>
+                @else
+                  <div class="browse-placeholder-lg mx-auto">
+                    <i class="fas {{ $otc['icon'] }}"></i>
+                  </div>
+                @endif
+              </td>
+              {{-- Title --}}
+              <td>
+                <a href="{{ $objUrl }}" class="text-decoration-none fw-semibold">
+                  {{ $objTitle }}
+                </a>
+                @if(!empty($obj->scope_and_content))
+                  <br><small class="text-muted">{{ Str::limit(strip_tags($obj->scope_and_content), 120) }}</small>
+                @endif
+              </td>
+              {{-- Identifier --}}
+              <td class="col-identifier">
+                <small>{{ $objIdentifier }}</small>
+              </td>
+              {{-- Level --}}
+              <td class="col-level">
+                @if($objLevel)
+                  <span class="badge bg-light text-dark border">{{ $objLevel }}</span>
+                @endif
+              </td>
+              {{-- Type --}}
+              <td>
+                <span class="badge bg-{{ $otc['color'] }}">
+                  <i class="fas {{ $otc['icon'] }} me-1"></i> {{ $otc['label'] }}
+                </span>
+              </td>
+              {{-- Actions --}}
+              <td class="col-actions text-center">
+                <div class="d-flex gap-1 justify-content-center">
+                  <a href="{{ $objUrl }}" class="btn btn-sm atom-btn-white" title="{{ __('View') }}">
+                    <i class="fas fa-eye"></i>
+                  </a>
+                  <button class="btn atom-btn-outline-success btn-sm clipboard" data-clipboard-slug="{{ $objSlug }}" data-clipboard-type="informationObject" data-title="{{ __('Add to clipboard') }}" data-alt-title="{{ __('Remove from clipboard') }}" title="{{ __('Add to clipboard') }}" aria-label="{{ __('Add to clipboard') }}"><i class="fas fa-paperclip"></i></button>
+                </div>
+              </td>
+            </tr>
+            {{-- Discovery metadata footer (per result) --}}
+            @if(!empty($discoveryMode) && !empty($obj->_discovery))
+              <tr class="table-light">
+                <td colspan="6" class="py-1 px-3">
+                  @include('ahg-display::display._discovery_meta', ['discovery' => $obj->_discovery])
+                </td>
+              </tr>
+            @endif
+          @endforeach
+        </tbody>
+      </table>
+    </div>
+
+  {{-- ===== GRID VIEW ===== --}}
+  @elseif(($viewMode ?? 'card') === 'grid')
+    <div class="row row-cols-2 row-cols-md-4 row-cols-lg-6 g-3">
+      @foreach($objects as $obj)
+        @php
+          $objType = $obj->glam_type ?? $obj->object_type ?? $obj->type ?? 'archive';
+          $otc = $typeConfig[$objType] ?? ['icon' => 'fa-question', 'color' => 'secondary', 'label' => ucfirst($objType)];
+          $objTitle = $obj->title ?? $obj->name ?? '[Untitled]';
+          $objSlug = $obj->slug ?? '';
+          // Treat empty strings as missing - keeps the typed-icon fallback meaningful
+          $__candidates = array_filter([$obj->thumbnail_path ?? null, $obj->thumbnail ?? null], fn ($v) => is_string($v) && trim($v) !== '');
+          $objThumb = $__candidates ? reset($__candidates) : null;
+          $objUrl = '/' . $objSlug;
+        @endphp
+        <div class="col">
+          <div class="card h-100 shadow-sm">
+            <div class="card-img-top bg-light d-flex align-items-center justify-content-center grid-img-wrapper">
+              @if($objThumb)
+                <a href="{{ $objUrl }}"><img src="{{ $normalizeBrowseImageUrl($objThumb) }}" alt="{{ $objTitle }}" class="img-fluid grid-img" loading="lazy"></a>
+              @else
+                <a href="{{ $objUrl }}" class="text-muted py-4"><i class="fas {{ $otc['icon'] }} fa-3x"></i></a>
+              @endif
+            </div>
+            <div class="card-body p-2">
+              <a href="{{ $objUrl }}" class="text-success text-decoration-none small d-block text-truncate">{{ $objTitle }}</a>
+            </div>
+          </div>
+        </div>
+      @endforeach
+    </div>
+
+  {{-- ===== FULL WIDTH VIEW ===== --}}
+  @elseif(($viewMode ?? 'card') === 'full')
+    <div class="mb-3">
+      @foreach($objects as $obj)
+        @php
+          $objType = $obj->glam_type ?? $obj->object_type ?? $obj->type ?? 'archive';
+          $otc = $typeConfig[$objType] ?? ['icon' => 'fa-question', 'color' => 'secondary', 'label' => ucfirst($objType)];
+          $objTitle = $obj->title ?? $obj->name ?? '[Untitled]';
+          $objSlug = $obj->slug ?? '';
+          $objThumb = $obj->thumbnail_path ?? $obj->thumbnail ?? null;
+          $objIdentifier = $obj->identifier ?? '';
+          $objLevel = $obj->level_of_description ?? $obj->level ?? '';
+          $objUrl = '/' . $objSlug;
+          $objRefCode = $obj->reference_code ?? $obj->refcode ?? '';
+          $objDates = $obj->dates ?? $obj->date ?? '';
+          $objScope = $obj->scope_and_content ?? '';
+          $objCreator = $obj->creator ?? $obj->creator_name ?? '';
+          $objRepo = $obj->repository_name ?? $obj->repository ?? '';
+        @endphp
+        <div class="card mb-3 shadow-sm">
+          <div class="card-body">
+            <div class="d-flex flex-column flex-md-row gap-3">
+              {{-- Large image --}}
+              <div class="full-img-bg flex-shrink-0">
+                @if($objThumb)
+                  <a href="{{ $objUrl }}">
+                    <img src="{{ $normalizeBrowseImageUrl($objThumb) }}" alt="{{ $objTitle }}" class="full-img" loading="lazy">
+                  </a>
+                @else
+                  <div class="text-center text-muted">
+                    <i class="fas {{ $otc['icon'] }} fa-5x"></i>
+                  </div>
+                @endif
+              </div>
+              {{-- Details --}}
+              <div class="flex-grow-1">
+                <div class="d-flex justify-content-between align-items-start mb-2">
+                  <div>
+                    <h4 class="mb-1">
+                      <a href="{{ $objUrl }}" class="text-decoration-none">{{ $objTitle }}</a>
+                    </h4>
+                    <span class="badge bg-{{ $otc['color'] }} me-1">
+                      <i class="fas {{ $otc['icon'] }} me-1"></i> {{ $otc['label'] }}
+                    </span>
+                    @if($objLevel)
+                      <span class="badge bg-light text-dark border">{{ $objLevel }}</span>
+                    @endif
+                  </div>
+                  <a href="{{ $objUrl }}" class="btn btn-sm atom-btn-white" title="{{ __('View') }}">
+                    <i class="fas fa-eye me-1"></i> {{ __('View') }}
+                  </a>
+                </div>
+
+                <dl class="row mb-0 small">
+                  @if($objIdentifier)
+                    <dt class="col-sm-3 col-md-2">{{ __('Identifier') }}</dt>
+                    <dd class="col-sm-9 col-md-10">{{ $objIdentifier }}</dd>
+                  @endif
+                  @if($objRefCode)
+                    <dt class="col-sm-3 col-md-2">{{ __('Reference code') }}</dt>
+                    <dd class="col-sm-9 col-md-10">{{ $objRefCode }}</dd>
+                  @endif
+                  @if($objDates)
+                    <dt class="col-sm-3 col-md-2">{{ __('Date(s)') }}</dt>
+                    <dd class="col-sm-9 col-md-10">{{ $objDates }}</dd>
+                  @endif
+                  @if($objCreator)
+                    <dt class="col-sm-3 col-md-2">{{ __('Creator') }}</dt>
+                    <dd class="col-sm-9 col-md-10">{{ $objCreator }}</dd>
+                  @endif
+                  @if($objRepo)
+                    <dt class="col-sm-3 col-md-2">{{ __('Repository') }}</dt>
+                    <dd class="col-sm-9 col-md-10">{{ $objRepo }}</dd>
+                  @endif
+                  @if($objScope)
+                    <dt class="col-sm-3 col-md-2">Scope &amp; content</dt>
+                    <dd class="col-sm-9 col-md-10">{{ Str::limit(strip_tags($objScope), 400) }}</dd>
+                  @endif
+                </dl>
+              </div>
+            </div>
+          </div>
+          {{-- Discovery metadata footer --}}
+          @if(!empty($discoveryMode) && !empty($obj->_discovery))
+            <div class="card-footer py-1 px-3">
+              @include('ahg-display::display._discovery_meta', ['discovery' => $obj->_discovery])
+            </div>
+          @endif
+        </div>
+      @endforeach
+    </div>
+
+  {{-- ===== TILE VIEW (Marketplace-style) ===== --}}
+  @elseif(($viewMode ?? 'card') === 'tile')
+    <div class="row row-cols-1 row-cols-sm-2 row-cols-xl-3 g-3 mb-3">
+      @foreach($objects as $obj)
+        @php
+          $objType = $obj->glam_type ?? $obj->object_type ?? $obj->type ?? 'archive';
+          $otc = $typeConfig[$objType] ?? ['icon' => 'fa-question', 'color' => 'secondary', 'label' => ucfirst($objType)];
+          $objTitle = $obj->title ?? $obj->name ?? '[Untitled]';
+          $objSlug = $obj->slug ?? '';
+          // Prefer the larger reference image over the thumbnail - tile cards
+          // are 200px tall, and small thumbnails (~100px) upscale to a blur.
+          // Filter empty strings - a blank thumbnail column would otherwise render <img src="">
+          // and surface a browser broken-image icon instead of the typed fallback below.
+          // `reference_path` used to sit second in this list. Nothing in the
+          // codebase produces that name - DisplayController assigns $obj->reference
+          // and $obj->thumbnail - so it was a dead alternate (#1478). thumbnail_path
+          // is kept: the actor and information-object browse services do produce it,
+          // so it remains a real fallback if this partial is ever fed from one.
+          $__candidates = array_filter([
+              $obj->reference ?? null,
+              $obj->thumbnail_path ?? null,
+              $obj->thumbnail ?? null,
+          ], fn ($v) => is_string($v) && trim($v) !== '');
+          $objCardImg = $__candidates ? reset($__candidates) : null;
+          $objUrl = '/' . $objSlug;
+          $objIdentifier = $obj->identifier ?? '';
+          $objLevel = $obj->level_of_description ?? $obj->level ?? '';
+          $objCreator = $obj->creator ?? $obj->creator_name ?? '';
+        @endphp
+        <div class="col">
+          <div class="card h-100 shadow-sm">
+            <a href="{{ $objUrl }}" class="text-decoration-none">
+              @if($objCardImg)
+                <img src="{{ $normalizeBrowseImageUrl($objCardImg) }}" class="card-img-top" alt="{{ $objTitle }}" style="height:200px;object-fit:cover;" loading="lazy">
+              @else
+                <div class="card-img-top bg-light d-flex align-items-center justify-content-center text-{{ $otc['color'] }}" style="height:200px;">
+                  <i class="fas {{ $otc['icon'] }} fa-3x"></i>
+                </div>
+              @endif
+            </a>
+            <div class="card-body p-3">
+              <h6 class="card-title mb-1">
+                <a href="{{ $objUrl }}" class="text-decoration-none">{{ \Illuminate\Support\Str::limit($objTitle, 60) }}</a>
+              </h6>
+              @if($objCreator)
+                <p class="small text-muted mb-2 text-truncate" title="{{ $objCreator }}">{{ $objCreator }}</p>
+              @endif
+              <div class="d-flex justify-content-between align-items-center">
+                <span class="badge bg-{{ $otc['color'] }}">
+                  <i class="fas {{ $otc['icon'] }} me-1"></i>{{ $otc['label'] }}
+                </span>
+                @if($objLevel)
+                  <small class="text-muted text-truncate ms-2">{{ $objLevel }}</small>
+                @elseif($objIdentifier)
+                  <small class="text-muted text-truncate ms-2">{{ $objIdentifier }}</small>
+                @endif
+              </div>
+              @if (!empty($obj->work_key) && !empty($obj->cluster_count) && $obj->cluster_count > 1)
+                <a href="{{ url('/library/work-cluster/' . $obj->work_key) }}"
+                   class="d-block small text-decoration-none mt-2">
+                  <i class="fas fa-layer-group"></i>
+                  {{ __('View all :count editions', ['count' => $obj->cluster_count]) }}
+                </a>
+              @endif
+            </div>
+          </div>
+        </div>
+      @endforeach
+    </div>
+
+  {{-- ===== CARD VIEW (DEFAULT) ===== --}}
+  @else
+    <div class="mb-3">
+      @foreach($objects as $obj)
+        @php
+          $objType = $obj->glam_type ?? $obj->object_type ?? $obj->type ?? 'archive';
+          $otc = $typeConfig[$objType] ?? ['icon' => 'fa-question', 'color' => 'secondary', 'label' => ucfirst($objType)];
+          $objTitle = $obj->title ?? $obj->name ?? '[Untitled]';
+          $objSlug = $obj->slug ?? '';
+          $__candidates = array_filter([$obj->thumbnail_path ?? null, $obj->thumbnail ?? null], fn ($v) => is_string($v) && trim($v) !== '');
+          $objThumb = $__candidates ? reset($__candidates) : null;
+          $objIdentifier = $obj->identifier ?? '';
+          $objLevel = $obj->level_of_description ?? $obj->level ?? '';
+          $objUrl = '/' . $objSlug;
+          $objScope = $obj->scope_and_content ?? '';
+          $childCount = $obj->child_count ?? 0;
+        @endphp
+        <div class="card mb-2 shadow-sm">
+          <div class="row g-0">
+            <div class="col-md-2 d-flex align-items-center justify-content-center p-2 bg-light">
+              @if($objThumb)
+                <a href="{{ $objUrl }}"><img src="{{ $normalizeBrowseImageUrl($objThumb) }}" alt="{{ $objTitle }}" class="img-fluid rounded card-img-browse"></a>
+              @else
+                <a href="{{ $objUrl }}" aria-label="{{ $objTitle }}"><i class="fas {{ $otc['icon'] }} fa-4x text-{{ $otc['color'] }}"></i></a>
+              @endif
+            </div>
+            <div class="col-md-9">
+              <div class="card-body py-2">
+                <h3 class="h6 card-title mb-1">
+                  <a href="{{ $objUrl }}" class="text-success text-decoration-none">{{ $objTitle }}</a>
+                </h3>
+                <p class="card-text mb-1 small">
+                  @if($objIdentifier)
+                    <span class="text-success">{{ $objIdentifier }}</span>
+                  @endif
+                  @if($objLevel)
+                    <span class="mx-1">&middot;</span>{{ $objLevel }}
+                  @endif
+                  @if($childCount > 0)
+                    <span class="mx-1">&middot;</span><a href="{{ glamBrowseUrl($fp, ['parent' => $obj->id]) }}"><i class="fas fa-folder"></i> {{ $childCount }}</a>
+                  @endif
+                </p>
+                @if($objScope)
+                  <p class="card-text text-muted small mb-1">{{ Str::limit(strip_tags($objScope), 150) }}</p>
+                @endif
+                <span class="badge bg-{{ $otc['color'] }}">{{ $otc['label'] }}</span>
+                @if (!empty($obj->work_key) && !empty($obj->cluster_count) && $obj->cluster_count > 1)
+                  <a href="{{ url('/library/work-cluster/' . $obj->work_key) }}"
+                     class="ms-2 small text-decoration-none">
+                    <i class="fas fa-layer-group"></i>
+                    {{ __('View all :count editions', ['count' => $obj->cluster_count]) }}
+                  </a>
+                @endif
+              </div>
+            </div>
+            <div class="col-md-1 d-flex flex-column align-items-center justify-content-center border-start gap-1">
+              <a href="{{ $objUrl }}" class="btn atom-btn-outline-success btn-sm" aria-label="{{ __('View') }}"><i class="fas fa-eye"></i></a>
+              <button class="btn atom-btn-outline-success btn-sm clipboard" data-clipboard-slug="{{ $objSlug }}" data-clipboard-type="informationObject" data-title="{{ __('Add to clipboard') }}" data-alt-title="{{ __('Remove from clipboard') }}" title="{{ __('Add to clipboard') }}" aria-label="{{ __('Add to clipboard') }}"><i class="fas fa-paperclip"></i></button>
+            </div>
+          </div>
+          {{-- Discovery metadata footer --}}
+          @if(!empty($discoveryMode) && !empty($obj->_discovery))
+            <div class="card-footer py-1 px-3">
+              @include('ahg-display::display._discovery_meta', ['discovery' => $obj->_discovery])
+            </div>
+          @endif
+        </div>
+      @endforeach
+    </div>
+  @endif
+
+  {{-- ========== PAGINATION ========== --}}
+  @if(($totalPages ?? 1) > 1)
+    <nav class="mt-4">
+      <ul class="pagination justify-content-center">
+        <li class="page-item {{ ($page ?? 1) <= 1 ? 'disabled' : '' }}">
+          <a class="page-link" href="{{ glamBrowseUrl($fp, ['page' => max(1, $page - 1)]) }}">{{ __('Previous') }}</a>
+        </li>
+        @for($p = max(1, $page - 3); $p <= min($totalPages, $page + 3); $p++)
+          <li class="page-item {{ $p == $page ? 'active' : '' }}">
+            <a class="page-link" href="{{ glamBrowseUrl($fp, ['page' => $p]) }}">{{ $p }}</a>
+          </li>
+        @endfor
+        <li class="page-item {{ ($page ?? 1) >= ($totalPages ?? 1) ? 'disabled' : '' }}">
+          <a class="page-link" href="{{ glamBrowseUrl($fp, ['page' => $page + 1]) }}">{{ __('Next') }}</a>
+        </li>
+      </ul>
+    </nav>
+  @endif
+
+@else
+  {{-- No results --}}
+  <div class="text-center py-5">
+    <i class="fas fa-search fa-4x text-muted mb-3"></i>
+    <h4 class="text-muted">{{ __('No results found') }}</h4>
+    <p class="text-muted">
+      {{ __('Try adjusting your filters or') }}
+      <a href="{{ route('glam.browse') }}">clear all filters</a>
+      to start over.
+    </p>
+    @if(!empty($queryFilter))
+      <p class="text-muted">
+        {{ __('Your search for') }} <strong>"{{ e($queryFilter) }}"</strong> did not match any records.
+      </p>
+    @endif
+  </div>
+@endif

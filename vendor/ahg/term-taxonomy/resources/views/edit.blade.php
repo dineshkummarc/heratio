@@ -1,0 +1,549 @@
+@extends('theme::layouts.1col')
+
+@section('title', $term ? 'Term ' . $term->name : 'Term')
+@section('body-class', 'edit term')
+
+@section('content')
+
+  <h1>{{ $term ? 'Term ' . $term->name : 'Term' }}</h1>
+
+  @if($errors->any())
+    <div class="alert alert-danger" role="alert">
+      <ul class="mb-0">
+        @foreach($errors->all() as $error)
+          <li>{{ $error }}</li>
+        @endforeach
+      </ul>
+    </div>
+  @endif
+
+  <form method="POST"
+        action="{{ $term ? route('term.update', $term->slug) : route('term.store') }}"
+        id="editForm">
+    @csrf
+    @if($term) @method('PUT') @endif
+
+    <div class="accordion mb-3">
+      {{-- ===== Elements area ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="elements-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#elements-collapse" aria-expanded="false" aria-controls="elements-collapse">
+            {{ __('Elements area') }}
+          </button>
+        </h2>
+        <div id="elements-collapse" class="accordion-collapse collapse" aria-labelledby="elements-heading">
+          <div class="accordion-body">
+
+            {{-- Taxonomy --}}
+            <div class="mb-3">
+              <label for="taxonomy_id" class="form-label">{{ __('Taxonomy') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              @if($term || $selectedTaxonomyId)
+                {{-- Pre-selected taxonomy: show name, keep ID hidden --}}
+                <input type="text" class="form-control" value="{{ $taxonomyName ?? '' }}" disabled>
+                <input type="hidden" name="taxonomy_id" value="{{ old('taxonomy_id', $selectedTaxonomyId ?? ($term->taxonomy_id ?? '')) }}">
+              @else
+                {{-- Fresh create: show dropdown of all taxonomies --}}
+                <select name="taxonomy_id" id="taxonomy_id" class="form-select" required>
+                  <option value="">- Select taxonomy -</option>
+                  @foreach($taxonomies as $tax)
+                    <option value="{{ $tax->id }}" @selected(old('taxonomy_id') == $tax->id)>{{ $tax->name }}</option>
+                  @endforeach
+                </select>
+              @endif
+            </div>
+
+            {{-- Name --}}
+            <div class="mb-3">
+              <label for="name" class="form-label">{{ __('Name') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              {{--
+                A `disabled` guard keyed on a term "is protected" flag used to
+                sit here. No term table has such a column, nothing writes one,
+                and the string appeared nowhere else in the codebase - so the
+                guard never fired and the field has always been editable. It is
+                removed rather than wired because this schema has no notion of a
+                term that may not be renamed; cultural protocol (term_protocol,
+                #1388) governs who may SEE a term, not who may rename it.
+              --}}
+              <input type="text" name="name" id="name" class="form-control" required
+                     value="{{ old('name', $term->name ?? '') }}">
+            </div>
+
+            {{-- Use for --}}
+            <div class="mb-3">
+              <label for="use_for" class="form-label">{{ __('Use for') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="text" name="use_for" id="use_for" class="form-control"
+                     value="{{ old('use_for', $useFor ?? '') }}">
+            </div>
+
+            {{-- Code --}}
+            <div class="mb-3">
+              <label for="code" class="form-label">{{ __('Code') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="text" name="code" id="code" class="form-control"
+                     value="{{ old('code', $term->code ?? '') }}">
+            </div>
+
+            {{-- #1388 Community protocol: TK/BC label + access condition + owner. --}}
+            @php $tp = $termProtocol ?? null; @endphp
+            <div class="mb-3 p-3 border rounded bg-light">
+              <label class="form-label fw-semibold d-block mb-2"><i class="fas fa-hands-helping me-1"></i>{{ __('Community protocol') }}
+                <span class="text-muted small">({{ __('Traditional Knowledge / Biocultural label + access condition') }})</span></label>
+              <div class="row g-2">
+                <div class="col-md-6">
+                  <label class="form-label small mb-1">{{ __('Access condition') }}</label>
+                  @php $pc = old('protocol_access_condition', $tp->access_condition ?? 'open'); @endphp
+                  <select name="protocol_access_condition" class="form-select form-select-sm">
+                    @foreach(['open'=>'Open','attribution'=>'Attribution','non_commercial'=>'Non-commercial','community_voice'=>'Community voice (hidden from public)','seasonal'=>'Seasonal (hidden)','gendered'=>'Gendered (hidden)','restricted'=>'Restricted (hidden)','sacred_secret'=>'Sacred / secret (hidden)'] as $v => $lbl)
+                      <option value="{{ $v }}" @selected($pc === $v)>{{ __($lbl) }}</option>
+                    @endforeach
+                  </select>
+                </div>
+                <div class="col-md-3">
+                  <label class="form-label small mb-1">{{ __('Label family') }}</label>
+                  @php $pf = old('protocol_label_family', $tp->label_family ?? ''); @endphp
+                  <select name="protocol_label_family" class="form-select form-select-sm">
+                    <option value="">-</option>
+                    <option value="tk" @selected($pf === 'tk')>{{ __('TK') }}</option>
+                    <option value="bc" @selected($pf === 'bc')>{{ __('BC') }}</option>
+                  </select>
+                </div>
+                <div class="col-md-3">
+                  <label class="form-label small mb-1">{{ __('Label code') }}</label>
+                  @php $plc = old('protocol_label_code', $tp->label_code ?? ''); $cat = collect($labelCatalog ?? []); @endphp
+                  @if($cat->isNotEmpty())
+                    {{-- #1388 P1.5 - canonical Local Contexts labels from ahg-icip; groups keep TK/BC apart. --}}
+                    <select name="protocol_label_code" class="form-select form-select-sm">
+                      <option value="">-</option>
+                      @foreach($cat->groupBy('category') as $group => $items)
+                        <optgroup label="{{ $group === 'TK' ? 'Traditional Knowledge (TK)' : ($group === 'BC' ? 'Biocultural (BC)' : $group) }}">
+                          @foreach($items as $lab)
+                            <option value="{{ $lab->code }}" @selected($plc === $lab->code)>{{ $lab->name }}</option>
+                          @endforeach
+                        </optgroup>
+                      @endforeach
+                      @if($plc && ! $cat->firstWhere('code', $plc))
+                        <option value="{{ $plc }}" selected>{{ $plc }} (custom)</option>
+                      @endif
+                    </select>
+                  @else
+                    <input type="text" name="protocol_label_code" class="form-control form-control-sm" value="{{ $plc }}" placeholder="{{ __('tk_secret') }}">
+                  @endif
+                </div>
+                <div class="col-md-6">
+                  <label class="form-label small mb-1">{{ __('Region module') }}</label>
+                  <input type="text" name="protocol_region_module" class="form-control form-control-sm" value="{{ old('protocol_region_module', $tp->region_module ?? '') }}" placeholder="{{ __('southern_africa') }}">
+                </div>
+                <div class="col-md-6">
+                  <label class="form-label small mb-1">{{ __('Owning community (actor id)') }}</label>
+                  <input type="number" name="protocol_owner_actor_id" class="form-control form-control-sm" value="{{ old('protocol_owner_actor_id', $tp->owner_actor_id ?? '') }}">
+                </div>
+              </div>
+              <p class="text-muted small mt-2 mb-0">{{ __('Restricted conditions hide the term - and records tagged with it - from the public; editors always see them.') }}</p>
+            </div>
+
+            {{-- Scope note(s) - multi-row table --}}
+            <h3 class="fs-6 mb-2">{{ __('Scope note(s)') }}</h3>
+            <div class="table-responsive mb-2">
+              <table class="table table-bordered mb-0" id="scope-notes-table">
+                <thead class="table-light">
+                  <tr>
+                    <th id="scopeNotes-content-head" class="w-100">{{ __('Content') }}</th>
+                    <th><span class="visually-hidden">{{ __('Delete') }}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>
+                      <input type="hidden" name="scopeNotes[0][type]" value="scope">
+                      <textarea name="scopeNotes[0][content]" class="form-control form-control-sm" rows="2" aria-labelledby="scopeNotes-content-head">{{ old('scope_note', $scopeNote ?? '') }}</textarea>
+                    </td>
+                    <td>
+                      <button type="button" class="btn atom-btn-white remove-scopenote-row">
+                        <i class="fas fa-times" aria-hidden="true"></i>
+                        <span class="visually-hidden">{{ __('Delete row') }}</span>
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colspan="2">
+                      <button type="button" class="btn atom-btn-white" id="add-scopenote-row">
+                        <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+                      </button>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+
+            {{-- Source note(s) - multi-row table --}}
+            <h3 class="fs-6 mb-2">{{ __('Source note(s)') }}</h3>
+            <div class="table-responsive mb-2">
+              <table class="table table-bordered mb-0" id="source-notes-table">
+                <thead class="table-light">
+                  <tr>
+                    <th id="sourceNotes-content-head" class="w-100">{{ __('Content') }}</th>
+                    <th><span class="visually-hidden">{{ __('Delete') }}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>
+                      <input type="hidden" name="sourceNotes[0][type]" value="source">
+                      <textarea name="sourceNotes[0][content]" class="form-control form-control-sm" rows="2" aria-labelledby="sourceNotes-content-head">{{ old('source_note', $sourceNote ?? '') }}</textarea>
+                    </td>
+                    <td>
+                      <button type="button" class="btn atom-btn-white remove-sourcenote-row">
+                        <i class="fas fa-times" aria-hidden="true"></i>
+                        <span class="visually-hidden">{{ __('Delete row') }}</span>
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colspan="2">
+                      <button type="button" class="btn atom-btn-white" id="add-sourcenote-row">
+                        <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+                      </button>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+
+            {{-- Display note(s) - multi-row table --}}
+            <h3 class="fs-6 mb-2">{{ __('Display note(s)') }}</h3>
+            <div class="table-responsive mb-2">
+              <table class="table table-bordered mb-0" id="display-notes-table">
+                <thead class="table-light">
+                  <tr>
+                    <th id="displayNotes-content-head" class="w-100">{{ __('Content') }}</th>
+                    <th><span class="visually-hidden">{{ __('Delete') }}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>
+                      <input type="hidden" name="displayNotes[0][type]" value="display">
+                      <textarea name="displayNotes[0][content]" class="form-control form-control-sm" rows="2" aria-labelledby="displayNotes-content-head">{{ old('display_note', $displayNote ?? '') }}</textarea>
+                    </td>
+                    <td>
+                      <button type="button" class="btn atom-btn-white remove-displaynote-row">
+                        <i class="fas fa-times" aria-hidden="true"></i>
+                        <span class="visually-hidden">{{ __('Delete row') }}</span>
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colspan="2">
+                      <button type="button" class="btn atom-btn-white" id="add-displaynote-row">
+                        <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+                      </button>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      {{-- ===== Relationships ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="relationships-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#relationships-collapse" aria-expanded="false" aria-controls="relationships-collapse">
+            {{ __('Relationships') }}
+          </button>
+        </h2>
+        <div id="relationships-collapse" class="accordion-collapse collapse" aria-labelledby="relationships-heading">
+          <div class="accordion-body">
+
+            {{-- Broad term (parent) --}}
+            <div class="mb-3">
+              <label for="parent_id" class="form-label">{{ __('Broad term') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="text" name="parent_id" id="parent_id" class="form-control"
+                     value="{{ old('parent_id', $parentTerm->name ?? '') }}" placeholder="{{ __('Type to search terms...') }}" autocomplete="off">
+            </div>
+
+            {{-- Related term(s) --}}
+            <div class="mb-3">
+              <label for="related_terms" class="form-label">{{ __('Related term(s)') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="text" name="related_terms" id="related_terms" class="form-control"
+                     value="{{ old('related_terms', $relatedTerms ?? '') }}" placeholder="{{ __('Type to search terms...') }}" autocomplete="off">
+            </div>
+
+            {{-- Converse term + Self-reciprocal --}}
+            <div class="row">
+              <div class="col-md-9">
+                <div class="mb-3">
+                  <label for="converse_term" class="form-label">{{ __('Converse term') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  <input type="text" name="converse_term" id="converse_term" class="form-control"
+                         value="{{ old('converse_term', $converseTerm->name ?? '') }}" placeholder="{{ __('Type to search terms...') }}" autocomplete="off">
+                </div>
+              </div>
+              <div class="col-md-3 pb-md-2 d-flex align-items-end">
+                <div class="mb-3">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="self_reciprocal" id="self_reciprocal" value="1"
+                           @checked(old('self_reciprocal', ($converseTerm && $term && $converseTerm->id == $term->id) ? 1 : 0))>
+                    <label class="form-check-label" for="self_reciprocal">{{ __('Self-reciprocal') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {{-- Add new narrow terms --}}
+            <div class="mb-3">
+              <label for="narrow_terms" class="form-label">{{ __('Add new narrow terms') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea name="narrow_terms" id="narrow_terms" class="form-control" rows="2">{{ old('narrow_terms', '') }}</textarea>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      {{-- ===== Cross-vocabulary matches (SKOS #661 Phase 3) ===== --}}
+      @if(isset($crossMatchTypes))
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="crossmatches-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#crossmatches-collapse" aria-expanded="false" aria-controls="crossmatches-collapse">
+            {{ __('Cross-vocabulary matches') }}
+          </button>
+        </h2>
+        <div id="crossmatches-collapse" class="accordion-collapse collapse" aria-labelledby="crossmatches-heading">
+          <div class="accordion-body">
+            <p class="text-muted small mb-2">{{ __('Link this term to concepts in other controlled vocabularies (LCSH, Getty AAT, Wikidata, etc.) via SKOS mapping predicates. Emitted on every taxonomy export.') }}</p>
+            <div class="table-responsive mb-2">
+              <table class="table table-bordered mb-0" id="crossmatches-table">
+                <thead class="table-light">
+                  <tr>
+                    <th>{{ __('Match type') }}</th>
+                    <th class="w-50">{{ __('Target URI') }}</th>
+                    <th>{{ __('Target label') }}</th>
+                    <th>{{ __('Vocabulary') }}</th>
+                    <th>{{ __('Source') }}</th>
+                    <th><span class="visually-hidden">{{ __('Delete') }}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @php $cmRows = $crossMatches ?? []; @endphp
+                  @forelse($cmRows as $idx => $cm)
+                    <tr>
+                      <td>
+                        <select name="crossMatches[{{ $idx }}][match_type]" class="form-select form-select-sm">
+                          @foreach($crossMatchTypes as $mt)
+                            <option value="{{ $mt }}" @selected($cm->match_type === $mt)>{{ $mt }}</option>
+                          @endforeach
+                        </select>
+                      </td>
+                      <td><input type="url" name="crossMatches[{{ $idx }}][target_uri]" class="form-control form-control-sm" value="{{ $cm->target_uri }}"></td>
+                      <td><input type="text" name="crossMatches[{{ $idx }}][target_label]" class="form-control form-control-sm" value="{{ $cm->target_label }}"></td>
+                      <td><input type="text" name="crossMatches[{{ $idx }}][target_vocab]" class="form-control form-control-sm" value="{{ $cm->target_vocab }}" placeholder="LCSH"></td>
+                      <td>
+                        <select name="crossMatches[{{ $idx }}][source]" class="form-select form-select-sm">
+                          @foreach($crossMatchSources as $src)
+                            <option value="{{ $src }}" @selected($cm->source === $src)>{{ $src }}</option>
+                          @endforeach
+                        </select>
+                      </td>
+                      <td>
+                        <button type="button" class="btn atom-btn-white remove-crossmatch-row">
+                          <i class="fas fa-times" aria-hidden="true"></i>
+                          <span class="visually-hidden">{{ __('Delete row') }}</span>
+                        </button>
+                      </td>
+                    </tr>
+                  @empty
+                    <tr>
+                      <td>
+                        <select name="crossMatches[0][match_type]" class="form-select form-select-sm">
+                          @foreach($crossMatchTypes as $mt)
+                            <option value="{{ $mt }}">{{ $mt }}</option>
+                          @endforeach
+                        </select>
+                      </td>
+                      <td><input type="url" name="crossMatches[0][target_uri]" class="form-control form-control-sm" placeholder="{{ __('https://id.loc.gov/authorities/subjects/sh85007034') }}"></td>
+                      <td><input type="text" name="crossMatches[0][target_label]" class="form-control form-control-sm"></td>
+                      <td><input type="text" name="crossMatches[0][target_vocab]" class="form-control form-control-sm" placeholder="LCSH"></td>
+                      <td>
+                        <select name="crossMatches[0][source]" class="form-select form-select-sm">
+                          @foreach($crossMatchSources as $src)
+                            <option value="{{ $src }}">{{ $src }}</option>
+                          @endforeach
+                        </select>
+                      </td>
+                      <td>
+                        <button type="button" class="btn atom-btn-white remove-crossmatch-row">
+                          <i class="fas fa-times" aria-hidden="true"></i>
+                          <span class="visually-hidden">{{ __('Delete row') }}</span>
+                        </button>
+                      </td>
+                    </tr>
+                  @endforelse
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colspan="6">
+                      <button type="button" class="btn atom-btn-white" id="add-crossmatch-row">
+                        <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+                      </button>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+      @endif
+    </div>
+
+    <ul class="actions mb-3 nav gap-2">
+      @if($term)
+        <li><a href="{{ route('term.show', $term->slug) }}" class="btn atom-btn-outline-light" role="button">{{ __('Cancel') }}</a></li>
+        <li><input class="btn atom-btn-outline-success" type="submit" value="Save"></li>
+      @else
+        @if($selectedTaxonomyId)
+          <li><a href="{{ route('term.browse', ['taxonomy' => $selectedTaxonomyId]) }}" class="btn atom-btn-outline-light" role="button">{{ __('Cancel') }}</a></li>
+        @else
+          <li><a href="{{ route('taxonomy.browse') }}" class="btn atom-btn-outline-light" role="button">{{ __('Cancel') }}</a></li>
+        @endif
+        <li><input class="btn atom-btn-outline-success" type="submit" value="Create"></li>
+      @endif
+    </ul>
+
+  </form>
+
+  {{-- #1534: move to another taxonomy. A separate form: forms cannot nest. --}}
+  @if($term && !in_array((int) $term->taxonomy_id, \AhgTermTaxonomy\Services\TermService::LOCKED_TAXONOMY_IDS, true))
+    <div class="card mt-4">
+      <div class="card-header">{{ __('Move to another taxonomy') }}</div>
+      <div class="card-body">
+        <p class="small text-muted mb-2">{{ __('Moves this term and every term beneath it. Descriptions keep their links to these terms.') }}</p>
+        <form method="POST" action="{{ route('term.move-taxonomy', $term->slug) }}" class="row g-2 align-items-end"
+              onsubmit="return confirm(@json(__('Move this term and its narrower terms to the selected taxonomy?')));">
+          @csrf
+          <div class="col-sm-8">
+            <label for="target_taxonomy_id" class="form-label">{{ __('Target taxonomy') }}</label>
+            <select name="target_taxonomy_id" id="target_taxonomy_id" class="form-select" required>
+              <option value="">{{ __('- Select taxonomy -') }}</option>
+              @foreach($taxonomies ?? [] as $tax)
+                @if((int) $tax->id !== (int) $term->taxonomy_id && !in_array((int) $tax->id, \AhgTermTaxonomy\Services\TermService::LOCKED_TAXONOMY_IDS, true))
+                  <option value="{{ $tax->id }}">{{ $tax->name }}</option>
+                @endif
+              @endforeach
+            </select>
+          </div>
+          <div class="col-sm-4"><button type="submit" class="btn atom-btn-outline-light w-100">{{ __('Move') }}</button></div>
+        </form>
+      </div>
+    </div>
+  @endif
+
+  {{-- #1533: merge into another term of the same taxonomy. --}}
+  @if($term && !in_array((int) $term->taxonomy_id, \AhgTermTaxonomy\Services\TermService::LOCKED_TAXONOMY_IDS, true))
+    <div class="card mt-4">
+      <div class="card-header">{{ __('Merge into another term') }}</div>
+      <div class="card-body">
+        <p class="small text-muted mb-2">{{ __('For a duplicate. Every description, narrower term and relation of this term moves to the term you keep, this term\'s name becomes a "use for" label there, and this term is deleted.') }}</p>
+        <form method="POST" action="{{ route('term.merge', $term->slug) }}" class="row g-2 align-items-end"
+              onsubmit="return confirm(@json(__('Merge this term into the term named below and delete it? This cannot be undone.')));">
+          @csrf
+          <div class="col-sm-8">
+            <label for="merge_target" class="form-label">{{ __('Term to keep (name or slug, same taxonomy)') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+            <input type="text" name="target" id="merge_target" class="form-control" required maxlength="1024" autocomplete="off">
+          </div>
+          <div class="col-sm-4"><button type="submit" class="btn atom-btn-outline-danger w-100">{{ __('Merge') }}</button></div>
+        </form>
+      </div>
+    </div>
+  @endif
+
+@push('css')
+<style>
+.accordion-button {
+  background-color: var(--ahg-primary) !important;
+  color: var(--ahg-card-header-text, #fff) !important;
+}
+.accordion-button:not(.collapsed) {
+  background-color: var(--ahg-primary) !important;
+  color: var(--ahg-card-header-text, #fff) !important;
+  box-shadow: none;
+}
+.accordion-button.collapsed {
+  background-color: var(--ahg-primary) !important;
+  color: var(--ahg-card-header-text, #fff) !important;
+}
+.accordion-button::after {
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23ffffff'%3e%3cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'//%3e%3c/svg%3e");
+}
+.accordion-button:focus {
+  box-shadow: 0 0 0 0.25rem var(--ahg-input-focus, rgba(0,88,55,0.25));
+}
+</style>
+@endpush
+@push('js')
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  // Multi-row note tables
+  function setupNoteTable(tableId, addBtnId, removeBtnClass, namePrefix) {
+    var idx = 1;
+    document.getElementById(addBtnId)?.addEventListener('click', function() {
+      var tr = document.createElement('tr');
+      tr.innerHTML = '<td><input type="hidden" name="' + namePrefix + '[' + idx + '][type]" value="' + namePrefix.replace('Notes', '').toLowerCase() + '">' +
+        '<textarea name="' + namePrefix + '[' + idx + '][content]" class="form-control form-control-sm" rows="2"></textarea></td>' +
+        '<td><button type="button" class="btn atom-btn-white ' + removeBtnClass + '"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">Delete row</span></button></td>';
+      document.querySelector('#' + tableId + ' tbody').appendChild(tr);
+      idx++;
+    });
+  }
+
+  setupNoteTable('scope-notes-table', 'add-scopenote-row', 'remove-scopenote-row', 'scopeNotes');
+  setupNoteTable('source-notes-table', 'add-sourcenote-row', 'remove-sourcenote-row', 'sourceNotes');
+  setupNoteTable('display-notes-table', 'add-displaynote-row', 'remove-displaynote-row', 'displayNotes');
+
+  // #661 Phase 3 - cross-vocab matches add/remove
+  var cmTable = document.getElementById('crossmatches-table');
+  if (cmTable) {
+    var cmIdx = cmTable.querySelectorAll('tbody tr').length;
+    var matchTypes = @json($crossMatchTypes ?? []);
+    var sources = @json($crossMatchSources ?? []);
+    document.getElementById('add-crossmatch-row')?.addEventListener('click', function() {
+      var typeOpts = matchTypes.map(function(m){ return '<option value="'+m+'">'+m+'</option>'; }).join('');
+      var srcOpts = sources.map(function(s){ return '<option value="'+s+'">'+s+'</option>'; }).join('');
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td><select name="crossMatches['+cmIdx+'][match_type]" class="form-select form-select-sm">'+typeOpts+'</select></td>' +
+        '<td><input type="url" name="crossMatches['+cmIdx+'][target_uri]" class="form-control form-control-sm"></td>' +
+        '<td><input type="text" name="crossMatches['+cmIdx+'][target_label]" class="form-control form-control-sm"></td>' +
+        '<td><input type="text" name="crossMatches['+cmIdx+'][target_vocab]" class="form-control form-control-sm"></td>' +
+        '<td><select name="crossMatches['+cmIdx+'][source]" class="form-select form-select-sm">'+srcOpts+'</select></td>' +
+        '<td><button type="button" class="btn atom-btn-white remove-crossmatch-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">Delete row</span></button></td>';
+      cmTable.querySelector('tbody').appendChild(tr);
+      cmIdx++;
+    });
+  }
+
+  // Remove row handler
+  document.addEventListener('click', function(e) {
+    var btn = e.target.closest('.remove-scopenote-row, .remove-sourcenote-row, .remove-displaynote-row, .remove-crossmatch-row');
+    if (btn) {
+      var table = btn.closest('table');
+      if (table.querySelectorAll('tbody tr').length > 1) {
+        btn.closest('tr').remove();
+      } else {
+        // For cross-matches: clear inputs but keep one empty row.
+        if (btn.classList.contains('remove-crossmatch-row')) {
+          btn.closest('tr').querySelectorAll('input').forEach(function(i){ i.value = ''; });
+        }
+      }
+    }
+  });
+});
+</script>
+@endpush
+@endsection

@@ -1,0 +1,848 @@
+@extends('theme::layouts.1col')
+
+@section('title', $actor ? __('Edit authority record - ISAAR') : __('Add new authority record - ISAAR'))
+
+@section('content')
+  <div class="multiline-header d-flex flex-column mb-3">
+    <h1 class="mb-0" aria-describedby="heading-label">
+      @if($actor)
+        {{ __('Edit authority record - ISAAR') }}
+      @else
+        {{ __('Add new authority record - ISAAR') }}
+      @endif
+    </h1>
+    @if($actor)
+      <span class="small" id="heading-label">{{ $actor->authorized_form_of_name }}</span>
+    @endif
+  </div>
+
+  @if($errors->any())
+    <div class="alert alert-danger" role="alert">
+      <ul class="mb-0">
+        @foreach($errors->all() as $error)
+          <li>{{ $error }}</li>
+        @endforeach
+      </ul>
+    </div>
+  @endif
+
+  <form method="POST"
+        action="{{ $actor ? route('actor.update', $actor->slug) : route('actor.store') }}"
+        id="editForm" autocomplete="off">
+    @csrf
+
+    <div class="accordion mb-3">
+      {{-- ===== Identity area ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="identity-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#identity-collapse" aria-expanded="false" aria-controls="identity-collapse">
+            {{ __('Identity area') }}
+          </button>
+        </h2>
+        <div id="identity-collapse" class="accordion-collapse collapse" aria-labelledby="identity-heading">
+          <div class="accordion-body">
+            <div class="mb-3">
+              <label for="entity_type_id" class="form-label">
+                {{ __('Type of entity') }}
+                <span class="form-required" title="{{ __('This is a mandatory element.') }}">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <select name="entity_type_id" id="entity_type_id" class="form-select" required>
+                <option value="">{{ __('-- Select --') }}</option>
+                @foreach($formChoices['entityTypes'] as $type)
+                  <option value="{{ $type->id }}" @selected(old('entity_type_id', $actor->entity_type_id ?? '') == $type->id)>
+                    {{ $type->name }}
+                  </option>
+                @endforeach
+              </select>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Specify the type of entity that is being described in this authority record.“ (ISAAR 5.1.1) Select Corporate body, Family or Person from the drop-down menu.') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="authorized_form_of_name" class="form-label">
+                {{ __('Authorized form of name') }}
+                <span class="form-required" title="{{ __('This is a mandatory element.') }}">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <input type="text" name="authorized_form_of_name" id="authorized_form_of_name" class="form-control" autocomplete="off" required
+                     value="{{ old('authorized_form_of_name', $actor->authorized_form_of_name ?? '') }}">
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record the standardized form of name for the entity being described in accordance with any relevant national or international conventions or rules applied by the agency that created the authority record. Use dates, place, jurisdiction, occupation, epithet and other qualifiers as appropriate to distinguish the authorized form of name from those of other entities with similar names.“ (ISAAR 5.1.2)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            @php
+              $parallelNames = ($otherNames ?? collect())->where('type_id', 148)->values();
+              $standardizedNames = ($otherNames ?? collect())->where('type_id', 165)->values();
+              $otherFormNames = ($otherNames ?? collect())->where('type_id', 149)->values();
+            @endphp
+
+            {{-- Parallel form(s) of name (repeatable) --}}
+            <div class="mb-3">
+              <label class="form-label">{{ __('Parallel form(s) of name') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <div id="parallel-names-container">
+                @if($parallelNames->count() > 0)
+                  @foreach($parallelNames as $idx => $pn)
+                    <div class="input-group mb-2 other-name-row">
+                      <input type="hidden" name="other_names[parallel][{{ $idx }}][type_id]" value="148">
+                      <input type="text" name="other_names[parallel][{{ $idx }}][name]" class="form-control"
+                             value="{{ old("other_names.parallel.{$idx}.name", $pn->name ?? '') }}">
+                      <button type="button" class="btn atom-btn-white remove-other-name-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">{{ __('Remove') }}</span></button>
+                    </div>
+                  @endforeach
+                @else
+                  <div class="input-group mb-2 other-name-row">
+                    <input type="hidden" name="other_names[parallel][0][type_id]" value="148">
+                    <input type="text" name="other_names[parallel][0][name]" class="form-control" value="">
+                    <button type="button" class="btn atom-btn-white remove-other-name-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">{{ __('Remove') }}</span></button>
+                  </div>
+                @endif
+              </div>
+              <button type="button" class="btn btn-sm atom-btn-white add-other-name-row" data-container="parallel-names-container" data-type-id="148" data-prefix="parallel">
+                <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+              </button>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Purpose: To indicate the various forms in which the Authorized form of name occurs in other languages or script form(s). Rule: record the parallel form(s) of name in accordance with any relevant national or international conventions or rules applied by the agency that created the authority record, including any necessary sub elements and/or qualifiers required by those conventions or rules.“ (ISAAR 5.1.3)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            {{-- Standardized form(s) of name (repeatable) --}}
+            <div class="mb-3">
+              <label class="form-label">{{ __('Standardized form(s) of name according to other rules') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <div id="standardized-names-container">
+                @if($standardizedNames->count() > 0)
+                  @foreach($standardizedNames as $idx => $sn)
+                    <div class="input-group mb-2 other-name-row">
+                      <input type="hidden" name="other_names[standardized][{{ $idx }}][type_id]" value="165">
+                      <input type="text" name="other_names[standardized][{{ $idx }}][name]" class="form-control"
+                             value="{{ old("other_names.standardized.{$idx}.name", $sn->name ?? '') }}">
+                      <button type="button" class="btn atom-btn-white remove-other-name-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">{{ __('Remove') }}</span></button>
+                    </div>
+                  @endforeach
+                @else
+                  <div class="input-group mb-2 other-name-row">
+                    <input type="hidden" name="other_names[standardized][0][type_id]" value="165">
+                    <input type="text" name="other_names[standardized][0][name]" class="form-control" value="">
+                    <button type="button" class="btn atom-btn-white remove-other-name-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">{{ __('Remove') }}</span></button>
+                  </div>
+                @endif
+              </div>
+              <button type="button" class="btn btn-sm atom-btn-white add-other-name-row" data-container="standardized-names-container" data-type-id="165" data-prefix="standardized">
+                <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+              </button>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record the standardized form of name for the entity being described in accordance with other conventions or rules. Specify the rules and/or if appropriate the name of the agency by which these standardized forms of name have been constructed.“ (ISAAR 5.1.4)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            {{-- Other form(s) of name (repeatable) --}}
+            <div class="mb-3">
+              <label class="form-label">{{ __('Other form(s) of name') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <div id="other-names-container">
+                @if($otherFormNames->count() > 0)
+                  @foreach($otherFormNames as $idx => $on)
+                    <div class="input-group mb-2 other-name-row">
+                      <input type="hidden" name="other_names[other][{{ $idx }}][type_id]" value="149">
+                      <input type="text" name="other_names[other][{{ $idx }}][name]" class="form-control"
+                             value="{{ old("other_names.other.{$idx}.name", $on->name ?? '') }}">
+                      <button type="button" class="btn atom-btn-white remove-other-name-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">{{ __('Remove') }}</span></button>
+                    </div>
+                  @endforeach
+                @else
+                  <div class="input-group mb-2 other-name-row">
+                    <input type="hidden" name="other_names[other][0][type_id]" value="149">
+                    <input type="text" name="other_names[other][0][name]" class="form-control" value="">
+                    <button type="button" class="btn atom-btn-white remove-other-name-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">{{ __('Remove') }}</span></button>
+                  </div>
+                @endif
+              </div>
+              <button type="button" class="btn btn-sm atom-btn-white add-other-name-row" data-container="other-names-container" data-type-id="149" data-prefix="other">
+                <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+              </button>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('The purpose of this field is to “indicate any other name(s) for the corporate body, person or family not used elsewhere in the Identity Area.“ Examples are acronyms, previous names, pseudonyms, maiden names and titles of nobility or honour. (ISAAR 5.1.5)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="corporate_body_identifiers" class="form-label">{{ __('Identifiers for corporate bodies') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="text" name="corporate_body_identifiers" id="corporate_body_identifiers" class="form-control"
+                     value="{{ old('corporate_body_identifiers', $actor->corporate_body_identifiers ?? '') }}">
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record where possible any official number or other identifier (e.g. a company registration number) for the corporate body and reference the jurisdiction and scheme under which it has been allocated.“ (ISAAR 5.1.6)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="parent_id" class="form-label">{{ __('Parent actor') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="text" name="parent_actor_name" id="parent_actor_name" class="form-control"
+                     value="{{ old('parent_actor_name', $parentActorName ?? '') }}" placeholder="{{ __('Type to search parent actor...') }}" autocomplete="off">
+              <input type="hidden" name="parent_id" id="parent_id"
+                     value="{{ old('parent_id', $actor->parent_id ?? '') }}">
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="Select the parent authority record to create a hierarchical relationship. Type to search for an existing authority record."><i class="fas fa-question-circle"></i></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {{-- ===== Description area ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="description-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#description-collapse" aria-expanded="false" aria-controls="description-collapse">
+            {{ __('Description area') }}
+          </button>
+        </h2>
+        <div id="description-collapse" class="accordion-collapse collapse" aria-labelledby="description-heading">
+          <div class="accordion-body">
+            <div class="mb-3">
+              <label for="dates_of_existence" class="form-label">
+                {{ __('Dates of existence') }}
+                <span class="form-required" title="{{ __('This is a mandatory element.') }}">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <input type="text" name="dates_of_existence" id="dates_of_existence" class="form-control"
+                     value="{{ old('dates_of_existence', $actor->dates_of_existence ?? '') }}">
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record the dates of existence of the entity being described. For corporate bodies include the date of establishment/foundation/enabling legislation and dissolution. For persons include the dates or approximate dates of birth and death or, when these dates are not known, floruit dates. Where parallel systems of dating are used, equivalences may be recorded according to relevant conventions or rules. Specify in the Rules and/or conventions element (5.4.3) the system(s) of dating used, e.g. ISO 8601.“ (ISAAR 5.2.1)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="history" class="form-label">{{ __('History') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea name="history" id="history" class="form-control" rows="6">{{ old('history', $actor->history ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record in narrative form or as a chronology the main life events, activities, achievements and/or roles of the entity being described. This may include information on gender, nationality, family and religious or political affiliations. Wherever possible, supply dates as an integral component of the narrative description.“ (ISAAR 5.2.2)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="places" class="form-label">{{ __('Places') }} <span class="badge bg-warning ms-1">{{ __('Recommended') }}</span></label>
+              <textarea name="places" id="places" class="form-control" rows="4">{{ old('places', $actor->places ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Purpose: to indicate the predominant places and/or jurisdictions where the corporate body, person or family was based, lived or resided or had some other connection. Rule: record the name of the predominant place(s)/jurisdiction(s), together with the nature and covering dates of the relationship with the entity.“ (ISAAR 5.2.3)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="legal_status" class="form-label">{{ __('Legal status') }} <span class="badge bg-warning ms-1">{{ __('Recommended') }}</span></label>
+              <textarea name="legal_status" id="legal_status" class="form-control" rows="4">{{ old('legal_status', $actor->legal_status ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record the legal status and where appropriate the type of corporate body together with the covering dates when this status applied.“ (ISAAR 5.2.4)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="functions" class="form-label">{{ __('Functions, occupations and activities') }} <span class="badge bg-warning ms-1">{{ __('Recommended') }}</span></label>
+              <textarea name="functions" id="functions" class="form-control" rows="4">{{ old('functions', $actor->functions ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record the functions, occupations and activities performed by the entity being described, together with the covering dates when useful. If necessary, describe the nature of the function, occupation or activity.“ (ISAAR 5.2.5)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="mandates" class="form-label">{{ __('Mandates/sources of authority') }} <span class="badge bg-warning ms-1">{{ __('Recommended') }}</span></label>
+              <textarea name="mandates" id="mandates" class="form-control" rows="4">{{ old('mandates', $actor->mandates ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record any document, law, directive or charter which acts as a source of authority for the powers, functions and responsibilities of the entity being described, together with information on the jurisdiction(s) and covering dates when the mandate(s) applied or were changed.“ (ISAAR 5.2.6)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="internal_structures" class="form-label">{{ __('Internal structures/genealogy') }} <span class="badge bg-warning ms-1">{{ __('Recommended') }}</span></label>
+              <textarea name="internal_structures" id="internal_structures" class="form-control" rows="4">{{ old('internal_structures', $actor->internal_structures ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Describe the internal structure of a corporate body and the dates of any changes to that structure that are significant to the understanding of the way that corporate body conducted its affairs (e.g. by means of dated organization charts). Describe the genealogy of a family (e.g. by means of a family tree) in a way that demonstrates the inter-relationships of its members with covering dates.“ (ISAAR 5.2.7)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="general_context" class="form-label">{{ __('General context') }} <span class="badge bg-warning ms-1">{{ __('Recommended') }}</span></label>
+              <textarea name="general_context" id="general_context" class="form-control" rows="4">{{ old('general_context', $actor->general_context ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Provide any significant information on the social, cultural, economic, political and/or historical context in which the entity being described operated.“ (ISAAR 5.2.8)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {{-- ===== Relationships area ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="relationships-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#relationships-collapse" aria-expanded="false" aria-controls="relationships-collapse">
+            {{ __('Relationships area') }}
+          </button>
+        </h2>
+        <div id="relationships-collapse" class="accordion-collapse collapse" aria-labelledby="relationships-heading">
+          <div class="accordion-body">
+
+            <!-- Related corporate bodies, persons or families -->
+            <h3 class="fs-6 mb-2">{{ __('Related corporate bodies, persons or families') }}</h3>
+            <div class="table-responsive mb-3">
+              <table class="table table-bordered mb-0" id="related-actors-table">
+                <thead class="table-light">
+                  <tr>
+                    <th class="w-25">{{ __('Name') }}</th>
+                    <th class="w-15">{{ __('Category') }}</th>
+                    <th class="w-15">{{ __('Type') }}</th>
+                    <th class="w-15">{{ __('Dates') }}</th>
+                    <th class="w-30">{{ __('Description') }}</th>
+                    <th><span class="visually-hidden">{{ __('Actions') }}</span></th>
+                  </tr>
+                </thead>
+                @php
+                  // #1355 - related-actor relationship categories now come from
+                  // ahg_dropdown (taxonomy actor_relation_category) via
+                  // $formChoices['relationCategories']. Build the <option> markup
+                  // once so both the server-rendered row below and the JS-cloned
+                  // template row (see @push('js')) emit the same list.
+                  $relCatOptions = '<option value=""></option>';
+                  foreach (($formChoices['relationCategories'] ?? []) as $relCatCode => $relCatLabel) {
+                      $relCatOptions .= '<option value="' . e($relCatCode) . '">' . e(__($relCatLabel)) . '</option>';
+                  }
+                @endphp
+                <tbody>
+                  <tr>
+                    <td><input type="text" name="relatedActors[0][name]" class="form-control form-control-sm" placeholder="{{ __('Type to search...') }}"></td>
+                    <td>
+                      <select name="relatedActors[0][category]" class="form-select form-select-sm">
+                        <option value=""></option>
+                        @foreach($formChoices['relationCategories'] ?? [] as $code => $label)
+                        <option value="{{ $code }}">{{ __($label) }}</option>
+                        @endforeach
+                      </select>
+                    </td>
+                    <td><input type="text" name="relatedActors[0][type]" class="form-control form-control-sm"></td>
+                    <td><input type="text" name="relatedActors[0][dates]" class="form-control form-control-sm"></td>
+                    <td><input type="text" name="relatedActors[0][description]" class="form-control form-control-sm"></td>
+                    <td>
+                      <button type="button" class="btn atom-btn-white remove-relactor-row">
+                        <i class="fas fa-times" aria-hidden="true"></i>
+                        <span class="visually-hidden">{{ __('Delete row') }}</span>
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colspan="6">
+                      <button type="button" class="btn atom-btn-white" id="add-relactor-row">
+                        <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+                      </button>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+
+            <!-- Related resources -->
+            <h3 class="fs-6 mb-2">{{ __('Related resources') }}</h3>
+            <div class="table-responsive mb-3">
+              <table class="table table-bordered mb-0" id="related-resources-table">
+                <thead class="table-light">
+                  <tr>
+                    <th class="w-40">{{ __('Title') }}</th>
+                    <th class="w-30">{{ __('Relationship') }}</th>
+                    <th class="w-30">{{ __('Dates') }}</th>
+                    <th><span class="visually-hidden">{{ __('Actions') }}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><input type="text" name="relatedResources[0][title]" class="form-control form-control-sm" placeholder="{{ __('Type to search...') }}"></td>
+                    <td><input type="text" name="relatedResources[0][relationship]" class="form-control form-control-sm"></td>
+                    <td><input type="text" name="relatedResources[0][dates]" class="form-control form-control-sm"></td>
+                    <td>
+                      <button type="button" class="btn atom-btn-white remove-relresource-row">
+                        <i class="fas fa-times" aria-hidden="true"></i>
+                        <span class="visually-hidden">{{ __('Delete row') }}</span>
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colspan="4">
+                      <button type="button" class="btn atom-btn-white" id="add-relresource-row">
+                        <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+                      </button>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      {{-- ===== Contact information ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="contact-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#contact-collapse" aria-expanded="false" aria-controls="contact-collapse">
+            {{ __('Contact information') }}
+          </button>
+        </h2>
+        <div id="contact-collapse" class="accordion-collapse collapse" aria-labelledby="contact-heading">
+          <div class="accordion-body">
+            @include('ahg-actor-manage::partials._contact-area', [
+                'contacts' => $contacts ?? collect(),
+            ])
+          </div>
+        </div>
+      </div>
+
+      {{-- ===== Access points ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="access-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#access-collapse" aria-expanded="false" aria-controls="access-collapse">
+            {{ __('Access points') }}
+          </button>
+        </h2>
+        <div id="access-collapse" class="accordion-collapse collapse" aria-labelledby="access-heading">
+          <div class="accordion-body">
+            @php
+              $actorSubjectItems = ($subjects ?? collect())->map(function ($s) {
+                  return ['id' => $s->id, 'name' => $s->name ?? ''];
+              })->toArray();
+            @endphp
+            @include('ahg-core::components.autocomplete', [
+                'name'          => 'subjectAccessPoints',
+                'label'         => 'Subject access points',
+                'route'         => 'term.autocomplete',
+                'placeholder'   => 'Type to search subjects...',
+                'required'      => false,
+                'idField'       => 'id',
+                'nameField'     => 'name',
+                'multi'         => true,
+                'multiName'     => 'subjectAccessPointIds[]',
+                'existingItems' => $actorSubjectItems,
+                'inputClass'    => 'form-control-sm',
+                'extraParams'   => ['taxonomy_id' => 35],
+            ])
+
+            @php
+              $actorPlaceItems = ($places ?? collect())->map(function ($p) {
+                  return ['id' => $p->id, 'name' => $p->name ?? ''];
+              })->toArray();
+            @endphp
+            @include('ahg-core::components.autocomplete', [
+                'name'          => 'placeAccessPoints',
+                'label'         => 'Place access points',
+                'route'         => 'term.autocomplete',
+                'placeholder'   => 'Type to search places...',
+                'required'      => false,
+                'idField'       => 'id',
+                'nameField'     => 'name',
+                'multi'         => true,
+                'multiName'     => 'placeAccessPointIds[]',
+                'existingItems' => $actorPlaceItems,
+                'inputClass'    => 'form-control-sm',
+                'extraParams'   => ['taxonomy_id' => 42],
+            ])
+
+            <!-- Occupation(s) multi-row table -->
+            <h3 class="fs-6 mb-2">{{ __('Occupation(s)') }}</h3>
+            <div class="table-responsive">
+              <table class="table table-bordered mb-0" id="occupations-table">
+                <thead class="table-light">
+                  <tr>
+                    <th id="occupations-occupation-head" class="w-50">{{ __('Occupation') }}</th>
+                    <th id="occupations-content-head" class="w-50">{{ __('Note') }}</th>
+                    <th><span class="visually-hidden">{{ __('Delete') }}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><select name="occupations[0][occupation]" class="form-select form-select-sm" aria-labelledby="occupations-occupation-head"><option value="">{{ __('-- Select --') }}</option>@foreach($formChoices['occupations'] ?? [] as $occ)<option value="{{ $occ }}">{{ $occ }}</option>@endforeach</select></td>
+                    <td><textarea name="occupations[0][content]" class="form-control form-control-sm" rows="1" aria-labelledby="occupations-content-head"></textarea></td>
+                    <td>
+                      <button type="button" class="btn atom-btn-white remove-occupation-row">
+                        <i class="fas fa-times" aria-hidden="true"></i>
+                        <span class="visually-hidden">{{ __('Delete row') }}</span>
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colspan="3">
+                      <button type="button" class="btn atom-btn-white" id="add-occupation-row">
+                        <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+                      </button>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {{-- ===== Cultural sensitivity (ICIP) ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="icip-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#icip-collapse" aria-expanded="false" aria-controls="icip-collapse">
+            {{ __('Cultural sensitivity') }}
+          </button>
+        </h2>
+        <div id="icip-collapse" class="accordion-collapse collapse" aria-labelledby="icip-heading">
+          <div class="accordion-body">
+            <div class="mb-3">
+                <label for="icip_sensitivity" class="form-label">{{ __('ICIP cultural-sensitivity classification') }}
+                    <span class="badge bg-info text-dark ms-1" title="{{ __('Indigenous Cultural and Intellectual Property') }}">ICIP</span>
+                </label>
+                @include('ahg-translation::components.icip-sensitivity-select', [
+                    'name' => 'icip_sensitivity',
+                    'value' => old('icip_sensitivity', $actor->icip_sensitivity ?? null),
+                ])
+                <small class="form-text text-muted">{{ __('Cultural-sensitivity classification per ICIP protocols. Determines who may view, reproduce, or transmit this item.') }}</small>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {{-- ===== Control area ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="control-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#control-collapse" aria-expanded="false" aria-controls="control-collapse">
+            {{ __('Control area') }}
+          </button>
+        </h2>
+        <div id="control-collapse" class="accordion-collapse collapse" aria-labelledby="control-heading">
+          <div class="accordion-body">
+            {{-- Part B: publication status + embargo (living-persons / GDPR-POPIA). --}}
+            <div class="mb-3 p-3 border rounded bg-light">
+              <label class="form-label fw-semibold d-block mb-2">
+                <i class="fas fa-eye me-1"></i>{{ __('Publication & access') }}
+              </label>
+              <div class="mb-2">
+                <div class="form-check form-check-inline">
+                  <input class="form-check-input" type="radio" name="publication_status_id" id="pub_published" value="160"
+                         @checked((int) old('publication_status_id', $publicationStatusId ?? 160) === 160)>
+                  <label class="form-check-label" for="pub_published">{{ __('Published') }}</label>
+                </div>
+                <div class="form-check form-check-inline">
+                  <input class="form-check-input" type="radio" name="publication_status_id" id="pub_draft" value="159"
+                         @checked((int) old('publication_status_id', $publicationStatusId ?? 160) === 159)>
+                  <label class="form-check-label" for="pub_draft">{{ __('Draft') }} <span class="text-muted small">({{ __('hidden from the public') }})</span></label>
+                </div>
+              </div>
+              <div>
+                <label for="embargo_until" class="form-label small mb-1">{{ __('Embargo until') }}
+                  <span class="text-muted">({{ __('optional - hide a published record from the public until this date, e.g. a living person') }})</span>
+                </label>
+                <input type="date" name="embargo_until" id="embargo_until" class="form-control"
+                       value="{{ old('embargo_until', isset($actor->embargo_until) && $actor->embargo_until ? substr((string) $actor->embargo_until, 0, 10) : '') }}">
+              </div>
+            </div>
+
+            <div class="mb-3">
+              <label for="description_identifier" class="form-label">
+                {{ __('Authority record identifier') }}
+                <span class="form-required" title="{{ __('This is a mandatory element.') }}">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <input type="text" name="description_identifier" id="description_identifier" class="form-control"
+                     value="{{ old('description_identifier', $actor->description_identifier ?? '') }}">
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record a unique authority record identifier in accordance with local and/or national conventions. If the authority record is to be used internationally, record the country code of the country in which the authority record was created in accordance with the latest version of ISO 3166 Codes for the representation of names of countries. Where the creator of the authority record is an international organization, give the organizational identifier in place of the country code.“ (ISAAR 5.4.1)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            @include('ahg-core::components.autocomplete', [
+                'name'         => 'maintaining_repository_id',
+                'label'        => 'Maintaining repository',
+                'route'        => 'repository.autocomplete',
+                'value'        => old('maintaining_repository_id', ($maintainingRepository->id ?? '')),
+                'displayValue' => old('maintaining_repository_name', ($maintainingRepository->name ?? '')),
+                'placeholder'  => 'Type to search repositories...',
+                'required'     => false,
+                'helpText'     => '"Record the full authorized form of name(s) of the agency(ies) responsible for creating, modifying or disseminating the authority record or, alternatively, record a code for the agency in accordance with the national or international agency code standard. Include reference to any systems of identification used to identify the institutions (e.g. ISO 15511)." (ISAAR 5.4.2)',
+                'idField'      => 'id',
+                'nameField'    => 'name',
+            ])
+
+            <div class="mb-3">
+              <label for="institution_responsible_identifier" class="form-label">{{ __('Institution identifier') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="text" name="institution_responsible_identifier" id="institution_responsible_identifier" class="form-control"
+                     value="{{ old('institution_responsible_identifier', $actor->institution_responsible_identifier ?? '') }}">
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record the full authorized form of name(s) of the agency(ies) responsible for creating, modifying or disseminating the authority record or, alternatively, record a code for the agency in accordance with the national or international agency code standard. Include reference to any systems of identification used to identify the institutions (e.g. ISO 15511).“ (ISAAR 5.4.2)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="rules" class="form-label">{{ __('Rules and/or conventions used') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea name="rules" id="rules" class="form-control" rows="4">{{ old('rules', $actor->rules ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Purpose: To identify the national or international conventions or rules applied in creating the archival authority record. Rule: Record the names and where useful the editions or publication dates of the conventions or rules applied. Specify separately which rules have been applied for creating the Authorized form of name. Include reference to any system(s) of dating used to identify dates in this authority record (e.g. ISO 8601).“ (ISAAR 5.4.3)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="description_status_id" class="form-label">{{ __('Status') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <select name="description_status_id" id="description_status_id" class="form-select">
+                <option value="">{{ __('-- Select --') }}</option>
+                @foreach($formChoices['descriptionStatuses'] as $status)
+                  <option value="{{ $status->id }}" @selected(old('description_status_id', $actor->description_status_id ?? '') == $status->id)>
+                    {{ $status->name }}
+                  </option>
+                @endforeach
+              </select>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('The purpose of this field is “[t]o indicate the drafting status of the authority record so that users can understand the current status of the authority record.“ (ISAAR 5.4.4). Select Final, Revised or Draft from the drop-down menu.') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="description_detail_id" class="form-label">{{ __('Level of detail') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <select name="description_detail_id" id="description_detail_id" class="form-select">
+                <option value="">{{ __('-- Select --') }}</option>
+                @foreach($formChoices['descriptionDetails'] as $detail)
+                  <option value="{{ $detail->id }}" @selected(old('description_detail_id', $actor->description_detail_id ?? '') == $detail->id)>
+                    {{ $detail->name }}
+                  </option>
+                @endforeach
+              </select>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('Select Full, Partial or Minimal from the drop-down menu. “In the absence of national guidelines or rules, minimal records are those that consist only of the four essential elements of an ISAAR(CPF) compliant authority record (see 4.8), while full records are those that convey information for all relevant ISAAR(CPF) elements of description.“ (ISAAR 5.4.5)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="revision_history" class="form-label">{{ __('Dates of creation, revision and deletion') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea name="revision_history" id="revision_history" class="form-control" rows="4">{{ old('revision_history', $actor->revision_history ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record the date the authority record was created and the dates of any revisions to the record.“ (ISAAR 5.4.6)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            @if($actor && $actor->updated_at)
+              <div class="mb-3">
+                <h3 class="fs-6 mb-2">{{ __('Last updated') }}</h3>
+                <span class="text-muted">{{ $actor->updated_at }}</span>
+              </div>
+            @endif
+
+            <div class="mb-3">
+              <label for="language" class="form-label">{{ __('Language(s)') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <select name="language[]" id="language" class="form-select" multiple size="4">
+                @php
+                  $langCodes = is_array($languages ?? null) ? $languages : (is_object($languages ?? null) ? $languages->toArray() : []);
+                  $allLanguages = [
+                    'aa'=>'Afar','ab'=>'Abkhazian','af'=>'Afrikaans','am'=>'Amharic','ar'=>'Arabic','as'=>'Assamese',
+                    'ay'=>'Aymara','az'=>'Azerbaijani','ba'=>'Bashkir','be'=>'Belarusian','bg'=>'Bulgarian','bh'=>'Bihari',
+                    'bn'=>'Bengali','bo'=>'Tibetan','br'=>'Breton','ca'=>'Catalan','co'=>'Corsican','cs'=>'Czech',
+                    'cy'=>'Welsh','da'=>'Danish','de'=>'German','dz'=>'Dzongkha','el'=>'Greek','en'=>'English',
+                    'eo'=>'Esperanto','es'=>'Spanish','et'=>'Estonian','eu'=>'Basque','fa'=>'Persian','fi'=>'Finnish',
+                    'fj'=>'Fijian','fo'=>'Faroese','fr'=>'French','fy'=>'Frisian','ga'=>'Irish','gd'=>'Scottish Gaelic',
+                    'gl'=>'Galician','gn'=>'Guarani','gu'=>'Gujarati','ha'=>'Hausa','he'=>'Hebrew','hi'=>'Hindi',
+                    'hr'=>'Croatian','hu'=>'Hungarian','hy'=>'Armenian','ia'=>'Interlingua','id'=>'Indonesian',
+                    'ik'=>'Inupiaq','is'=>'Icelandic','it'=>'Italian','iu'=>'Inuktitut','ja'=>'Japanese','jv'=>'Javanese',
+                    'ka'=>'Georgian','kk'=>'Kazakh','kl'=>'Kalaallisut','km'=>'Khmer','kn'=>'Kannada','ko'=>'Korean',
+                    'ks'=>'Kashmiri','ku'=>'Kurdish','ky'=>'Kyrgyz','la'=>'Latin','ln'=>'Lingala','lo'=>'Lao',
+                    'lt'=>'Lithuanian','lv'=>'Latvian','mg'=>'Malagasy','mi'=>'Maori','mk'=>'Macedonian','ml'=>'Malayalam',
+                    'mn'=>'Mongolian','mr'=>'Marathi','ms'=>'Malay','mt'=>'Maltese','my'=>'Burmese','na'=>'Nauru',
+                    'ne'=>'Nepali','nl'=>'Dutch','no'=>'Norwegian','nr'=>'South Ndebele','nso'=>'Northern Sotho',
+                    'oc'=>'Occitan','om'=>'Oromo','or'=>'Oriya','pa'=>'Punjabi','pl'=>'Polish','ps'=>'Pashto',
+                    'pt'=>'Portuguese','qu'=>'Quechua','rm'=>'Romansh','rn'=>'Rundi','ro'=>'Romanian','ru'=>'Russian',
+                    'rw'=>'Kinyarwanda','sa'=>'Sanskrit','sd'=>'Sindhi','si'=>'Sinhala','sk'=>'Slovak','sl'=>'Slovenian',
+                    'sm'=>'Samoan','sn'=>'Shona','so'=>'Somali','sq'=>'Albanian','sr'=>'Serbian','ss'=>'Swati',
+                    'st'=>'Southern Sotho','su'=>'Sundanese','sv'=>'Swedish','sw'=>'Swahili','ta'=>'Tamil','te'=>'Telugu',
+                    'tg'=>'Tajik','th'=>'Thai','ti'=>'Tigrinya','tk'=>'Turkmen','tl'=>'Tagalog','tn'=>'Tswana',
+                    'to'=>'Tongan','tr'=>'Turkish','ts'=>'Tsonga','tt'=>'Tatar','tw'=>'Twi','uk'=>'Ukrainian',
+                    'ur'=>'Urdu','uz'=>'Uzbek','ve'=>'Venda','vi'=>'Vietnamese','vo'=>'Volapük','wo'=>'Wolof',
+                    'xh'=>'Xhosa','yi'=>'Yiddish','yo'=>'Yoruba','za'=>'Zhuang','zh'=>'Chinese','zu'=>'Zulu',
+                  ];
+                @endphp
+                @foreach($allLanguages as $code => $name)
+                  <option value="{{ $code }}" @selected(in_array($code, $langCodes))>{{ app()->getLocale() === 'en' ? $name : (($n = \Locale::getDisplayLanguage($code, app()->getLocale())) && $n !== $code ? $n : $name) }}</option>
+                @endforeach
+              </select>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('Hold Ctrl/Cmd to select multiple. (ISAAR 5.4.7)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="script" class="form-label">{{ __('Script(s)') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <select name="script[]" id="script" class="form-select" multiple size="4">
+                @php
+                  $scriptCodes = is_array($scripts ?? null) ? $scripts : (is_object($scripts ?? null) ? $scripts->toArray() : []);
+                  $allScripts = [
+                    'Arab'=>'Arabic','Armn'=>'Armenian','Beng'=>'Bengali','Bopo'=>'Bopomofo','Cyrl'=>'Cyrillic',
+                    'Deva'=>'Devanagari','Ethi'=>'Ethiopic','Geor'=>'Georgian','Grek'=>'Greek','Gujr'=>'Gujarati',
+                    'Guru'=>'Gurmukhi','Hang'=>'Hangul','Hani'=>'Han','Hans'=>'Han (Simplified)','Hant'=>'Han (Traditional)',
+                    'Hebr'=>'Hebrew','Hira'=>'Hiragana','Jpan'=>'Japanese','Kana'=>'Katakana','Khmr'=>'Khmer',
+                    'Knda'=>'Kannada','Kore'=>'Korean','Laoo'=>'Lao','Latn'=>'Latin','Mlym'=>'Malayalam',
+                    'Mong'=>'Mongolian','Mymr'=>'Myanmar','Orya'=>'Oriya','Sinh'=>'Sinhala','Taml'=>'Tamil',
+                    'Telu'=>'Telugu','Thaa'=>'Thaana','Thai'=>'Thai','Tibt'=>'Tibetan','Zmth'=>'Mathematical',
+                    'Zsym'=>'Symbols','Zyyy'=>'Common',
+                  ];
+                @endphp
+                @foreach($allScripts as $code => $name)
+                  <option value="{{ $code }}" @selected(in_array($code, $scriptCodes))>{{ app()->getLocale() === 'en' ? $name : (($n = \Locale::getDisplayScript('und_'.$code, app()->getLocale())) && $n !== $code ? $n : $name) }} ({{ $code }})</option>
+                @endforeach
+              </select>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('Hold Ctrl/Cmd to select multiple. (ISAAR 5.4.7)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="sources" class="form-label">{{ __('Sources') }} <span class="badge bg-warning ms-1">{{ __('Recommended') }}</span></label>
+              <textarea name="sources" id="sources" class="form-control" rows="4">{{ old('sources', $actor->sources ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record the sources consulted in establishing the authority record.“ (ISAAR 5.4.8)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="maintenance_notes" class="form-label">{{ __('Maintenance notes') }} <span class="badge bg-warning ms-1">{{ __('Recommended') }}</span></label>
+              <textarea name="maintenance_notes" id="maintenance_notes" class="form-control" rows="4">{{ old('maintenance_notes', $maintenanceNotes ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="{{ __('“Record notes pertinent to the creation and maintenance of the authority record. The names of persons responsible for creating the authority record may be recorded here.“ (ISAAR 5.4.9)') }}"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="source_standard" class="form-label">{{ __('Source standard') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="text" name="source_standard" id="source_standard" class="form-control"
+                     value="{{ old('source_standard', $actor->source_standard ?? '') }}">
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="Record the standard used when entering the authority record description (e.g. ISAAR(CPF))."><i class="fas fa-question-circle"></i></button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {{-- heratio#1548: admin-defined custom fields, saved with the record --}}
+    @include('ahg-custom-fields::partials._edit-fields', ['entityType' => 'actor', 'objectId' => $actor->id ?? null])
+
+    <ul class="actions mb-3 nav gap-2">
+      @if($actor)
+        <li><a href="{{ route('actor.show', $actor->slug) }}" class="btn atom-btn-outline-light" role="button">{{ __('Cancel') }}</a></li>
+        <li><input class="btn atom-btn-outline-success" type="submit" value="Save"></li>
+      @else
+        <li><a href="{{ route('actor.browse') }}" class="btn atom-btn-outline-light" role="button">{{ __('Cancel') }}</a></li>
+        <li><input class="btn atom-btn-outline-success" type="submit" value="Create"></li>
+      @endif
+    </ul>
+  </form>
+
+@push('css')
+<style>
+.accordion-button {
+  background-color: var(--ahg-primary) !important;
+  color: var(--ahg-card-header-text, #fff) !important;
+}
+.accordion-button:not(.collapsed) {
+  background-color: var(--ahg-primary) !important;
+  color: var(--ahg-card-header-text, #fff) !important;
+  box-shadow: none;
+}
+.accordion-button.collapsed {
+  background-color: var(--ahg-primary) !important;
+  color: var(--ahg-card-header-text, #fff) !important;
+}
+.accordion-button::after {
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23ffffff'%3e%3cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'//%3e%3c/svg%3e");
+}
+.accordion-button:focus {
+  box-shadow: 0 0 0 0.25rem var(--ahg-input-focus, rgba(0,88,55,0.25));
+}
+.ahg-field-help { cursor: pointer; font-size: 0.9em; }
+.ahg-field-help:hover { color: var(--ahg-primary, #005837) !important; }
+.ahg-help-popup {
+  position: absolute; z-index: 1060; bottom: 100%; left: 0; right: 0;
+  background: #fff; border: 1px solid #dee2e6; border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15); padding: 0; margin-bottom: 6px;
+  max-width: 400px; animation: ahgHelpIn 0.15s ease-out;
+}
+.ahg-help-popup-body { padding: 10px 14px; font-size: 0.85rem; line-height: 1.5; color: #333; }
+.ahg-help-popup-close {
+  position: absolute; top: 4px; right: 6px; background: none; border: none;
+  font-size: 1.1rem; color: #999; cursor: pointer; line-height: 1;
+}
+.ahg-help-popup-close:hover { color: #333; }
+.ahg-help-popup-arrow {
+  position: absolute; bottom: -6px; left: 20px;
+  width: 12px; height: 12px; background: #fff;
+  border-right: 1px solid #dee2e6; border-bottom: 1px solid #dee2e6;
+  transform: rotate(45deg);
+}
+@keyframes ahgHelpIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+</style>
+@endpush
+@push('js')
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  // Related actors multi-row
+  var relActorIdx = 1;
+  document.getElementById('add-relactor-row')?.addEventListener('click', function() {
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td><input type="text" name="relatedActors[' + relActorIdx + '][name]" class="form-control form-control-sm" placeholder="Type to search..."></td>' +
+      '<td><select name="relatedActors[' + relActorIdx + '][category]" class="form-select form-select-sm">' + @json($relCatOptions) + '</select></td>' +
+      '<td><input type="text" name="relatedActors[' + relActorIdx + '][type]" class="form-control form-control-sm"></td>' +
+      '<td><input type="text" name="relatedActors[' + relActorIdx + '][dates]" class="form-control form-control-sm"></td>' +
+      '<td><input type="text" name="relatedActors[' + relActorIdx + '][description]" class="form-control form-control-sm"></td>' +
+      '<td><button type="button" class="btn atom-btn-white remove-relactor-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">Delete row</span></button></td>';
+    document.querySelector('#related-actors-table tbody').appendChild(tr);
+    relActorIdx++;
+  });
+
+  // Related resources multi-row
+  var relResIdx = 1;
+  document.getElementById('add-relresource-row')?.addEventListener('click', function() {
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td><input type="text" name="relatedResources[' + relResIdx + '][title]" class="form-control form-control-sm" placeholder="Type to search..."></td>' +
+      '<td><input type="text" name="relatedResources[' + relResIdx + '][relationship]" class="form-control form-control-sm"></td>' +
+      '<td><input type="text" name="relatedResources[' + relResIdx + '][dates]" class="form-control form-control-sm"></td>' +
+      '<td><button type="button" class="btn atom-btn-white remove-relresource-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">Delete row</span></button></td>';
+    document.querySelector('#related-resources-table tbody').appendChild(tr);
+    relResIdx++;
+  });
+
+  // Occupations multi-row
+  var occIdx = 1;
+  document.getElementById('add-occupation-row')?.addEventListener('click', function() {
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td><input type="text" name="occupations[' + occIdx + '][occupation]" class="form-control form-control-sm" placeholder="Type to search occupations..."></td>' +
+      '<td><input type="text" name="occupations[' + occIdx + '][content]" class="form-control form-control-sm"></td>' +
+      '<td><button type="button" class="btn atom-btn-white remove-occupation-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">Delete row</span></button></td>';
+    document.querySelector('#occupations-table tbody').appendChild(tr);
+    occIdx++;
+  });
+
+  // Remove row handler for all multi-row tables
+  document.addEventListener('click', function(e) {
+    var btn = e.target.closest('.remove-relactor-row, .remove-relresource-row, .remove-occupation-row');
+    if (btn) {
+      var table = btn.closest('table');
+      if (table.querySelectorAll('tbody tr').length > 1) {
+        btn.closest('tr').remove();
+      }
+    }
+  });
+
+  // Other names (parallel/standardized/other) repeatable rows
+  var otherNameCounters = { parallel: {{ $parallelNames->count() ?: 1 }}, standardized: {{ $standardizedNames->count() ?: 1 }}, other: {{ $otherFormNames->count() ?: 1 }} };
+  document.querySelectorAll('.add-other-name-row').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var containerId = btn.dataset.container;
+      var typeId = btn.dataset.typeId;
+      var prefix = btn.dataset.prefix;
+      var container = document.getElementById(containerId);
+      var idx = otherNameCounters[prefix]++;
+      var div = document.createElement('div');
+      div.className = 'input-group mb-2 other-name-row';
+      div.innerHTML = '<input type="hidden" name="other_names[' + prefix + '][' + idx + '][type_id]" value="' + typeId + '">' +
+        '<input type="text" name="other_names[' + prefix + '][' + idx + '][name]" class="form-control" value="">' +
+        '<button type="button" class="btn atom-btn-white remove-other-name-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">Remove</span></button>';
+      container.appendChild(div);
+    });
+  });
+
+  // Remove handler for other name rows
+  document.addEventListener('click', function(e) {
+    var btn = e.target.closest('.remove-other-name-row');
+    if (btn) {
+      var container = btn.closest('[id$="-names-container"]');
+      if (container && container.querySelectorAll('.other-name-row').length > 1) {
+        btn.closest('.other-name-row').remove();
+      } else if (btn.closest('.other-name-row')) {
+        var input = btn.closest('.other-name-row').querySelector('input[type="text"]');
+        if (input) input.value = '';
+      }
+    }
+  });
+});
+
+  // Field help popups - simple custom implementation
+  document.addEventListener('click', function(e) {
+    var btn = e.target.closest('.ahg-field-help');
+    // Close any open popup when clicking elsewhere
+    document.querySelectorAll('.ahg-help-popup').forEach(function(p) {
+      if (!btn || p.dataset.owner !== btn.dataset.helpId) p.remove();
+    });
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    var existing = document.querySelector('.ahg-help-popup[data-owner="' + btn.dataset.helpId + '"]');
+    if (existing) { existing.remove(); return; }
+
+    var text = btn.getAttribute('data-bs-content') || '';
+    if (!text) return;
+
+    // Decode HTML entities
+    var tmp = document.createElement('textarea');
+    tmp.innerHTML = text;
+    text = tmp.value;
+
+    var popup = document.createElement('div');
+    popup.className = 'ahg-help-popup';
+    popup.dataset.owner = btn.dataset.helpId;
+    popup.innerHTML = '<div class="ahg-help-popup-arrow"></div><div class="ahg-help-popup-body">' +
+      text.replace(/&/g,'&amp;').replace(/</g,'&lt;') +
+      '</div><button type="button" class="ahg-help-popup-close">&times;</button>';
+    popup.querySelector('.ahg-help-popup-close').addEventListener('click', function() { popup.remove(); });
+
+    btn.parentElement.style.position = 'relative';
+    btn.parentElement.appendChild(popup);
+  });
+
+  // Assign unique IDs
+  document.querySelectorAll('.ahg-field-help').forEach(function(btn, i) {
+    btn.dataset.helpId = 'help-' + i;
+  });
+</script>
+@endpush
+@endsection

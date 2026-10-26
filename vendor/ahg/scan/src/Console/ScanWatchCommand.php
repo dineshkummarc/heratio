@@ -1,0 +1,318 @@
+<?php
+
+/**
+ * ScanWatchCommand - Heratio ahg-scan
+ *
+ * Copyright (C) 2026 Johan Pieterse, Plain Sailing Information Systems
+ * Licensed under the GNU AGPL v3.
+ */
+
+namespace AhgScan\Console;
+
+use AhgScan\Services\WatchedFolderService;
+use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
+
+/**
+ * Polls enabled scan_folder rows, enqueues new files for ingest.
+ *
+ * Run continuously under supervisord:
+ *   php artisan ahg:scan-watch --interval=15
+ *
+ * Or one-shot (ideal from cron):
+ *   php artisan ahg:scan-watch --once
+ */
+class ScanWatchCommand extends Command
+{
+    protected $signature = 'ahg:scan-watch
+        {--once : Run a single pass then exit}
+        {--interval=30 : Seconds between passes when not --once}
+        {--folder= : Process only this scan_folder code}';
+
+    protected $description = 'Watch scan folders and enqueue new files for ingest';
+
+    public function handle(WatchedFolderService $folders): int
+    {
+        $interval = max(5, (int) $this->option('interval'));
+        $once = (bool) $this->option('once');
+        $onlyCode = $this->option('folder');
+
+        do {
+            $list = $folders->enabledFolders();
+            if ($onlyCode) {
+                $list = array_values(array_filter($list, fn ($f) => $f->code === $onlyCode));
+            }
+
+            foreach ($list as $folder) {
+                $jobId = null;
+                try {
+                    $stats = $this->scanOne($folder, $jobId);
+                    $count = $stats['enqueued'];
+                    if ($count > 0) {
+                        $this->info("[{$folder->code}] enqueued {$count} new file(s).");
+                    }
+                    $folders->touchScanned($folder->id);
+                    if ($jobId) {
+                        $this->closeJob($folder, (int) $jobId);
+                    }
+                    // #1281: per-pass run-history. 'idle' when nothing was on disk.
+                    $this->recordEvent($folder, $jobId, $stats, $stats['detected'] > 0 ? 'completed' : 'idle');
+                } catch (\Throwable $e) {
+                    $this->error("[{$folder->code}] ".$e->getMessage());
+                    if ($jobId) {
+                        DB::table('ingest_job')->where('id', $jobId)->update([
+                            'status' => 'failed',
+                            'error_log' => json_encode(['message' => $e->getMessage()]),
+                            'completed_at' => now(),
+                        ]);
+                    }
+                    $this->recordEvent($folder, $jobId, [], 'failed', $e->getMessage());
+                }
+            }
+
+            if (! $once) {
+                sleep($interval);
+            }
+        } while (! $once);
+
+        return self::SUCCESS;
+    }
+
+    /**
+     * Scan one folder once. Returns the per-pass counters consumed by the
+     * scan_event run-history log.
+     *
+     * @return array{detected:int,enqueued:int,skipped_duplicate:int,skipped_quiet:int,failed:int}
+     */
+    protected function scanOne(object $folder, ?int &$jobId = null): array
+    {
+        if (! is_dir($folder->path)) {
+            throw new \RuntimeException("Watched path is not a directory: {$folder->path}");
+        }
+
+        $minQuiet = max(1, (int) $folder->min_quiet_seconds);
+        $now = time();
+        $enqueued = 0;
+        $detected = 0;
+        $skippedDuplicate = 0;
+        $skippedQuiet = 0;
+        $failed = 0;
+        $jobId = null;
+
+        $rii = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($folder->path, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::LEAVES_ONLY
+        );
+
+        foreach ($rii as $fileInfo) {
+            /** @var \SplFileInfo $fileInfo */
+            if (! $fileInfo->isFile()) {
+                continue;
+            }
+
+            $full = $fileInfo->getPathname();
+
+            // Skip dotfiles, lock files, the folder's own disposition subdirs
+            $relative = substr($full, strlen(rtrim($folder->path, '/')) + 1);
+            if (preg_match('#(^|/)\.#', $relative)) {
+                continue;
+            }
+            if (str_ends_with($full, '.lock') || str_ends_with($full, '.part') || str_ends_with($full, '.tmp')) {
+                continue;
+            }
+
+            // For flat-sidecar layout, .xml files are sidecars, not primary DOs.
+            if (($folder->layout ?? 'path') === 'flat-sidecar' && strtolower(pathinfo($full, PATHINFO_EXTENSION)) === 'xml') {
+                continue;
+            }
+
+            // A genuine ingest candidate was seen on disk this pass.
+            $detected++;
+
+            // Quiet-period check: file must be idle for min_quiet_seconds
+            if (($now - $fileInfo->getMTime()) < $minQuiet) {
+                $skippedQuiet++;
+                continue;
+            }
+
+            // BagIt detection: a .zip that contains bagit.txt is a bag, not
+            // a regular file. Unpack it here and enqueue each data/ file
+            // as its own ingest_file row; then skip this zip.
+            if (\AhgScan\Services\BagItIngestService::isBag($full)) {
+                try {
+                    $result = \AhgScan\Services\BagItIngestService::ingest($full, $folder);
+                    if ($result['enqueued'] > 0 || ! empty($result['warnings'])) {
+                        $wmsg = $result['warnings'] ? (' warnings='.count($result['warnings'])) : '';
+                        $this->info("[{$folder->code}] BagIt: enqueued {$result['enqueued']} from {$fileInfo->getFilename()}{$wmsg}");
+                    }
+                    // Move the bag off so we don't re-process it next pass.
+                    // Honour the folder's processed_path override (#1281) when set.
+                    if ($folder->disposition_success === 'move') {
+                        $base = ($folder->processed_path ?? null) ?: config('heratio.scan.archive_path');
+                        $archive = rtrim((string) $base, '/').'/'.date('Y/m');
+                        if (! is_dir($archive)) {
+                            @mkdir($archive, 0775, true);
+                        }
+                        @rename($full, $archive.'/'.basename($full));
+                    }
+                } catch (\Throwable $e) {
+                    $failed++;
+                    $this->warn("[{$folder->code}] BagIt ingest failed for {$fileInfo->getFilename()}: ".$e->getMessage());
+                }
+
+                continue;
+            }
+
+            // Dedupe: skip if already staged for this session
+            $hash = @hash_file('sha256', $full);
+            if (! $hash) {
+                continue;
+            }
+            $already = DB::table('ingest_file')
+                ->where('session_id', $folder->ingest_session_id)
+                ->where('source_hash', $hash)
+                ->exists();
+            if ($already) {
+                $skippedDuplicate++;
+                continue;
+            }
+
+            // Look up a paired sidecar (flat-sidecar layout): <base-stem>.xml next to the file.
+            $sidecarPath = $this->findSidecar($full, $folder->layout ?? 'path');
+
+            // Lazily open an ingest_job for this pass on the first enqueued file.
+            if ($jobId === null) {
+                $jobId = DB::table('ingest_job')->insertGetId([
+                    'session_id' => $folder->ingest_session_id,
+                    'status' => 'running',
+                    'started_at' => now(),
+                    'created_at' => now(),
+                ]);
+            }
+
+            $fileId = DB::table('ingest_file')->insertGetId([
+                'session_id' => $folder->ingest_session_id,
+                'file_type' => $this->classifyFile($full),
+                'original_name' => $fileInfo->getFilename(),
+                'stored_path' => $full,
+                'file_size' => $fileInfo->getSize(),
+                'mime_type' => function_exists('mime_content_type') ? (@mime_content_type($full) ?: null) : null,
+                'status' => 'pending',
+                'stage' => null,
+                'source_hash' => $hash,
+                'attempts' => 0,
+                'sidecar_path' => $sidecarPath,
+                'created_at' => now(),
+            ]);
+
+            \AhgScan\Jobs\ProcessScanFile::dispatch($fileId, $folder->id);
+            $enqueued++;
+        }
+
+        return [
+            'detected' => $detected,
+            'enqueued' => $enqueued,
+            'skipped_duplicate' => $skippedDuplicate,
+            'skipped_quiet' => $skippedQuiet,
+            'failed' => $failed,
+        ];
+    }
+
+    /**
+     * Write one scan_event run-history row for a completed (or failed) pass.
+     */
+    protected function recordEvent(object $folder, ?int $jobId, array $stats, string $status, ?string $message = null): void
+    {
+        try {
+            DB::table('scan_event')->insert([
+                'folder_id' => (int) $folder->id,
+                'detected' => (int) ($stats['detected'] ?? 0),
+                'enqueued' => (int) ($stats['enqueued'] ?? 0),
+                'skipped_duplicate' => (int) ($stats['skipped_duplicate'] ?? 0),
+                'skipped_quiet' => (int) ($stats['skipped_quiet'] ?? 0),
+                'failed' => (int) ($stats['failed'] ?? 0),
+                'job_id' => $jobId,
+                'status' => $status,
+                'message' => $message,
+                'created_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            // Run-history logging must never break the watch loop.
+        }
+    }
+
+    protected function classifyFile(string $path): string
+    {
+        $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+
+        return match ($ext) {
+            'xml' => 'sidecar',
+            'csv', 'tsv' => 'csv',
+            default => 'digital_object',
+        };
+    }
+
+    /**
+     * Return the path to a sidecar XML describing this file, or null if none.
+     *
+     * Stem-matching rules (per plan §3.1 Style 2):
+     *   ARC-2026-0001.tiff     → look for ARC-2026-0001.xml
+     *   ARC-2026-0001_p2.tiff  → strip _pN suffix → look for ARC-2026-0001.xml
+     *   ARC-2026-0001-002.tiff → same - strip trailing -NNN / _NNN → base stem
+     */
+    protected function findSidecar(string $filePath, string $layout): ?string
+    {
+        if ($layout !== 'flat-sidecar') {
+            return null;
+        }
+        $dir = dirname($filePath);
+        $stem = pathinfo($filePath, PATHINFO_FILENAME);
+
+        // Try exact-stem first, then progressively stripped base stems.
+        $candidates = [$stem];
+        if (preg_match('/^(.+?)[_-]p?\d+$/i', $stem, $m)) {
+            $candidates[] = $m[1];
+        }
+        foreach ($candidates as $s) {
+            $candidate = $dir.'/'.$s.'.xml';
+            if (is_file($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Close an ingest_job opened for this watcher pass, writing summary
+     * counts from the ingest_file rows the pass produced.
+     */
+    protected function closeJob(object $folder, int $jobId): void
+    {
+        $job = DB::table('ingest_job')->where('id', $jobId)->first();
+        if (! $job) {
+            return;
+        }
+
+        $files = DB::table('ingest_file')
+            ->where('session_id', $folder->ingest_session_id)
+            ->where('created_at', '>=', $job->started_at)
+            ->get();
+
+        $total = $files->count();
+        $processed = $files->whereIn('status', ['done', 'duplicate'])->count();
+        $createdDos = $files->whereNotNull('resolved_do_id')->count();
+        $createdIos = $files->whereNotNull('resolved_io_id')->unique('resolved_io_id')->count();
+        $errors = $files->where('status', 'failed')->count();
+
+        DB::table('ingest_job')->where('id', $jobId)->update([
+            'status' => $errors > 0 ? 'completed_with_errors' : 'completed',
+            'total_rows' => $total,
+            'processed_rows' => $processed,
+            'created_records' => $createdIos,
+            'created_dos' => $createdDos,
+            'error_count' => $errors,
+            'completed_at' => now(),
+        ]);
+    }
+}

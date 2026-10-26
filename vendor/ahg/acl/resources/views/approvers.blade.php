@@ -1,0 +1,173 @@
+@extends('theme::layouts.1col')
+
+@section('title', 'Access Request Approvers')
+
+@section('content')
+<div class="container py-4">
+
+  <nav aria-label="{{ __('breadcrumb') }}">
+    <ol class="breadcrumb">
+      <li class="breadcrumb-item"><a href="{{ route('settings.index') }}">{{ __('Admin') }}</a></li>
+      <li class="breadcrumb-item"><a href="{{ route('acl.groups') }}">ACL</a></li>
+      <li class="breadcrumb-item active" aria-current="page">{{ __('Access Request Approvers') }}</li>
+    </ol>
+  </nav>
+
+  <div class="d-flex justify-content-between align-items-center mb-4">
+    <h2><i class="fas fa-user-check me-2"></i> {{ __('Access Request Approvers') }}</h2>
+    <a href="{{ route('acl.groups') }}" class="btn atom-btn-white">
+      <i class="fas fa-arrow-left me-1"></i> {{ __('Back to ACL') }}
+    </a>
+  </div>
+
+  @if(session('success'))
+    <div class="alert alert-success alert-dismissible fade show" role="alert">
+      {{ session('success') }}
+      <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="{{ __('Close') }}"></button>
+    </div>
+  @endif
+
+  @if(session('error'))
+    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+      {{ session('error') }}
+      <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="{{ __('Close') }}"></button>
+    </div>
+  @endif
+
+  @if($errors->any())
+    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+      <ul class="mb-0">
+        @foreach($errors->all() as $error)
+          <li>{{ $error }}</li>
+        @endforeach
+      </ul>
+      <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="{{ __('Close') }}"></button>
+    </div>
+  @endif
+
+  <div class="row">
+
+    {{-- Left column: Current Approvers --}}
+    <div class="col-lg-8 mb-4">
+      <div class="card">
+        <div class="card-header" style="background:var(--ahg-primary);color:#fff">
+          <h5 class="mb-0"><i class="fas fa-list me-2"></i> {{ __('Current Approvers') }}</h5>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-bordered table-striped table-hover mb-0">
+              <thead>
+                <tr>
+                  <th>{{ __('User') }}</th>
+                  <th>{{ __('Clearance') }}</th>
+                  <th>{{ __('Can Approve') }}</th>
+                  <th>{{ __('Email Notify') }}</th>
+                  <th>{{ __('Actions') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                @forelse($approvers as $approver)
+                  <tr>
+                    <td>
+                      <strong>{{ $approver->display_name ?: $approver->username }}</strong>
+                      <br><small class="text-muted">{{ $approver->email ?? '' }}</small>
+                    </td>
+                    <td>
+                      @if($approver->clearance_name)
+                        <span class="badge" style="background-color:{{ $approver->clearance_color ?? '#6c757d' }};">
+                          {{ $approver->clearance_name }}
+                        </span>
+                        <small class="text-muted ms-1">({{ $approver->clearance_code ?? '' }})</small>
+                      @else
+                        <span class="text-muted">{{ __('None') }}</span>
+                      @endif
+                    </td>
+                    <td>
+                      Level {{ $approver->min_classification_level }} - {{ $approver->max_classification_level }}
+                    </td>
+                    <td>
+                      @if($approver->email_notifications)
+                        <i class="fas fa-check text-success" title="{{ __('Email notifications enabled') }}"></i>
+                      @else
+                        <i class="fas fa-times text-danger" title="{{ __('Email notifications disabled') }}"></i>
+                      @endif
+                    </td>
+                    <td>
+                      <form action="{{ route('acl.remove-approver', ['id' => $approver->id]) }}" method="POST"
+                            onsubmit="return confirm('Are you sure you want to remove this approver?');">
+                        @csrf
+                        <button type="submit" class="btn btn-sm atom-btn-outline-danger" title="{{ __('Remove approver') }}">
+                          <i class="fas fa-user-minus me-1"></i> {{ __('Remove') }}
+                        </button>
+                      </form>
+                    </td>
+                  </tr>
+                @empty
+                  <tr>
+                    <td colspan="5" class="text-center text-muted py-4">{{ __('No approvers configured.') }}</td>
+                  </tr>
+                @endforelse
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {{-- Right column: Add Approver --}}
+    <div class="col-lg-4 mb-4">
+      <div class="card">
+        <div class="card-header" style="background:var(--ahg-primary);color:#fff">
+          <h5 class="mb-0"><i class="fas fa-user-plus me-2"></i> {{ __('Add Approver') }}</h5>
+        </div>
+        <div class="card-body">
+          <form action="{{ route('acl.add-approver') }}" method="POST">
+            @csrf
+
+            <div class="mb-3">
+              <label for="approver_user_id" class="form-label">{{ __('User') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <select name="user_id" id="approver_user_id" class="form-select" required>
+                <option value="">-- Select User --</option>
+                @foreach($availableUsers as $user)
+                  <option value="{{ $user->id }}">{{ $user->display_name ?: $user->username }} ({{ $user->username }})</option>
+                @endforeach
+              </select>
+            </div>
+
+            <div class="row mb-3">
+              <div class="col-6">
+                <label for="min_classification_level" class="form-label">{{ __('Min Level') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+                <select name="min_classification_level" id="min_classification_level" class="form-select" required>
+                  @foreach($classifications as $cls)
+                    <option value="{{ $cls->level }}">{{ $cls->level }} - {{ $cls->name }}</option>
+                  @endforeach
+                </select>
+              </div>
+              <div class="col-6">
+                <label for="max_classification_level" class="form-label">{{ __('Max Level') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+                <select name="max_classification_level" id="max_classification_level" class="form-select" required>
+                  @foreach($classifications as $cls)
+                    <option value="{{ $cls->level }}" @if($loop->last) selected @endif>{{ $cls->level }} - {{ $cls->name }}</option>
+                  @endforeach
+                </select>
+              </div>
+            </div>
+
+            <div class="mb-3 form-check">
+              <input type="hidden" name="email_notifications" value="0">
+              <input type="checkbox" class="form-check-input" name="email_notifications" id="email_notifications" value="1" checked>
+              <label class="form-check-label" for="email_notifications">{{ __('Email Notifications') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+            </div>
+
+            <button type="submit" class="btn atom-btn-outline-success w-100">
+              <i class="fas fa-user-plus me-1"></i> {{ __('Add Approver') }}
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+@endsection

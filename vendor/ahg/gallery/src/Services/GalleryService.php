@@ -1,0 +1,1012 @@
+<?php
+
+/**
+ * GalleryService - Service for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+
+
+namespace AhgGallery\Services;
+
+use AhgCore\Support\CcoFields;
+use AhgCore\Constants\TermId;
+use AhgCore\Services\SettingHelper;
+use AhgCore\Traits\WithCultureFallback;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+
+class GalleryService
+{
+    use WithCultureFallback;
+
+    /**
+     * Get a single gallery artwork by its slug.
+     * Joins information_object + i18n + slug + museum_metadata + display_object_config (object_type='gallery').
+     */
+    public function getBySlug(string $slug, ?string $culture = null): ?object
+    {
+        $culture = $culture ?? (string) app()->getLocale();
+        // Culture-fallback i18n joins via WithCultureFallback trait - culture is
+        // passed explicitly here since GalleryService doesn't store it on $this.
+        $artwork = DB::table('information_object as io')
+            ->tap(fn ($q) => $this->joinI18nWithFallback($q, 'information_object_i18n', 'io', aliasPrefix: 'i18n', culture: $culture))
+            ->join('object as obj', 'io.id', '=', 'obj.id')
+            ->join('slug', 'io.id', '=', 'slug.object_id')
+            ->join('display_object_config as doc', function ($j) {
+                $j->on('io.id', '=', 'doc.object_id')->where('doc.object_type', '=', 'gallery');
+            })
+            ->leftJoin('museum_metadata as mm', 'io.id', '=', 'mm.object_id')
+            ->where('slug.slug', $slug)
+            // Guests see only published artworks (status 158/160) - draft-leak fix (#1360).
+            ->when(! auth()->check(), fn ($q) => $q->whereExists(function ($s) {
+                $s->select(DB::raw(1))->from('status as pub_st')
+                    ->whereColumn('pub_st.object_id', 'io.id')
+                    ->where('pub_st.type_id', 158)->where('pub_st.status_id', 160);
+            }))
+            ->select([
+                'io.id',
+                'io.identifier',
+                'io.level_of_description_id',
+                'io.repository_id',
+                'io.parent_id',
+                'io.lft',
+                'io.rgt',
+                'io.description_status_id',
+                'io.description_detail_id',
+                'io.description_identifier',
+                'io.source_standard',
+                'io.display_standard_id',
+                'io.collection_type_id',
+                'io.source_culture',
+                'io.icip_sensitivity',
+                DB::raw('COALESCE(i18n_cur.title, i18n_fb.title) AS title'),
+                DB::raw('COALESCE(i18n_cur.alternate_title, i18n_fb.alternate_title) AS alternate_title'),
+                DB::raw('COALESCE(i18n_cur.extent_and_medium, i18n_fb.extent_and_medium) AS extent_and_medium'),
+                DB::raw('COALESCE(i18n_cur.scope_and_content, i18n_fb.scope_and_content) AS scope_and_content'),
+                DB::raw('COALESCE(i18n_cur.archival_history, i18n_fb.archival_history) AS archival_history'),
+                DB::raw('COALESCE(i18n_cur.acquisition, i18n_fb.acquisition) AS acquisition'),
+                DB::raw('COALESCE(i18n_cur.access_conditions, i18n_fb.access_conditions) AS access_conditions'),
+                DB::raw('COALESCE(i18n_cur.reproduction_conditions, i18n_fb.reproduction_conditions) AS reproduction_conditions'),
+                DB::raw('COALESCE(i18n_cur.physical_characteristics, i18n_fb.physical_characteristics) AS physical_characteristics'),
+                DB::raw('COALESCE(i18n_cur.arrangement, i18n_fb.arrangement) AS arrangement'),
+                DB::raw('COALESCE(i18n_cur.appraisal, i18n_fb.appraisal) AS appraisal'),
+                DB::raw('COALESCE(i18n_cur.accruals, i18n_fb.accruals) AS accruals'),
+                DB::raw('COALESCE(i18n_cur.finding_aids, i18n_fb.finding_aids) AS finding_aids'),
+                DB::raw('COALESCE(i18n_cur.location_of_originals, i18n_fb.location_of_originals) AS location_of_originals'),
+                DB::raw('COALESCE(i18n_cur.location_of_copies, i18n_fb.location_of_copies) AS location_of_copies'),
+                DB::raw('COALESCE(i18n_cur.related_units_of_description, i18n_fb.related_units_of_description) AS related_units_of_description'),
+                DB::raw('COALESCE(i18n_cur.rules, i18n_fb.rules) AS rules'),
+                DB::raw('COALESCE(i18n_cur.sources, i18n_fb.sources) AS sources'),
+                DB::raw('COALESCE(i18n_cur.revision_history, i18n_fb.revision_history) AS revision_history'),
+                DB::raw('COALESCE(i18n_cur.institution_responsible_identifier, i18n_fb.institution_responsible_identifier) AS institution_responsible_identifier'),
+                'obj.created_at',
+                'obj.updated_at',
+                'slug.slug',
+                // Museum/Gallery CCO metadata
+                'mm.id as metadata_id',
+                'mm.object_id as mm_object_id',
+                'mm.work_type',
+                'mm.classification',
+                'mm.creator_identity',
+                'mm.creator_role',
+                'mm.creation_date_display',
+                'mm.creation_date_earliest',
+                'mm.creation_date_latest',
+                'mm.creation_place',
+                'mm.style',
+                'mm.period',
+                'mm.movement',
+                'mm.school',
+                'mm.measurements',
+                'mm.dimensions',
+                'mm.materials',
+                'mm.techniques',
+                'mm.inscription',
+                'mm.mark_description',
+                'mm.condition_term',
+                'mm.condition_description',
+                'mm.provenance',
+                'mm.current_location',
+                'mm.rights_type',
+                'mm.rights_holder',
+                'mm.cataloger_name',
+                'mm.cataloging_date',
+            ])
+            // The CCO fields added in #1478. Selected from the shared list so
+            // the edit form repopulates what was saved - a field that saves but
+            // renders empty next time is the same bug wearing a different hat.
+            ->addSelect(CcoFields::select('mm'))
+            ->first();
+
+        // #74 encryption_field_access_restrictions: decrypt the two
+        // registered i18n columns at the central gallery-show read site.
+        // Idempotent for plaintext.
+        if ($artwork !== null) {
+            $__enc = new \AhgCore\Services\EncryptionService();
+            foreach (['access_conditions', 'reproduction_conditions'] as $__col) {
+                if (isset($artwork->{$__col}) && $artwork->{$__col} !== null && $artwork->{$__col} !== '') {
+                    $artwork->{$__col} = $__enc->decrypt(
+                        \AhgCore\Services\EncryptionService::CATEGORY_ACCESS_RESTRICTIONS,
+                        (string) $artwork->{$__col},
+                        'information_object_i18n', $__col, (int) $artwork->id
+                    );
+                }
+            }
+        }
+
+        // Overlay culture-aware CCO field values from museum_metadata_i18n.
+        // The base SELECT pulls source-culture (parent) values; this overrides
+        // each translatable field with COALESCE(current, en, parent).
+        if ($artwork && isset($artwork->metadata_id)) {
+            $translated = \AhgMuseum\Services\MuseumService::fetchTranslated((int) $artwork->id, $culture);
+            if (!empty($translated)) {
+                foreach (\AhgMuseum\Services\MuseumService::MM_TRANSLATABLE_FIELDS as $f) {
+                    if (array_key_exists($f, $translated) && property_exists($artwork, $f)) {
+                        $artwork->{$f} = $translated[$f];
+                    }
+                }
+            }
+        }
+
+        return $artwork;
+    }
+
+    /**
+     * Browse gallery artworks with pagination.
+     */
+    public function browse(array $params, string $culture = 'en'): array
+    {
+        $page = max(1, (int) ($params['page'] ?? 1));
+        $limit = max(1, (int) ($params['limit'] ?? SettingHelper::hitsPerPage()));
+        $sort = $params['sort'] ?? 'alphabetic';
+        $subquery = $params['subquery'] ?? '';
+
+        $query = DB::table('information_object as io')
+            ->join('information_object_i18n as i18n', function ($j) use ($culture) {
+                $j->on('io.id', '=', 'i18n.id')->where('i18n.culture', '=', $culture);
+            })
+            ->join('object as obj', 'io.id', '=', 'obj.id')
+            ->join('slug', 'io.id', '=', 'slug.object_id')
+            ->join('display_object_config as doc', function ($j) {
+                $j->on('io.id', '=', 'doc.object_id')->where('doc.object_type', '=', 'gallery');
+            })
+            ->leftJoin('museum_metadata as mm', 'io.id', '=', 'mm.object_id');
+
+        // Guests see only published artworks (status 158/160) - draft-leak fix (#1360).
+        if (! auth()->check()) {
+            $query->whereExists(function ($s) {
+                $s->select(DB::raw(1))->from('status as pub_st')
+                    ->whereColumn('pub_st.object_id', 'io.id')
+                    ->where('pub_st.type_id', 158)->where('pub_st.status_id', 160);
+            });
+        }
+
+        // Search filter
+        if ($subquery !== '') {
+            $like = '%' . $subquery . '%';
+            $query->where(function ($q) use ($like) {
+                $q->where('i18n.title', 'like', $like)
+                    ->orWhere('io.identifier', 'like', $like)
+                    ->orWhere('mm.creator_identity', 'like', $like)
+                    ->orWhere('mm.materials', 'like', $like)
+                    ->orWhere('mm.techniques', 'like', $like)
+                    ->orWhere('mm.classification', 'like', $like)
+                    ->orWhere('mm.work_type', 'like', $like);
+            });
+        }
+
+        // Repository filter
+        if (!empty($params['filters']['repository_id'])) {
+            $query->where('io.repository_id', $params['filters']['repository_id']);
+        }
+
+        // Count
+        $total = $query->count();
+
+        // Sort
+        switch ($sort) {
+            case 'lastUpdated':
+                $query->orderBy('obj.updated_at', 'desc');
+                break;
+            case 'identifier':
+                $query->orderBy('io.identifier', 'asc');
+                break;
+            case 'artist':
+                $query->orderBy('mm.creator_identity', 'asc');
+                break;
+            default: // alphabetic
+                $query->orderBy('i18n.title', 'asc');
+                break;
+        }
+
+        $offset = ($page - 1) * $limit;
+        $rows = $query->select([
+                'io.id',
+                'io.identifier',
+                'io.repository_id',
+                'io.level_of_description_id',
+                'i18n.title as name',
+                'slug.slug',
+                'obj.updated_at',
+                'mm.creator_identity',
+                'mm.work_type',
+                'mm.materials',
+                'mm.techniques',
+                'mm.creation_date_display',
+            ])
+            ->offset($offset)
+            ->limit($limit)
+            ->get();
+
+        // Resolve repository names
+        $repoIds = $rows->pluck('repository_id')->filter()->unique()->values()->toArray();
+        $repositoryNames = [];
+        if (!empty($repoIds)) {
+            $repositoryNames = DB::table('repository')
+                ->join('actor_i18n', 'repository.id', '=', 'actor_i18n.id')
+                ->whereIn('repository.id', $repoIds)
+                ->where('actor_i18n.culture', $culture)
+                ->pluck('actor_i18n.authorized_form_of_name', 'repository.id')
+                ->toArray();
+        }
+
+        // Fetch master and thumbnail digital objects for each artwork (match AtoM pattern)
+        $objectIds = $rows->pluck('id')->toArray();
+        $thumbnails = [];
+        $masters = [];
+        if (!empty($objectIds)) {
+            // Master digital objects (no parent_id)
+            $masterRows = DB::table('digital_object')
+                ->whereIn('object_id', $objectIds)
+                ->whereNull('parent_id')
+                ->select('id', 'object_id', 'path', 'name', 'mime_type')
+                ->get();
+            foreach ($masterRows as $mr) {
+                $masters[$mr->object_id] = $mr;
+            }
+
+            // Thumbnail derivatives (usage_id = 142 for Thumbnail)
+            $masterIds = $masterRows->pluck('id')->toArray();
+            if (!empty($masterIds)) {
+                $thumbRows = DB::table('digital_object')
+                    ->whereIn('parent_id', $masterIds)
+                    ->where('usage_id', 142)
+                    ->select('parent_id', 'path', 'name', 'mime_type')
+                    ->get();
+                // Map thumb by master's object_id
+                $masterIdToObjectId = [];
+                foreach ($masterRows as $mr) {
+                    $masterIdToObjectId[$mr->id] = $mr->object_id;
+                }
+                foreach ($thumbRows as $tr) {
+                    $objId = $masterIdToObjectId[$tr->parent_id] ?? null;
+                    if ($objId) {
+                        $thumbnails[$objId] = $tr;
+                    }
+                }
+            }
+        }
+
+        $results = [];
+        foreach ($rows as $row) {
+            $master = $masters[$row->id] ?? null;
+            $results[] = [
+                'id' => $row->id,
+                'identifier' => $row->identifier,
+                'name' => $row->name,
+                'slug' => $row->slug,
+                'updated_at' => $row->updated_at,
+                'repository_id' => $row->repository_id,
+                'creator_identity' => $row->creator_identity,
+                'work_type' => $row->work_type,
+                'materials' => $row->materials,
+                'techniques' => $row->techniques,
+                'creation_date_display' => $row->creation_date_display,
+                'thumbnail' => $thumbnails[$row->id] ?? null,
+                'master_path' => $master->path ?? null,
+                'master_name' => $master->name ?? null,
+            ];
+        }
+
+        return [
+            'results' => $results,
+            'total' => $total,
+            'page' => $page,
+            'limit' => $limit,
+            'repositoryNames' => $repositoryNames,
+        ];
+    }
+
+    /**
+     * Create a new gallery artwork: IO + i18n + museum_metadata + display_object_config + slug.
+     */
+    public function create(array $data, string $culture = 'en'): string
+    {
+        $newSlug = DB::transaction(function () use ($data, $culture) {
+            $parentId = $data['parent_id'] ?? 1;
+
+            // Determine lft/rgt position
+            $parent = DB::table('information_object')
+                ->where('id', $parentId)
+                ->select('lft', 'rgt')
+                ->first();
+
+            if (!$parent) {
+                abort(422, 'Invalid parent information object.');
+            }
+
+            $newLft = $parent->rgt;
+            $newRgt = $parent->rgt + 1;
+
+            // Shift nested set values
+            DB::table('information_object')
+                ->where('rgt', '>=', $parent->rgt)
+                ->increment('rgt', 2);
+
+            DB::table('information_object')
+                ->where('lft', '>', $parent->rgt)
+                ->increment('lft', 2);
+
+            // Insert into object table
+            $objectId = DB::table('object')->insertGetId([
+                'class_name' => 'QubitInformationObject',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            // Sector identifier auto-generation (#89). Same pattern as the
+            // other sector services - operator-supplied identifier wins;
+            // SectorIdentifierService::next() fills in only when empty AND
+            // the gallery-sector mask is enabled.
+            $resolvedIdentifier = $data['identifier'] ?? null;
+            if (empty($resolvedIdentifier)) {
+                $generated = \AhgCore\Services\SectorIdentifierService::next('gallery');
+                if ($generated !== null) $resolvedIdentifier = $generated;
+            }
+
+            // Insert information_object
+            $ioInsert = [
+                'id' => $objectId,
+                'identifier' => $resolvedIdentifier,
+                'level_of_description_id' => !empty($data['level_of_description_id']) ? $data['level_of_description_id'] : null,
+                'collection_type_id' => null,
+                'repository_id' => !empty($data['repository_id']) ? $data['repository_id'] : null,
+                'parent_id' => $parentId,
+                'description_status_id' => !empty($data['description_status_id']) ? $data['description_status_id'] : null,
+                'description_detail_id' => !empty($data['description_detail_id']) ? $data['description_detail_id'] : null,
+                'description_identifier' => $data['description_identifier'] ?? null,
+                'source_standard' => $data['source_standard'] ?? null,
+                'display_standard_id' => !empty($data['display_standard_id']) ? $data['display_standard_id'] : null,
+                'lft' => $newLft,
+                'rgt' => $newRgt,
+                'source_culture' => $culture,
+            ];
+            if (array_key_exists('icip_sensitivity', $data) && $data['icip_sensitivity'] !== '') {
+                $ioInsert['icip_sensitivity'] = $data['icip_sensitivity'];
+            }
+            DB::table('information_object')->insert($ioInsert);
+
+            // #1333 dual-write: maintain the closure tree alongside lft/rgt
+            // (transactional with the insert). No-op until the closure tables
+            // exist; lft/rgt stay authoritative until reads are swapped.
+            app(\AhgCore\Services\ClosureMaintenanceService::class)
+                ->addNode('information_object', (int) $objectId, (int) $parentId);
+
+            // Insert information_object_i18n
+            DB::table('information_object_i18n')->insert([
+                'id' => $objectId,
+                'culture' => $culture,
+                'title' => $data['title'],
+                'alternate_title' => $data['alternate_title'] ?? null,
+                'extent_and_medium' => $data['extent_and_medium'] ?? null,
+                'scope_and_content' => $data['scope_and_content'] ?? null,
+                'archival_history' => $data['archival_history'] ?? null,
+                'acquisition' => $data['acquisition'] ?? null,
+                // #74 encryption_field_access_restrictions: encrypt-on-write
+                // for the two registered i18n columns. Helper no-ops when
+                // the category is off so plaintext round-trips cleanly.
+                'access_conditions' => (new \AhgCore\Services\EncryptionService())->encrypt(
+                    \AhgCore\Services\EncryptionService::CATEGORY_ACCESS_RESTRICTIONS,
+                    $data['access_conditions'] ?? null,
+                    'information_object_i18n', 'access_conditions', $objectId
+                ),
+                'reproduction_conditions' => (new \AhgCore\Services\EncryptionService())->encrypt(
+                    \AhgCore\Services\EncryptionService::CATEGORY_ACCESS_RESTRICTIONS,
+                    $data['reproduction_conditions'] ?? null,
+                    'information_object_i18n', 'reproduction_conditions', $objectId
+                ),
+                'physical_characteristics' => $data['physical_characteristics'] ?? null,
+                'arrangement' => $data['arrangement'] ?? null,
+                'appraisal' => $data['appraisal'] ?? null,
+                'accruals' => $data['accruals'] ?? null,
+                'finding_aids' => $data['finding_aids'] ?? null,
+                'location_of_originals' => $data['location_of_originals'] ?? null,
+                'location_of_copies' => $data['location_of_copies'] ?? null,
+                'related_units_of_description' => $data['related_units_of_description'] ?? null,
+                'rules' => $data['rules'] ?? null,
+                'sources' => $data['sources'] ?? null,
+                'revision_history' => $data['revision_history'] ?? null,
+                'institution_responsible_identifier' => $data['institution_responsible_identifier'] ?? null,
+            ]);
+
+            // Insert display_object_config for gallery type
+            DB::table('display_object_config')->insert([
+                'object_id' => $objectId,
+                'object_type' => 'gallery',
+            ]);
+
+            // Insert museum_metadata (shared CCO fields)
+            DB::table('museum_metadata')->insert([
+                'object_id' => $objectId,
+                'work_type' => $data['work_type'] ?? null,
+                'classification' => $data['classification'] ?? null,
+                'creator_identity' => $data['creator_identity'] ?? null,
+                'creator_role' => $data['creator_role'] ?? null,
+                'creation_date_display' => $data['creation_date_display'] ?? null,
+                'creation_date_earliest' => $data['creation_date_earliest'] ?? null,
+                'creation_date_latest' => $data['creation_date_latest'] ?? null,
+                'creation_place' => $data['creation_place'] ?? null,
+                'style' => $data['style'] ?? null,
+                'period' => $data['period'] ?? null,
+                'movement' => $data['movement'] ?? null,
+                'school' => $data['school'] ?? null,
+                'measurements' => $data['measurements'] ?? null,
+                'dimensions' => $data['dimensions'] ?? null,
+                'materials' => $data['materials'] ?? null,
+                'techniques' => $data['techniques'] ?? null,
+                'inscription' => $data['inscription'] ?? null,
+                'mark_description' => $data['mark_description'] ?? null,
+                'condition_term' => $data['condition_term'] ?? null,
+                'condition_description' => $data['condition_description'] ?? null,
+                'provenance' => $data['provenance'] ?? null,
+                'current_location' => $data['current_location'] ?? null,
+                'rights_type' => $data['rights_type'] ?? null,
+                'rights_holder' => $data['rights_holder'] ?? null,
+                'cataloger_name' => $data['cataloger_name'] ?? null,
+                'cataloging_date' => $data['cataloging_date'] ?? null,
+            
+            ] + CcoFields::values($data));
+
+            // Generate slug
+            $baseSlug = Str::slug($data['title'] ?: 'untitled');
+            $slug = $baseSlug;
+            $counter = 1;
+            while (DB::table('slug')->where('slug', $slug)->exists()) {
+                $slug = $baseSlug . '-' . $counter;
+                $counter++;
+            }
+
+            DB::table('slug')->insert([
+                'object_id' => $objectId,
+                'slug' => $slug,
+            ]);
+
+            // Set publication status (draft by default)
+            DB::table('status')->insert([
+                // #1470: status.id must be an object id, not one from status's
+                // own AUTO_INCREMENT counter.
+                'id' => \AhgCore\Support\StatusRow::allocateId(),
+                'object_id' => $objectId,
+                'type_id' => TermId::STATUS_TYPE_PUBLICATION,
+                'status_id' => TermId::PUBLICATION_STATUS_DRAFT,
+            ]);
+
+            return $slug;
+        });
+
+        $newId = (int) DB::table('slug')->where('slug', $newSlug)->value('object_id');
+        if ($newId) {
+            \AhgCore\Support\AuditLog::captureCreate($newId, 'gallery_artwork', $this->auditSnapshot($newId, $culture));
+        }
+        return $newSlug;
+    }
+
+    /**
+     * Update a gallery artwork.
+     */
+    /**
+     * Flat snapshot of gallery-update fields for the security_audit_log
+     * before/after diff.
+     */
+    private function auditSnapshot(int $id, string $culture = 'en'): array
+    {
+        $io = (array) (DB::table('information_object')->where('id', $id)
+            ->select('identifier', 'level_of_description_id', 'repository_id', 'icip_sensitivity',
+                'description_status_id', 'description_detail_id', 'description_identifier',
+                'source_standard', 'display_standard_id')
+            ->first() ?? []);
+        $i18n = (array) (DB::table('information_object_i18n')->where('id', $id)
+            ->where('culture', $culture)
+            ->select('title', 'alternate_title', 'extent_and_medium', 'scope_and_content',
+                'archival_history', 'acquisition', 'access_conditions', 'reproduction_conditions',
+                'physical_characteristics', 'arrangement', 'appraisal', 'accruals', 'finding_aids',
+                'location_of_originals', 'location_of_copies', 'related_units_of_description',
+                'rules', 'sources', 'revision_history', 'institution_responsible_identifier')
+            ->first() ?? []);
+        $mm = (array) (DB::table('museum_metadata')->where('object_id', $id)->first() ?? []);
+        unset($mm['id'], $mm['object_id'], $mm['created_at'], $mm['updated_at']);
+        return array_merge($io, $i18n, $mm);
+    }
+
+    public function update(string $slug, array $data, string $culture = 'en'): void
+    {
+        $resolved = DB::table('slug')
+            ->join('information_object', 'slug.object_id', '=', 'information_object.id')
+            ->where('slug.slug', $slug)
+            ->select('information_object.id')
+            ->first();
+        $auditBefore = $resolved ? $this->auditSnapshot((int) $resolved->id, $culture) : [];
+
+        DB::transaction(function () use ($slug, $data, $culture) {
+            $io = DB::table('slug')
+                ->join('information_object', 'slug.object_id', '=', 'information_object.id')
+                ->where('slug.slug', $slug)
+                ->select('information_object.id')
+                ->first();
+
+            if (!$io) {
+                abort(404);
+            }
+
+            $ioId = $io->id;
+            $fingerprintBefore = \AhgInformationObjectManage\Services\InformationObjectService::contentFingerprint((int) $ioId); // #1536
+
+            // Update information_object
+            $ioUpdate = [
+                'identifier' => $data['identifier'] ?? null,
+                'level_of_description_id' => !empty($data['level_of_description_id']) ? $data['level_of_description_id'] : null,
+                'repository_id' => !empty($data['repository_id']) ? $data['repository_id'] : null,
+                'description_status_id' => !empty($data['description_status_id']) ? $data['description_status_id'] : null,
+                'description_detail_id' => !empty($data['description_detail_id']) ? $data['description_detail_id'] : null,
+                'description_identifier' => $data['description_identifier'] ?? null,
+                'source_standard' => $data['source_standard'] ?? null,
+                'display_standard_id' => !empty($data['display_standard_id']) ? $data['display_standard_id'] : null,
+            ];
+            if (array_key_exists('icip_sensitivity', $data)) {
+                $ioUpdate['icip_sensitivity'] = ($data['icip_sensitivity'] === '' ? null : $data['icip_sensitivity']);
+            }
+            DB::table('information_object')
+                ->where('id', $ioId)
+                ->update($ioUpdate);
+
+            // Update information_object_i18n
+            // Issue #61 Phase 3c: snapshot before, run update, detect overrides.
+            $i18nKeys = ['title','alternate_title','extent_and_medium','scope_and_content',
+                'archival_history','acquisition','access_conditions','reproduction_conditions',
+                'physical_characteristics','arrangement','appraisal','accruals','finding_aids',
+                'location_of_originals','location_of_copies','related_units_of_description',
+                'rules','sources','revision_history','institution_responsible_identifier'];
+            $beforeI18n = (array) (DB::table('information_object_i18n')
+                ->where('id', $ioId)->where('culture', $culture)
+                ->first($i18nKeys) ?? []);
+            $i18nUpdate = [];
+            foreach ($i18nKeys as $k) { $i18nUpdate[$k] = $data[$k] ?? null; }
+            DB::table('information_object_i18n')
+                ->where('id', $ioId)
+                ->where('culture', $culture)
+                ->update($i18nUpdate);
+            try {
+                app(\AhgProvenanceAi\Services\OverrideService::class)
+                    ->detectOverridesFromForm('information_object', (int) $ioId, $beforeI18n, $i18nUpdate, (int) (auth()->id() ?? 0));
+            } catch (\Throwable $e) { \Log::warning('GalleryService update: override detection failed: ' . $e->getMessage()); }
+
+            // Update museum_metadata
+            $metadataExists = DB::table('museum_metadata')->where('object_id', $ioId)->exists();
+            $metaFields = [
+                'work_type' => $data['work_type'] ?? null,
+                'classification' => $data['classification'] ?? null,
+                'creator_identity' => $data['creator_identity'] ?? null,
+                'creator_role' => $data['creator_role'] ?? null,
+                'creation_date_display' => $data['creation_date_display'] ?? null,
+                'creation_date_earliest' => $data['creation_date_earliest'] ?? null,
+                'creation_date_latest' => $data['creation_date_latest'] ?? null,
+                'creation_place' => $data['creation_place'] ?? null,
+                'style' => $data['style'] ?? null,
+                'period' => $data['period'] ?? null,
+                'movement' => $data['movement'] ?? null,
+                'school' => $data['school'] ?? null,
+                'measurements' => $data['measurements'] ?? null,
+                'dimensions' => $data['dimensions'] ?? null,
+                'materials' => $data['materials'] ?? null,
+                'techniques' => $data['techniques'] ?? null,
+                'inscription' => $data['inscription'] ?? null,
+                'mark_description' => $data['mark_description'] ?? null,
+                'condition_term' => $data['condition_term'] ?? null,
+                'condition_description' => $data['condition_description'] ?? null,
+                'provenance' => $data['provenance'] ?? null,
+                'current_location' => $data['current_location'] ?? null,
+                'rights_type' => $data['rights_type'] ?? null,
+                'rights_holder' => $data['rights_holder'] ?? null,
+                'cataloger_name' => $data['cataloger_name'] ?? null,
+                'cataloging_date' => $data['cataloging_date'] ?? null,
+            ];
+
+            // The CCO fields the form had been collecting and discarding
+            // (#1478). Shared list, so the museum service cannot drift from
+            // this one the way the two whitelists drifted before.
+            $metaFields = array_merge($metaFields, CcoFields::values($data));
+
+            if ($metadataExists) {
+                DB::table('museum_metadata')->where('object_id', $ioId)->update($metaFields);
+            } else {
+                DB::table('museum_metadata')->insert(array_merge(['object_id' => $ioId], $metaFields));
+            }
+
+            \AhgInformationObjectManage\Services\InformationObjectService::touchIfChanged((int) $ioId, $fingerprintBefore); // #1536: only on a real change
+        });
+
+        if ($resolved) {
+            $auditAfter = $this->auditSnapshot((int) $resolved->id, $culture);
+            \AhgCore\Support\AuditLog::captureEdit((int) $resolved->id, 'gallery_artwork', $auditBefore, $auditAfter);
+        }
+    }
+
+    /**
+     * Delete a gallery artwork.
+     */
+    public function delete(string $slug): void
+    {
+        $resolvedId = (int) DB::table('slug')->where('slug', $slug)->value('object_id');
+        if ($resolvedId) {
+            \AhgCore\Support\AuditLog::captureDelete($resolvedId, 'gallery_artwork', $this->auditSnapshot($resolvedId, app()->getLocale()));
+        }
+
+        DB::transaction(function () use ($slug) {
+            $record = DB::table('slug')
+                ->join('information_object', 'slug.object_id', '=', 'information_object.id')
+                ->where('slug.slug', $slug)
+                ->select('information_object.id', 'information_object.lft', 'information_object.rgt')
+                ->first();
+
+            if (!$record) {
+                abort(404);
+            }
+
+            $ioId = $record->id;
+            $width = $record->rgt - $record->lft + 1;
+
+            // Collect all descendant IDs (incl. self). Closure when built (also
+            // catches null-lft orphans the nested-set range misses), else lft/rgt.
+            // heratio#1333 read-swap; the gap-close below stays nested-set.
+            $descendantIds = app(\AhgCore\Services\HierarchyQueryService::class)
+                ->descendantIds('information_object', $ioId, true);
+
+            // Delete museum_metadata for all descendants
+            DB::table('museum_metadata')->whereIn('object_id', $descendantIds)->delete();
+
+            // Delete display_object_config for all descendants
+            DB::table('display_object_config')->whereIn('object_id', $descendantIds)->delete();
+
+            // Delete status rows
+            DB::table('status')->whereIn('object_id', $descendantIds)->delete();
+
+            // Delete i18n rows
+            DB::table('information_object_i18n')->whereIn('id', $descendantIds)->delete();
+
+            // Delete information_object rows
+            DB::table('information_object')->whereIn('id', $descendantIds)->delete();
+
+            // Delete slug rows
+            DB::table('slug')->whereIn('object_id', $descendantIds)->delete();
+
+            // Delete object rows
+            DB::table('object')->whereIn('id', $descendantIds)->delete();
+
+            // #1333 dual-write: closure rows for the deleted subtree cascade via
+            // the ON DELETE CASCADE FK; clear the FK-less sibling sidecar.
+            if (\Illuminate\Support\Facades\Schema::hasTable('ahg_node_sibling_order')) {
+                DB::table('ahg_node_sibling_order')
+                    ->where('entity', 'information_object')
+                    ->whereIn('node_id', $descendantIds)
+                    ->delete();
+            }
+
+            // Close the gap in the nested set
+            DB::table('information_object')
+                ->where('lft', '>', $record->rgt)
+                ->decrement('lft', $width);
+
+            DB::table('information_object')
+                ->where('rgt', '>', $record->rgt)
+                ->decrement('rgt', $width);
+        });
+    }
+
+    /**
+     * Get all gallery artists.
+     */
+    public function getArtists(array $params = []): array
+    {
+        $page = max(1, (int) ($params['page'] ?? 1));
+        $limit = max(1, (int) ($params['limit'] ?? SettingHelper::hitsPerPage()));
+        $sort = $params['sort'] ?? 'alphabetic';
+        $subquery = $params['subquery'] ?? '';
+
+        $query = DB::table('gallery_artist');
+
+        if ($subquery !== '') {
+            $like = '%' . $subquery . '%';
+            $query->where(function ($q) use ($like) {
+                $q->where('display_name', 'like', $like)
+                    ->orWhere('nationality', 'like', $like)
+                    ->orWhere('medium_specialty', 'like', $like)
+                    ->orWhere('movement_style', 'like', $like)
+                    ->orWhere('biography', 'like', $like);
+            });
+        }
+
+        // Only active by default
+        if (!isset($params['include_inactive'])) {
+            $query->where('is_active', 1);
+        }
+
+        $total = $query->count();
+
+        switch ($sort) {
+            case 'lastUpdated':
+                $query->orderBy('updated_at', 'desc');
+                break;
+            case 'nationality':
+                $query->orderBy('nationality', 'asc')->orderBy('sort_name', 'asc');
+                break;
+            default: // alphabetic
+                $query->orderBy('sort_name', 'asc');
+                break;
+        }
+
+        $offset = ($page - 1) * $limit;
+        $rows = $query->offset($offset)->limit($limit)->get();
+
+        $results = [];
+        foreach ($rows as $row) {
+            $results[] = (array) $row;
+        }
+
+        return [
+            'results' => $results,
+            'total' => $total,
+            'page' => $page,
+            'limit' => $limit,
+        ];
+    }
+
+    /**
+     * Get a single artist with related exhibitions and bibliography.
+     */
+    public function getArtist(int $id): ?object
+    {
+        $artist = DB::table('gallery_artist')->where('id', $id)->first();
+
+        if (!$artist) {
+            return null;
+        }
+
+        // Get artworks by this artist (via museum_metadata.creator_identity matching display_name)
+        $artist->artworks = DB::table('museum_metadata as mm')
+            ->join('display_object_config as doc', function ($j) {
+                $j->on('mm.object_id', '=', 'doc.object_id')->where('doc.object_type', '=', 'gallery');
+            })
+            ->join('information_object_i18n as i18n', function ($j) {
+                $j->on('mm.object_id', '=', 'i18n.id')->where('i18n.culture', '=', app()->getLocale());
+            })
+            ->join('slug', 'mm.object_id', '=', 'slug.object_id')
+            ->where('mm.creator_identity', 'like', '%' . $artist->display_name . '%')
+            ->select('mm.object_id as id', 'i18n.title', 'slug.slug', 'mm.work_type', 'mm.creation_date_display', 'mm.materials')
+            ->get();
+
+        // If artist has an actor_id, get related information from actor_i18n
+        if ($artist->actor_id) {
+            $culture = app()->getLocale();
+            $actorInfo = DB::table('actor_i18n')
+                ->where('id', $artist->actor_id)
+                ->where('culture', $culture)
+                ->select('history', 'places', 'legal_status', 'functions', 'mandates', 'internal_structures', 'general_context')
+                ->first();
+            $artist->actor_info = $actorInfo;
+        }
+
+        return $artist;
+    }
+
+    /**
+     * Create a new gallery artist.
+     */
+    public function createArtist(array $data): int
+    {
+        return DB::table('gallery_artist')->insertGetId([
+            'actor_id' => !empty($data['actor_id']) ? $data['actor_id'] : null,
+            'display_name' => $data['display_name'],
+            'sort_name' => $data['sort_name'] ?? $data['display_name'],
+            'birth_date' => $data['birth_date'] ?? null,
+            'birth_place' => $data['birth_place'] ?? null,
+            'death_date' => $data['death_date'] ?? null,
+            'death_place' => $data['death_place'] ?? null,
+            'nationality' => $data['nationality'] ?? null,
+            'artist_type' => $data['artist_type'] ?? null,
+            'medium_specialty' => $data['medium_specialty'] ?? null,
+            'movement_style' => $data['movement_style'] ?? null,
+            'active_period' => $data['active_period'] ?? null,
+            'represented' => $data['represented'] ?? null,
+            'biography' => $data['biography'] ?? null,
+            'artist_statement' => $data['artist_statement'] ?? null,
+            'cv' => $data['cv'] ?? null,
+            'email' => $data['email'] ?? null,
+            'phone' => $data['phone'] ?? null,
+            'website' => $data['website'] ?? null,
+            'studio_address' => $data['studio_address'] ?? null,
+            'instagram' => $data['instagram'] ?? null,
+            'twitter' => $data['twitter'] ?? null,
+            'facebook' => $data['facebook'] ?? null,
+            'notes' => $data['notes'] ?? null,
+            'is_active' => $data['is_active'] ?? 1,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
+    /**
+     * Get dropdown choices for gallery forms.
+     */
+    public function getFormChoices(string $culture = 'en'): array
+    {
+        // Level of description options (taxonomy_id = 34)
+        $levels = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', 34)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('term_i18n.name')
+            ->select('term.id', 'term_i18n.name')
+            ->get();
+
+        // Repositories
+        $repositories = DB::table('repository')
+            ->join('actor_i18n', 'repository.id', '=', 'actor_i18n.id')
+            ->where('actor_i18n.culture', $culture)
+            ->orderBy('actor_i18n.authorized_form_of_name')
+            ->select('repository.id', 'actor_i18n.authorized_form_of_name as name')
+            ->get();
+
+        // Work types for gallery
+        $workTypes = [
+            'Painting',
+            'Sculpture',
+            'Drawing',
+            'Print',
+            'Photograph',
+            'Mixed Media',
+            'Installation',
+            'Video Art',
+            'Performance',
+            'Other',
+        ];
+
+        // Creator roles for gallery
+        $creatorRoles = [
+            'Artist',
+            'Collaborator',
+            'Workshop',
+            'Studio',
+            'School of',
+            'Circle of',
+            'Follower of',
+            'Attributed to',
+            'After',
+            'Unknown',
+        ];
+
+        // Artist types
+        $artistTypes = [
+            'Painter',
+            'Sculptor',
+            'Printmaker',
+            'Photographer',
+            'Mixed Media Artist',
+            'Installation Artist',
+            'Video Artist',
+            'Performance Artist',
+            'Ceramicist',
+            'Textile Artist',
+            'Digital Artist',
+            'Other',
+        ];
+
+        return compact('levels', 'repositories', 'workTypes', 'creatorRoles', 'artistTypes');
+    }
+
+    /**
+     * Get extra data needed for edit form: physical location, admin area.
+     */
+    public function getEditExtras(?int $objectId, string $culture): array
+    {
+        // Physical objects for storage container dropdown
+        $physicalObjects = [];
+        try {
+            $poResult = DB::table('physical_object as po')
+                ->leftJoin('physical_object_i18n as poi', function ($join) use ($culture) {
+                    $join->on('poi.id', '=', 'po.id')->where('poi.culture', '=', $culture);
+                })
+                ->select(['po.id', 'poi.name', 'poi.location'])
+                ->orderBy('poi.name')
+                ->get();
+            foreach ($poResult as $po) {
+                $physicalObjects[$po->id] = $po->name . ($po->location ? ' (' . $po->location . ')' : '');
+            }
+        } catch (\Exception $e) {
+            // Table may not exist
+        }
+
+        // Item location data
+        $itemLocation = [];
+        if ($objectId) {
+            try {
+                $loc = DB::table('item_physical_location')->where('object_id', $objectId)->first();
+                if ($loc) {
+                    $itemLocation = (array) $loc;
+                }
+            } catch (\Exception $e) {
+                // Table may not exist
+            }
+        }
+
+        // Display standards
+        $displayStandards = [];
+        try {
+            $terms = DB::table('term')
+                ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+                ->where('term.taxonomy_id', 53)
+                ->where('term_i18n.culture', $culture)
+                ->orderBy('term_i18n.name')
+                ->select('term.id', 'term_i18n.name')
+                ->get();
+            foreach ($terms as $t) {
+                $displayStandards[$t->id] = $t->name;
+            }
+        } catch (\Exception $e) {
+            // Taxonomy may not exist
+        }
+
+        // Current display standard
+        $currentDisplayStandard = null;
+        if ($objectId) {
+            $currentDisplayStandard = DB::table('information_object')
+                ->where('id', $objectId)
+                ->value('display_standard_id');
+        }
+
+        // Source culture
+        $sourceCulture = 'English';
+        if ($objectId) {
+            $sc = DB::table('information_object')->where('id', $objectId)->value('source_culture');
+            if ($sc) {
+                $sourceCulture = locale_get_display_language($sc, 'en') ?: $sc;
+            }
+        }
+
+        return compact(
+            'physicalObjects',
+            'itemLocation',
+            'displayStandards',
+            'currentDisplayStandard',
+            'sourceCulture'
+        );
+    }
+}

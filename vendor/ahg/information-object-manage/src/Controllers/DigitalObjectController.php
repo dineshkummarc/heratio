@@ -1,0 +1,1389 @@
+<?php
+
+/**
+ * DigitalObjectController - Controller for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+
+
+namespace AhgInformationObjectManage\Controllers;
+
+use AhgCore\Services\AhgSettingsService;
+use AhgCore\Services\DigitalObjectService;
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+
+class DigitalObjectController extends Controller
+{
+    /**
+     * Handle file upload for an information object.
+     *
+     * @param Request $request
+     * @param string  $slug    IO slug
+     *
+     * @return \Illuminate\Http\RedirectResponse
+     */
+    /**
+     * Render the dedicated "Link digital object" page (clone of AtoM
+     * object/addDigitalObject - accordion of upload / external URL /
+     * FTP-pick / merge).
+     */
+    public function addDigitalObject(string $slug)
+    {
+        $io = $this->getIO($slug);
+        if (!$io) {
+            abort(404);
+        }
+
+        // If a master already exists, send the user to the edit page (matches AtoM behaviour).
+        $existing = DB::table('digital_object')
+            ->where('object_id', $io->id)
+            ->where('usage_id', DigitalObjectService::USAGE_MASTER)
+            ->first();
+        if ($existing) {
+            return redirect()->route('io.digitalobject.show', $existing->id)
+                ->with('info', 'A digital object already exists. Edit it here, or delete first to attach a new one.');
+        }
+
+        $title = DB::table('information_object_i18n')
+            ->where('id', $io->id)
+            ->where('culture', app()->getLocale())
+            ->value('title');
+
+        $resourceDescription = trim(($io->identifier ? $io->identifier . ' - ' : '') . ($title ?: ''));
+
+        return view('ahg-io-manage::add-digital-object', [
+            'resource' => (object) [
+                'id' => $io->id,
+                'slug' => $slug,
+                'identifier' => $io->identifier ?? null,
+            ],
+            'resourceDescription' => $resourceDescription,
+        ]);
+    }
+
+    /**
+     * Validation ceiling (KB) for a single uploaded digital object, derived
+     * from PHP's own upload_max_filesize so the controller never rejects a
+     * file PHP would accept. public/.user.ini ships this at 256M; raising it
+     * there (per the install guide) raises this cap automatically. Replaces a
+     * hardcoded 100 MB cap that rejected 100-256 MB GLAM masters.
+     */
+    private function phpUploadMaxKb(): int
+    {
+        $raw = (string) ini_get('upload_max_filesize');
+        $raw = $raw !== '' ? $raw : '256M';
+        $num = (int) $raw;
+        $bytes = match (strtolower(substr($raw, -1))) {
+            'g' => $num * 1024 ** 3,
+            'm' => $num * 1024 ** 2,
+            'k' => $num * 1024,
+            default => $num,
+        };
+        $kb = (int) floor($bytes / 1024);
+
+        return $kb > 0 ? $kb : 262144; // fallback 256 MB
+    }
+
+    public function upload(Request $request, string $slug)
+    {
+        $hasFile = $request->hasFile('digital_object');
+        $hasUrl  = trim((string) $request->input('external_url')) !== '';
+        $hasFtp  = trim((string) $request->input('ftp_filename')) !== '';
+
+        if ($hasFtp && !$hasFile && !$hasUrl) {
+            $request->validate([
+                'ftp_filename' => 'required|string|max:512',
+            ]);
+        } elseif ($hasUrl && !$hasFile) {
+            $request->validate([
+                'external_url'  => ['required', 'string', 'max:2048', 'regex:#^(https?|ftp)://#i'],
+                'external_name' => 'nullable|string|max:255',
+            ]);
+        } else {
+            $request->validate([
+                // Cap tracks PHP's upload_max_filesize (public/.user.ini ships
+                // 256M) instead of a hardcoded 100 MB - so 100-256 MB GLAM
+                // masters are no longer rejected before reaching PHP.
+                'digital_object' => 'required|file|max:'.$this->phpUploadMaxKb(),
+            ]);
+        }
+
+        // Security deny-list: refuse browser/server-executable uploads
+        // (svg/html/xml/php/js/...) before they are ever stored. Served
+        // same-origin from /uploads/, such a file is stored XSS / latent RCE.
+        // Checks the client original extension AND the mime-guessed extension.
+        if ($hasFile) {
+            $deniedExt = DigitalObjectService::deniedUploadExtension($request->file('digital_object'));
+            if ($deniedExt !== null) {
+                return redirect()->back()->withInput()
+                    ->with('error', DigitalObjectService::deniedUploadMessage($deniedExt));
+            }
+        }
+
+        $io = $this->getIO($slug);
+        if (!$io) {
+            abort(404);
+        }
+
+        $existing = DB::table('digital_object')
+            ->where('object_id', $io->id)
+            ->where('usage_id', DigitalObjectService::USAGE_MASTER)
+            ->first();
+
+        if ($existing) {
+            return redirect()->route('informationobject.edit', $slug)
+                ->with('error', 'A digital object already exists. Delete the current one before uploading a new file.');
+        }
+
+        // #115 repository_quota: refuse the upload up-front when this IO''s
+        // repository is over its operator-set cap. Only file uploads count
+        // toward the quota - URL/FTP-linked objects don''t consume local
+        // disk so they bypass the gate.
+        if ($hasFile && !$hasFtp && !$hasUrl) {
+            $proposedBytes = (int) $request->file('digital_object')->getSize();
+            if (!\AhgCore\Services\RepositoryQuotaService::canAccept(
+                $io->repository_id ? (int) $io->repository_id : null,
+                $proposedBytes,
+            )) {
+                return redirect()->route('informationobject.edit', $slug)
+                    ->with('error', \AhgCore\Services\RepositoryQuotaService::rejectionMessage(
+                        (int) $io->repository_id,
+                        $proposedBytes,
+                    ));
+            }
+        }
+
+        try {
+            if ($hasFtp && !$hasFile && !$hasUrl) {
+                $ftp = \AhgFtpUpload\Services\FtpService::fromSettings();
+                $remote = $ftp->getRemotePath();
+                $proto = (string) (\Illuminate\Support\Facades\DB::table('ahg_settings')
+                    ->where('setting_key', 'ftp_protocol')->value('setting_value') ?: 'sftp');
+                $host = (string) (\Illuminate\Support\Facades\DB::table('ahg_settings')
+                    ->where('setting_key', 'ftp_host')->value('setting_value') ?: '');
+                $filename = trim((string) $request->input('ftp_filename'));
+                $url = ($proto === 'sftp' ? 'sftp' : 'ftp') . '://' . $host . rtrim($remote, '/') . '/' . ltrim($filename, '/');
+                DigitalObjectService::linkExternalUrl($io->id, $url, $filename);
+                $msg = 'Digital object linked from FTP/SFTP successfully.';
+            } elseif ($hasUrl) {
+                DigitalObjectService::linkExternalUrl(
+                    $io->id,
+                    trim((string) $request->input('external_url')),
+                    trim((string) $request->input('external_name')) ?: null
+                );
+                $msg = 'Digital object linked successfully.';
+            } else {
+                DigitalObjectService::upload($io->id, $request->file('digital_object'));
+                $msg = 'Digital object uploaded successfully.';
+            }
+
+            if (AhgSettingsService::getBool('ai_condition_auto_scan', false)) {
+                \Log::info('ai_condition_auto_scan: would dispatch condition scan for IO ' . $io->id);
+            }
+
+            // #69 auto_extract_on_upload: when the operator has the AI Services
+            // master toggle on, fire Donut document-understanding against the
+            // freshly-uploaded master so structured fields land in the IO without
+            // a manual Suggest click. Only applies to file uploads (URL/FTP
+            // links don't have a local path to feed Donut). Failures are
+            // non-fatal - the upload itself has already succeeded by this point.
+            if ($hasFile && !$hasFtp && !$hasUrl
+                && class_exists(\AhgAiServices\Support\AiServicesSettings::class)
+                && \AhgAiServices\Support\AiServicesSettings::autoExtractOnUpload()) {
+                try {
+                    $masterRow = DB::table('digital_object')
+                        ->where('object_id', $io->id)
+                        ->where('usage_id', DigitalObjectService::USAGE_MASTER)
+                        ->first();
+                    if ($masterRow && !empty($masterRow->path)) {
+                        $abs = config('heratio.uploads_path') . '/' . ltrim($masterRow->path, '/');
+                        if (is_file($abs) && class_exists(\AhgAiServices\Services\DonutService::class)) {
+                            $donut = app(\AhgAiServices\Services\DonutService::class);
+                            $donut->extract($abs); // fire-and-forget; result is the operator's job to claim via Suggest
+                        }
+                    }
+                } catch (\Throwable $e) {
+                    \Log::info('[auto_extract_on_upload] Donut dispatch deferred: ' . $e->getMessage());
+                }
+            }
+
+            \AhgCore\Support\AuditLog::captureMutation((int) $io->id, 'information_object', 'digital_object_upload', [
+                'data' => [
+                    'method' => $hasFtp && !$hasFile && !$hasUrl ? 'ftp' : ($hasUrl && !$hasFile ? 'url' : 'file'),
+                    'filename' => $request->input('ftp_filename') ?: ($request->input('external_name') ?: ($hasFile ? $request->file('digital_object')->getClientOriginalName() : null)),
+                    'external_url' => $hasUrl ? trim((string) $request->input('external_url')) : null,
+                ],
+            ]);
+
+            // Auto metadata extraction (closes #86 first pass for the file
+            // upload path). Only fires for actual file uploads - URL/FTP
+            // linked objects don't have a local file to read EXIF from.
+            // Failures are non-fatal: a broken extractor must not break the
+            // upload itself. Walks the master digital_object that was just
+            // inserted to find the on-disk path.
+            $extractionMsg = '';
+            if ($hasFile && !$hasFtp && !$hasUrl) {
+                try {
+                    $master = DB::table('digital_object')
+                        ->where('object_id', $io->id)
+                        ->where('usage_id', DigitalObjectService::USAGE_MASTER)
+                        ->orderByDesc('id')
+                        ->first();
+                    if ($master) {
+                        $uploadsPath = config('heratio.uploads_path');
+                        $localPath = rtrim($uploadsPath, '/') . '/' . ltrim($master->path, '/') . $master->name;
+                        if (!file_exists($localPath)) {
+                            $localPath = rtrim($uploadsPath, '/') . '/' . ltrim($master->path, '/');
+                            if (is_dir($localPath)) $localPath = rtrim($localPath, '/') . '/' . $master->name;
+                        }
+                        if (file_exists($localPath)) {
+                            $extractor = app(\AhgMetadataExtraction\Services\MetadataExtractionService::class);
+                            $result = $extractor->extractAndApplyOnUpload((int) $io->id, $localPath);
+                            if (!empty($result['written']) || !empty($result['extracted_fields'])) {
+                                \AhgCore\Support\AuditLog::captureSecondaryMutation((int) $io->id, 'information_object', 'metadata_extraction_apply', [
+                                    'data' => [
+                                        'sector'           => $result['sector'] ?? null,
+                                        'extracted_fields' => $result['extracted_fields'] ?? [],
+                                        'written'          => $result['written'] ?? [],
+                                        'skipped'          => $result['skipped'] ?? [],
+                                        'digital_object_id'=> $master->id,
+                                        'filename'         => $master->name,
+                                    ],
+                                ]);
+                                // Operator-facing summary appended to the success
+                                // flash so the auto-population is visible.
+                                $writtenFields = array_keys($result['written'] ?? []);
+                                if (!empty($writtenFields)) {
+                                    $extractionMsg = ' Auto-populated from file metadata: ' . implode(', ', $writtenFields) . '.';
+                                } elseif (!empty($result['extracted_fields'])) {
+                                    $extractionMsg = ' Found ' . count($result['extracted_fields']) . ' metadata field(s) in file but no columns updated (existing values preserved or no mapping for sector).';
+                                }
+                            }
+                        }
+                    }
+                } catch (\Throwable $e) {
+                    \Log::warning('Metadata extraction on upload failed: ' . $e->getMessage(), [
+                        'io_id' => $io->id,
+                        'trace_first' => $e->getFile() . ':' . $e->getLine(),
+                    ]);
+                }
+            }
+
+            return redirect()->route('informationobject.show', $slug)
+                ->with('success', $msg . $extractionMsg);
+        } catch (\Exception $e) {
+            return redirect()->route('informationobject.show', $slug)
+                ->with('error', 'Upload failed: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * #1447 - attach one or more ADDITIONAL digital objects to this description
+     * (recto/verso, page scans, multiple views) without creating child records.
+     * Each file becomes its own master + derivatives, linked via
+     * information_object_digital_object. The existing single primary is untouched.
+     */
+    public function attachStore(Request $request, string $slug)
+    {
+        $io = $this->getIO($slug);
+        if (! $io) {
+            abort(404);
+        }
+
+        $request->validate([
+            'attachments'   => 'required|array',
+            'attachments.*' => 'file|max:'.$this->phpUploadMaxKb(),
+            'caption'       => 'nullable|string|max:255',
+            'role'          => 'nullable|string|max:64',
+        ]);
+
+        $svc = app(\AhgCore\Services\AttachedDigitalObjectService::class);
+        if (! \AhgCore\Services\AttachedDigitalObjectService::available()) {
+            return redirect()->route('informationobject.show', $slug)
+                ->with('error', 'Multiple attachments are not available on this installation.');
+        }
+
+        $caption = trim((string) $request->input('caption', ''));
+        $role = trim((string) $request->input('role', ''));
+
+        $attached = 0;
+        $skipped = [];
+        foreach ((array) $request->file('attachments', []) as $file) {
+            if (! $file) {
+                continue;
+            }
+            $name = $file->getClientOriginalName();
+
+            // Same executable deny-list as the primary upload path.
+            $denied = DigitalObjectService::deniedUploadExtension($file);
+            if ($denied !== null) {
+                $skipped[] = $name.' (file type not allowed)';
+                continue;
+            }
+            // #115 repository quota.
+            if (! \AhgCore\Services\RepositoryQuotaService::canAccept(
+                $io->repository_id ? (int) $io->repository_id : null,
+                (int) $file->getSize()
+            )) {
+                $skipped[] = $name.' (over repository quota)';
+                continue;
+            }
+            try {
+                $svc->attach((int) $io->id, $file, $caption ?: null, $role ?: null);
+                $attached++;
+            } catch (\Throwable $e) {
+                $skipped[] = $name.' (upload error)';
+                \Log::warning('[io.attachments] attach failed: '.$e->getMessage(), ['io_id' => $io->id]);
+            }
+        }
+
+        \AhgCore\Support\AuditLog::captureMutation((int) $io->id, 'information_object', 'digital_object_attach', [
+            'data' => ['attached' => $attached, 'skipped' => count($skipped)],
+        ]);
+
+        $msg = $attached.' object'.($attached === 1 ? '' : 's').' attached.';
+        if ($skipped) {
+            $msg .= ' Skipped: '.implode('; ', $skipped);
+        }
+
+        return redirect()->route('informationobject.show', $slug)
+            ->with($attached > 0 ? 'success' : 'error', $msg);
+    }
+
+    /**
+     * #1447 - remove one attached object (link + its master/derivatives/files).
+     */
+    public function attachDelete(Request $request, int $id)
+    {
+        $svc = app(\AhgCore\Services\AttachedDigitalObjectService::class);
+        $ioId = $svc->ownerIoId($id);
+        if (! $ioId) {
+            abort(404);
+        }
+        $svc->detach($id);
+
+        \AhgCore\Support\AuditLog::captureMutation((int) $ioId, 'information_object', 'digital_object_detach', [
+            'data' => ['link_id' => $id],
+        ]);
+
+        $slug = DB::table('slug')->where('object_id', $ioId)->value('slug');
+
+        return redirect()->route('informationobject.show', $slug)
+            ->with('success', 'Attachment removed.');
+    }
+
+    /**
+     * Promote an attached object to primary. #1489.
+     *
+     * The `acl:update` route middleware is a GLOBAL permission check, so the
+     * per-RECORD check has to happen here - the same one the management panel
+     * uses to decide whether to render these controls at all. Promoting changes
+     * what every viewer and every export sees as the record's image, so it must
+     * not be looser than editing the record.
+     */
+    public function attachSetPrimary(Request $request, int $id)
+    {
+        $svc = app(\AhgCore\Services\AttachedDigitalObjectService::class);
+        $ioId = $svc->ownerIoId($id);
+        if (! $ioId) {
+            abort(404);
+        }
+        abort_unless(
+            \AhgCore\Services\AclService::hasPermission(auth()->id(), 'update', (int) $ioId),
+            403
+        );
+
+        $result = $svc->setPrimary($id);
+        $slug = DB::table('slug')->where('object_id', $ioId)->value('slug');
+
+        if (empty($result['ok'])) {
+            return redirect()->route('informationobject.show', $slug)
+                ->with('error', $result['error'] ?? 'Could not set the primary object.');
+        }
+
+        \AhgCore\Support\AuditLog::captureMutation((int) $ioId, 'information_object', 'digital_object_set_primary', [
+            'data' => ['link_id' => $id],
+        ]);
+
+        return redirect()->route('informationobject.show', $slug)
+            ->with('success', 'Primary image updated.');
+    }
+
+    /** Reorder a description's attached objects. #1489. */
+    public function attachReorder(Request $request, string $slug)
+    {
+        $io = $this->getIO($slug);
+        if (! $io) {
+            abort(404);
+        }
+        abort_unless(
+            \AhgCore\Services\AclService::hasPermission(auth()->id(), 'update', (int) $io->id),
+            403
+        );
+
+        $order = $request->input('order', []);
+        if (is_string($order)) {
+            $order = array_filter(explode(',', $order), fn ($v) => $v !== '');
+        }
+
+        $svc = app(\AhgCore\Services\AttachedDigitalObjectService::class);
+        $moved = $svc->reorder((int) $io->id, (array) $order);
+
+        \AhgCore\Support\AuditLog::captureMutation((int) $io->id, 'information_object', 'digital_object_reorder', [
+            'data' => ['order' => array_values((array) $order)],
+        ]);
+
+        if ($request->expectsJson()) {
+            return response()->json(['ok' => true, 'moved' => $moved]);
+        }
+
+        return redirect()->route('informationobject.show', $slug)
+            ->with('success', 'Order updated.');
+    }
+
+    /**
+     * Bulk folder upload (closes #folder-upload-on-iio-page user request).
+     *
+     * Accepts a multipart payload with digital_objects[] (the files) and
+     * parallel relative_paths[] (each file's webkitRelativePath). When
+     * bulk_mirror_tree=1 (default) the folder hierarchy is mirrored as a
+     * child-IO tree under $slug: every intermediate directory becomes a
+     * folder-level IO, every file becomes an item-level child IO with a
+     * master digital_object attached via the existing DigitalObjectService.
+     * When bulk_mirror_tree=0 every file is created as a flat sibling under
+     * $slug regardless of its source path.
+     *
+     * Files that come without a relative_paths[] entry (legacy multi-file
+     * picker) are treated as flat-mode siblings.
+     *
+     * Existing fires-on-upload wire-ups (metadata-extraction from #86,
+     * audit-trail captureMutation per upload) run unchanged because we
+     * route every per-file write through DigitalObjectService::upload.
+     */
+    public function bulkUpload(Request $request, string $slug)
+    {
+        $request->validate([
+            'digital_objects'   => 'required|array|min:1',
+            'digital_objects.*' => 'file|max:524288', // 512 MB per file
+            'relative_paths'    => 'array',
+            'relative_paths.*'  => 'string|max:2048',
+            'bulk_mirror_tree'  => 'nullable|in:0,1',
+        ]);
+
+        $io = $this->getIO($slug);
+        if (!$io) {
+            abort(404);
+        }
+
+        $mirrorTree = (int) $request->input('bulk_mirror_tree', '1') === 1;
+        $files = $request->file('digital_objects', []);
+        $relPaths = (array) $request->input('relative_paths', []);
+        $culture = app()->getLocale();
+
+        // #115 repository_quota: refuse the entire bulk batch up-front when
+        // the sum of incoming bytes would push this repository over the cap.
+        // Partial-batch rejection (some files in, some out) would leave the
+        // operator with half-created folder IOs to clean up, so the all-or-
+        // nothing gate is the right semantic here.
+        $batchBytes = 0;
+        foreach ($files as $upload) {
+            if ($upload && $upload->isValid()) {
+                $batchBytes += (int) $upload->getSize();
+            }
+        }
+        if ($batchBytes > 0 && !\AhgCore\Services\RepositoryQuotaService::canAccept(
+            $io->repository_id ? (int) $io->repository_id : null,
+            $batchBytes,
+        )) {
+            return redirect()->route('io.digitalobject.add', $slug)
+                ->with('error', \AhgCore\Services\RepositoryQuotaService::rejectionMessage(
+                    (int) $io->repository_id,
+                    $batchBytes,
+                ));
+        }
+
+        // Folder-level term id for level_of_description: cache the lookup so
+        // we don't query it per row. 'folder' is the AtoM convention; falls
+        // back to 'item' parent (i.e. the leaf default) when the term row
+        // doesn't exist on this install.
+        $folderLodId = (int) DB::table('term as t')
+            ->join('term_i18n as ti', 'ti.id', '=', 't.id')
+            ->where('t.taxonomy_id', 34) // levels of description
+            ->whereRaw('LOWER(ti.name) = ?', ['folder'])
+            ->where('ti.culture', 'en')
+            ->value('t.id');
+        $itemLodId = (int) DB::table('term as t')
+            ->join('term_i18n as ti', 'ti.id', '=', 't.id')
+            ->where('t.taxonomy_id', 34)
+            ->whereRaw('LOWER(ti.name) = ?', ['item'])
+            ->where('ti.culture', 'en')
+            ->value('t.id');
+
+        // Cache for already-created folder IOs keyed by their full
+        // path-from-root so repeated lookups during this bulk upload don't
+        // create duplicate folder IOs.
+        $folderIoIdByPath = [];
+        $perFile = [];
+        $errors  = [];
+
+        foreach ($files as $i => $upload) {
+            if (!$upload || !$upload->isValid()) {
+                $errors[] = ['index' => $i, 'reason' => 'upload invalid: ' . ($upload ? $upload->getErrorMessage() : 'no file')];
+                continue;
+            }
+
+            // Security deny-list: skip any browser/server-executable file
+            // (svg/html/xml/php/js/...) so it is never written to disk. Recorded
+            // as a per-file error so the rest of the batch still imports.
+            $deniedExt = DigitalObjectService::deniedUploadExtension($upload);
+            if ($deniedExt !== null) {
+                $errors[] = [
+                    'index'  => $i,
+                    'reason' => DigitalObjectService::deniedUploadMessage($deniedExt),
+                ];
+                continue;
+            }
+
+            $relPath = (string) ($relPaths[$i] ?? $upload->getClientOriginalName());
+            $relPath = ltrim(str_replace('\\', '/', $relPath), '/');
+            if ($relPath === '') {
+                $relPath = $upload->getClientOriginalName();
+            }
+
+            $segments = explode('/', $relPath);
+            $fileName = array_pop($segments); // leaf basename
+            $folderSegments = $mirrorTree ? array_filter($segments, fn ($s) => $s !== '' && $s !== '.') : [];
+
+            try {
+                // Walk-or-create the folder chain under $io. Cache by
+                // accumulated path so we don't double-create on consecutive
+                // files in the same folder.
+                $parentId = (int) $io->id;
+                $accumPath = '';
+                foreach ($folderSegments as $segment) {
+                    $accumPath = $accumPath === '' ? $segment : ($accumPath . '/' . $segment);
+                    if (isset($folderIoIdByPath[$accumPath])) {
+                        $parentId = $folderIoIdByPath[$accumPath];
+                        continue;
+                    }
+                    $folderIoId = \AhgInformationObjectManage\Services\InformationObjectService::create([
+                        'title'                   => $segment,
+                        'parent_id'               => $parentId,
+                        'level_of_description_id' => $folderLodId ?: null,
+                        'source_standard'         => $io->source_standard ?? null,
+                    ], $culture);
+                    $folderIoIdByPath[$accumPath] = $folderIoId;
+                    $parentId = $folderIoId;
+                }
+
+                // Create the leaf item IO and attach the file as its master DO.
+                $leafTitle = pathinfo($fileName, PATHINFO_FILENAME) ?: $fileName;
+                $leafIoId = \AhgInformationObjectManage\Services\InformationObjectService::create([
+                    'title'                   => $leafTitle,
+                    'parent_id'               => $parentId,
+                    'level_of_description_id' => $itemLodId ?: null,
+                    'source_standard'         => $io->source_standard ?? null,
+                ], $culture);
+
+                $doId = DigitalObjectService::upload($leafIoId, $upload);
+                // upload() returns null on duplicate-master refusal; here we
+                // just inserted the IO so duplicate is impossible, but keep
+                // the field for the audit row.
+                $perFile[] = [
+                    'rel_path'    => $relPath,
+                    'child_io_id' => $leafIoId,
+                    'do_id'       => is_int($doId) ? $doId : null,
+                    'filename'    => $fileName,
+                    'size'        => $upload->getSize(),
+                ];
+            } catch (\Throwable $e) {
+                $errors[] = [
+                    'index'    => $i,
+                    'rel_path' => $relPath,
+                    'reason'   => $e->getMessage(),
+                ];
+                \Log::warning('bulkUpload failed for file: ' . $e->getMessage(), [
+                    'io_id' => $io->id, 'rel_path' => $relPath, 'trace' => $e->getFile() . ':' . $e->getLine(),
+                ]);
+            }
+        }
+
+        \AhgCore\Support\AuditLog::captureMutation((int) $io->id, 'information_object', 'digital_object_bulk_upload', [
+            'data' => [
+                'mirror_tree'   => $mirrorTree,
+                'files_total'   => count($files),
+                'files_ok'      => count($perFile),
+                'files_failed'  => count($errors),
+                'folders_made'  => count($folderIoIdByPath),
+                'files'         => array_slice($perFile, 0, 50),
+                'errors'        => array_slice($errors, 0, 20),
+            ],
+        ]);
+
+        $msg = sprintf(
+            'Uploaded %d file(s) into %d child description(s).',
+            count($perFile),
+            count($perFile) + count($folderIoIdByPath)
+        );
+        $flash = ['success' => $msg];
+        if (!empty($errors)) {
+            $flash = ['warning' => $msg . ' ' . count($errors) . ' file(s) failed - see audit log for details.'];
+        }
+        return redirect()->route('informationobject.show', $slug)->with($flash);
+    }
+
+    /**
+     * Delete a digital object and its derivatives.
+     *
+     * @param Request $request
+     * @param int     $id      Digital object ID
+     *
+     * @return \Illuminate\Http\RedirectResponse
+     */
+    /**
+     * #125 derivative encryption: stream a digital_object file to the
+     * caller, decrypting on the fly when encryption_encrypt_derivatives
+     * is on AND the on-disk file carries the encryption sentinel.
+     * Plaintext files (legacy data, or installs without encryption on)
+     * stream verbatim - this endpoint replaces the nginx-direct
+     * /uploads/r/{ioId}/master_x.jpg URL when encryption is in play, so
+     * blade templates that need to honour the encryption gate should
+     * link here instead of the raw uploads path.
+     *
+     * Returns the file with its stored mime_type so browsers render it
+     * inline (image, PDF preview, etc.). Caller-controlled download
+     * via ?download=1 query param sets Content-Disposition: attachment.
+     */
+    public function stream(Request $request, int $id)
+    {
+        // ODRL gate (#1347): this serves raw bytes, so it must enforce the same
+        // policy as the IO show page - an authed-but-unauthorised user must not
+        // pull a restricted/embargoed dataset's file. Open objects carry no
+        // prohibition, so this is a no-op for normal access.
+        if (! app(\AhgResearch\Services\OdrlService::class)->isDigitalObjectPermitted($id, 'use')) {
+            abort(403, 'Access denied by rights policy.');
+        }
+
+        $doRow = DB::table('digital_object')->where('id', $id)->first();
+        if (!$doRow || empty($doRow->path) || empty($doRow->name)) {
+            abort(404);
+        }
+
+        $uploadsBase = rtrim((string) config('heratio.uploads_path'), '/');
+        if ($uploadsBase === '') abort(500, 'Uploads path is not configured.');
+
+        // Same path resolution as the bulk-apply command.
+        $rel = preg_replace('#^/uploads/#', '', (string) $doRow->path);
+        $rel = ltrim((string) $rel, '/');
+        $localPath = $uploadsBase . '/' . $rel . $doRow->name;
+
+        if (!is_file($localPath) || !is_readable($localPath)) {
+            abort(404, 'File not found on disk.');
+        }
+
+        $mime = $doRow->mime_type ?: 'application/octet-stream';
+        $disposition = $request->boolean('download') ? 'attachment' : 'inline';
+        $filename = $doRow->name;
+
+        $enc = new \AhgCore\Services\EncryptionService();
+        if ($enc->isFileEncrypted($localPath)) {
+            // Decrypt-on-stream. streamFileDecrypted returns the plaintext
+            // bytes; null means decrypt failed (logged inside the helper).
+            $bytes = $enc->streamFileDecrypted($localPath);
+            if ($bytes === null) {
+                abort(500, 'Could not decrypt file.');
+            }
+            return response($bytes, 200, [
+                'Content-Type'        => $mime,
+                'Content-Length'      => (string) strlen($bytes),
+                'Content-Disposition' => $disposition . '; filename="' . addslashes($filename) . '"',
+                'Cache-Control'       => 'private, no-store',
+            ]);
+        }
+
+        // Plaintext on disk - cheap path via Laravel's BinaryFileResponse.
+        return response()->file($localPath, [
+            'Content-Type'        => $mime,
+            'Content-Disposition' => $disposition . '; filename="' . addslashes($filename) . '"',
+        ]);
+    }
+
+    public function delete(Request $request, int $id)
+    {
+        // Find the IO that owns this digital object so we can redirect back
+        $doRow = DB::table('digital_object')->where('id', $id)->first();
+        if (!$doRow) {
+            abort(404);
+        }
+
+        // Get the IO slug for redirect
+        $objectId = $doRow->object_id;
+        if ($doRow->parent_id) {
+            // This is a derivative - get the master's object_id
+            $master = DB::table('digital_object')->where('id', $doRow->parent_id)->first();
+            $objectId = $master ? $master->object_id : $objectId;
+            // Delete the master (which cascades to derivatives)
+            $id = $doRow->parent_id;
+        }
+
+        $slug = DB::table('slug')->where('object_id', $objectId)->value('slug');
+        if (!$slug) {
+            abort(404);
+        }
+
+        // Snapshot the digital_object row before delete fires.
+        $snapshot = (array) (DB::table('digital_object')->where('id', $id)->first() ?? []);
+
+        $success = DigitalObjectService::delete($id);
+
+        if ($success) {
+            \AhgCore\Support\AuditLog::captureMutation((int) $objectId, 'information_object', 'digital_object_delete', [
+                'data' => [
+                    'digital_object_id' => $id,
+                    'name' => $snapshot['name'] ?? null,
+                    'mime_type' => $snapshot['mime_type'] ?? null,
+                    'byte_size' => $snapshot['byte_size'] ?? null,
+                    'usage_id' => $snapshot['usage_id'] ?? null,
+                ],
+            ]);
+            return redirect()->route('informationobject.show', $slug)
+                ->with('success', 'Digital object deleted successfully.');
+        }
+
+        return redirect()->route('informationobject.show', $slug)
+            ->with('error', 'Failed to delete digital object.');
+    }
+
+    /**
+     * Delete just one representation (reference or thumbnail) without
+     * touching the master. Mirrors PSIS's per-representation delete button.
+     * After delete, redirect back to the master's edit page.
+     */
+    public function representationDelete(Request $request, int $id)
+    {
+        $doRow = DB::table('digital_object')->where('id', $id)->first();
+        if (!$doRow) abort(404);
+
+        // Refuse to delete the master via this endpoint - use the regular
+        // delete() route which cascades to derivatives.
+        if (empty($doRow->parent_id)) {
+            return redirect()->back()->with('error', 'Use the master delete action to remove the whole digital object.');
+        }
+
+        $masterId = (int) $doRow->parent_id;
+        $success = DigitalObjectService::delete($id);
+
+        if ($success) {
+            return redirect()->route('io.digitalobject.show', $masterId)
+                ->with('success', 'Representation deleted successfully.');
+        }
+        return redirect()->route('io.digitalobject.show', $masterId)
+            ->with('error', 'Failed to delete representation.');
+    }
+
+    /**
+     * Display digital object metadata page.
+     *
+     * @param int $id Digital object ID
+     *
+     * @return \Illuminate\View\View
+     */
+    /**
+     * Edit digital object page.
+     * Migrated from AtoM digitalobject/editSuccess.php.
+     */
+    public function show(int $id)
+    {
+        $culture = app()->getLocale();
+
+        $doRow = DB::table('digital_object')->where('id', $id)->first();
+        if (!$doRow) {
+            abort(404);
+        }
+
+        // Get parent IO
+        $ioTitle = '';
+        $ioSlug = '';
+        if ($doRow->object_id) {
+            $ioI18n = DB::table('information_object_i18n')
+                ->where('id', $doRow->object_id)->where('culture', $culture)->first();
+            $ioTitle = $ioI18n->title ?? '';
+            $ioSlug = DB::table('slug')->where('object_id', $doRow->object_id)->value('slug') ?? '';
+        }
+
+        // Master file URL
+        $masterUrl = DigitalObjectService::getUrl($doRow);
+
+        // Reference image (usage_id = 141)
+        $referenceImage = DB::table('digital_object')
+            ->where('parent_id', $doRow->id)->where('usage_id', 141)->first();
+        $refUrl = $referenceImage ? (rtrim($referenceImage->path, '/') . '/' . $referenceImage->name) : null;
+
+        // Thumbnail image (usage_id = 142)
+        $thumbnailImage = DB::table('digital_object')
+            ->where('parent_id', $doRow->id)->where('usage_id', 142)->first();
+        $thumbUrl = $thumbnailImage ? (rtrim($thumbnailImage->path, '/') . '/' . $thumbnailImage->name) : null;
+
+        // Media types for dropdown
+        $mediaTypes = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', 46)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('term_i18n.name')
+            ->pluck('term_i18n.name', 'term.id')
+            ->toArray();
+
+        // Determine media icon
+        $mediaIcon = 'fa-file';
+        if ($doRow->media_type_id == 138) $mediaIcon = 'fa-film';
+        elseif ($doRow->media_type_id == 135) $mediaIcon = 'fa-music';
+        elseif ($doRow->media_type_id == 136) $mediaIcon = 'fa-image';
+
+        // Check if compound object toggle should show
+        $hasChildren = DB::table('information_object')
+            ->where('parent_id', $doRow->object_id)->exists();
+
+        return view('ahg-io-manage::digitalobject.edit-page', [
+            'do' => $doRow,
+            'ioTitle' => $ioTitle,
+            'ioSlug' => $ioSlug,
+            'masterUrl' => $masterUrl,
+            'referenceImage' => $referenceImage,
+            'refUrl' => $refUrl,
+            'thumbnailImage' => $thumbnailImage,
+            'thumbUrl' => $thumbUrl,
+            'mediaTypes' => $mediaTypes,
+            'mediaIcon' => $mediaIcon,
+            'hasChildren' => $hasChildren,
+            // Read back so the select shows the stored choice instead of
+            // defaulting to No on every visit. Null means never chosen, which
+            // the view treats as the current default (show them).
+            'displayAsCompound' => \AhgCore\Support\PropertyRow::bool(
+                (int) $doRow->object_id, 'displayAsCompoundObject', true, 'digital_object'
+            ),
+        ]);
+    }
+
+    /**
+     * Update digital object (media type, replace file, upload derivatives).
+     */
+    public function update(Request $request, int $id)
+    {
+        $doRow = DB::table('digital_object')->where('id', $id)->first();
+        if (!$doRow) {
+            abort(404);
+        }
+
+        // Security deny-list: refuse browser/server-executable uploads on the
+        // replace-master / reference / thumbnail paths before any ->move(). A
+        // single denied file aborts the whole update so nothing is written.
+        foreach (['replace_file', 'repFile_reference', 'repFile_thumbnail'] as $field) {
+            if ($request->hasFile($field)) {
+                $deniedExt = DigitalObjectService::deniedUploadExtension($request->file($field));
+                if ($deniedExt !== null) {
+                    return redirect()->back()->withInput()
+                        ->with('error', DigitalObjectService::deniedUploadMessage($deniedExt));
+                }
+            }
+        }
+
+        $updates = [];
+
+        // Update media type
+        if ($request->filled('media_type_id')) {
+            $updates['media_type_id'] = (int) $request->input('media_type_id');
+        }
+
+        // #1481: "View children as compound?" was offered on this form, read from
+        // $do->display_as_compound - a column digital_object does not have - and
+        // discarded on submit, because update() only ever saved media_type_id.
+        // The control has therefore always shown "No" and never remembered a
+        // choice. Stored the way AtoM stores it, as a property named
+        // displayAsCompoundObject on the INFORMATION object (it governs how that
+        // record presents its children, not a fact about this one file).
+        if ($request->has('display_as_compound')) {
+            $row = DB::table('digital_object')->where('id', $id)->first(['object_id']);
+            if ($row && $row->object_id) {
+                \AhgCore\Support\PropertyRow::set(
+                    (int) $row->object_id,
+                    'displayAsCompoundObject',
+                    $request->boolean('display_as_compound') ? '1' : '0',
+                    'digital_object'
+                );
+            }
+        }
+
+        if (!empty($updates)) {
+            DB::table('digital_object')->where('id', $id)->update($updates);
+        }
+
+        // Replace master file
+        if ($request->hasFile('replace_file')) {
+            $file = $request->file('replace_file');
+            $dir = rtrim($doRow->path, '/');
+            if ($dir && is_dir($dir)) {
+                $file->move($dir, $doRow->name);
+                DB::table('digital_object')->where('id', $id)->update([
+                    'byte_size' => $file->getSize(),
+                    'mime_type' => $file->getMimeType(),
+                ]);
+            }
+        }
+
+        // Upload reference image
+        if ($request->hasFile('repFile_reference') && !DB::table('digital_object')->where('parent_id', $id)->where('usage_id', 141)->exists()) {
+            $file = $request->file('repFile_reference');
+            $refDir = rtrim($doRow->path, '/') . '/reference/';
+            if (!is_dir($refDir)) {
+                @mkdir($refDir, 0755, true);
+            }
+            $file->move($refDir, $file->getClientOriginalName());
+
+            $refObjectId = DB::table('object')->insertGetId(['class_name' => 'QubitDigitalObject', 'created_at' => now(), 'updated_at' => now()]);
+            DB::table('digital_object')->insert([
+                'id' => $refObjectId,
+                'object_id' => $doRow->object_id,
+                'parent_id' => $id,
+                'usage_id' => 141,
+                'name' => $file->getClientOriginalName(),
+                'path' => $refDir,
+                'byte_size' => $file->getSize(),
+                'mime_type' => $file->getMimeType(),
+            ]);
+        }
+
+        // Upload thumbnail image
+        if ($request->hasFile('repFile_thumbnail') && !DB::table('digital_object')->where('parent_id', $id)->where('usage_id', 142)->exists()) {
+            $file = $request->file('repFile_thumbnail');
+            $thumbDir = rtrim($doRow->path, '/') . '/thumbnail/';
+            if (!is_dir($thumbDir)) {
+                @mkdir($thumbDir, 0755, true);
+            }
+            $file->move($thumbDir, $file->getClientOriginalName());
+
+            $thumbObjectId = DB::table('object')->insertGetId(['class_name' => 'QubitDigitalObject', 'created_at' => now(), 'updated_at' => now()]);
+            DB::table('digital_object')->insert([
+                'id' => $thumbObjectId,
+                'object_id' => $doRow->object_id,
+                'parent_id' => $id,
+                'usage_id' => 142,
+                'name' => $file->getClientOriginalName(),
+                'path' => $thumbDir,
+                'byte_size' => $file->getSize(),
+                'mime_type' => $file->getMimeType(),
+            ]);
+        }
+
+        $ioSlug = DB::table('slug')->where('object_id', $doRow->object_id)->value('slug');
+
+        if ($ioSlug) {
+            return redirect()->route('informationobject.show', $ioSlug)->with('success', 'Digital object updated.');
+        }
+        return redirect()->route('io.digitalobject.show', $id)->with('success', 'Digital object updated.');
+    }
+
+    /**
+     * Multi-file upload page - drag & drop batch uploader.
+     * Migrated from AtoM informationobject/multiFileUpload.
+     */
+    public function multiFileUpload(Request $request, string $slug)
+    {
+        $io = $this->getIO($slug);
+        if (!$io) {
+            abort(404);
+        }
+
+        $culture = app()->getLocale();
+
+        // Max upload sizes
+        $maxFileSize = min(
+            $this->phpSizeToBytes(ini_get('upload_max_filesize')),
+            $this->phpSizeToBytes(ini_get('post_max_size'))
+        );
+        $maxPostSize = $this->phpSizeToBytes(ini_get('post_max_size'));
+
+        // Per-file AJAX upload endpoint. The blueimp uploader stages each file and
+        // expects a JSON {files:[{name,size,tmpName,...}]} response; the form-submit
+        // phase below then consumes tmpName. (Previously this pointed at the single
+        // full-attach endpoint, which redirects + 404s here -> "0 of N uploaded".)
+        $uploadResponsePath = route('io.multiFileUpload.store', $slug);
+
+        // Levels of description, scoped to THIS record's sector (children inherit
+        // the parent's sector) and de-duplicated. Falls back to archive when the
+        // sector is unknown. (Was: every sector's levels, with duplicates.)
+        $sector = $this->resolveSectorForLevels($io);
+        $levels = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->join('level_of_description_sector', function ($j) use ($sector) {
+                $j->on('term.id', '=', 'level_of_description_sector.term_id')
+                  ->where('level_of_description_sector.sector', '=', $sector);
+            })
+            ->where('term.taxonomy_id', 34)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('level_of_description_sector.display_order')
+            ->distinct()
+            // display_order must be SELECTed too: DISTINCT + ORDER BY on a
+            // non-selected column is rejected by MySQL (error 3065).
+            ->select('term.id', 'term_i18n.name', 'level_of_description_sector.display_order')
+            ->get();
+
+        // Handle POST - process uploaded files and create child IOs
+        if ($request->isMethod('post')) {
+            $title = $request->input('title', 'image %dd%');
+            $levelId = $request->input('levelOfDescription');
+            $files = $request->input('files', []);
+
+            $slugList = [];
+            $i = 0;
+
+            foreach ($files as $file) {
+                if (empty($file['tmpName'])) continue;
+                $i++;
+
+                // Generate title from pattern
+                $childTitle = str_replace('%dd%', str_pad($i, 2, '0', STR_PAD_LEFT), $title);
+                if (!empty($file['infoObjectTitle'])) {
+                    $childTitle = $file['infoObjectTitle'];
+                }
+
+                // Create child information object
+                $objectId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitInformationObject',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+
+                DB::table('information_object')->insert([
+                    'id' => $objectId,
+                    'parent_id' => $io->id,
+                    'level_of_description_id' => $levelId ?: null,
+                    'source_standard' => $io->source_standard ?? null,
+                    // source_culture is NOT NULL with no default; inherit the
+                    // parent's, falling back to the current locale.
+                    'source_culture' => $io->source_culture ?? $culture,
+                ]);
+
+                // #1462 - these children are exactly what a collection walk
+                // must find, and descendant queries read the closure tree.
+                \AhgCore\Services\RecordCreationService::ensureClosureNode((int) $objectId, (int) $io->id);
+
+                DB::table('information_object_i18n')->insert([
+                    'id' => $objectId,
+                    'culture' => $culture,
+                    'title' => $childTitle,
+                ]);
+
+                // Create slug
+                $childSlug = \Illuminate\Support\Str::slug($childTitle) . '-' . $objectId;
+                DB::table('slug')->insert([
+                    'object_id' => $objectId,
+                    'slug' => $childSlug,
+                ]);
+
+                // Set publication status
+                DB::table('status')->insert([
+                    // #1470: status.id must be an object id, not one from status's
+                    // own AUTO_INCREMENT counter.
+                    'id' => \AhgCore\Support\StatusRow::allocateId(),
+                    'object_id' => $objectId,
+                    'type_id' => 158,
+                    'status_id' => 159, // draft
+                ]);
+
+                // Move temp file to permanent location and create digital object
+                $tmpPath = storage_path('app/uploads/tmp/' . $file['tmpName']);
+                if (file_exists($tmpPath)) {
+                    $uploadsPath = config('heratio.uploads_path', storage_path('app/uploads'));
+                    $doDir = rtrim($uploadsPath, '/') . '/r/' . $objectId . '/';
+                    if (!is_dir($doDir)) {
+                        @mkdir($doDir, 0755, true);
+                    }
+                    $filename = $file['name'] ?? basename($tmpPath);
+                    rename($tmpPath, $doDir . $filename);
+
+                    $doObjectId = DB::table('object')->insertGetId([
+                        'class_name' => 'QubitDigitalObject',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+
+                    DB::table('digital_object')->insert([
+                        'id' => $doObjectId,
+                        'object_id' => $objectId,
+                        'usage_id' => 140, // master
+                        'name' => $filename,
+                        // Web-relative path (matches DigitalObjectService::upload),
+                        // not the absolute $doDir, so URL/IIIF resolution works.
+                        'path' => '/uploads/r/' . $objectId . '/',
+                        'byte_size' => filesize($doDir . $filename),
+                        'mime_type' => mime_content_type($doDir . $filename),
+                    ]);
+
+                    // Generate JPEG reference + thumbnail (incl. TIFF via ImageMagick)
+                    // so imported children render + show thumbnails like normal uploads.
+                    \AhgCore\Services\DigitalObjectService::generateDerivativesForMaster((int) $doObjectId);
+                }
+
+                $slugList[] = $childSlug;
+            }
+
+            if (!empty($slugList)) {
+                return redirect()->route('informationobject.multiFileUpdate', [
+                    'slug' => $slug,
+                    'items' => implode(',', $slugList),
+                ]);
+            }
+
+            return redirect()->route('informationobject.show', $slug)->with('success', 'Digital objects imported.');
+        }
+
+        return view('ahg-io-manage::digitalobject.multi-file-upload', [
+            'io' => $io,
+            'maxFileSize' => $maxFileSize,
+            'maxPostSize' => $maxPostSize,
+            'uploadResponsePath' => $uploadResponsePath,
+            'levels' => $levels,
+        ]);
+    }
+
+    /**
+     * Batch metadata (title) review for the child records just created by
+     * multiFileUpload(). GET renders one title input per child; POST saves them.
+     * ?items= is the comma-separated list of child slugs created by the import.
+     * Admin-gated like the rest of the digital-object actions.
+     */
+    public function multiFileUpdate(Request $request, string $slug)
+    {
+        $resource = $this->getIO($slug);
+        if (!$resource) {
+            abort(404);
+        }
+        $culture = app()->getLocale();
+
+        // POST - persist the edited titles (only for genuine children of $resource).
+        if ($request->isMethod('post')) {
+            foreach ((array) $request->input('titles', []) as $id => $title) {
+                $id = (int) $id;
+                if ($id <= 0) {
+                    continue;
+                }
+                $isChild = DB::table('information_object')->where('id', $id)->where('parent_id', $resource->id)->exists();
+                if (!$isChild) {
+                    continue;
+                }
+                DB::table('information_object_i18n')->where('id', $id)->where('culture', $culture)
+                    ->update(['title' => trim((string) $title)]);
+            }
+
+            return redirect()->route('informationobject.show', $slug)
+                ->with('success', __('Digital objects imported.'));
+        }
+
+        // GET - build the per-child rows for the review form.
+        $slugs = array_values(array_filter(array_map('trim', explode(',', (string) $request->query('items')))));
+        $informationObjects = [];
+        foreach ($slugs as $childSlug) {
+            $childId = (int) DB::table('slug')->where('slug', $childSlug)->value('object_id');
+            if ($childId <= 0) {
+                continue;
+            }
+            $row = DB::table('information_object as io')
+                ->leftJoin('information_object_i18n as i', function ($j) use ($culture) {
+                    $j->on('i.id', '=', 'io.id')->where('i.culture', '=', $culture);
+                })
+                ->where('io.id', $childId)
+                ->select('io.id', 'io.level_of_description_id', 'i.title')
+                ->first();
+            if (!$row) {
+                continue;
+            }
+
+            $obj = (object) [
+                'id'    => (int) $row->id,
+                'slug'  => $childSlug,
+                'title' => $row->title,
+            ];
+
+            $master = DB::table('digital_object')->where('object_id', $childId)->where('usage_id', 140)->first();
+            if ($master) {
+                $obj->digitalObjectName = $master->name;
+            }
+            $thumb = DB::table('digital_object')->where('object_id', $childId)->where('usage_id', 142)->first();
+            if ($thumb) {
+                $obj->thumbnail = rtrim((string) $thumb->path, '/') . '/' . $thumb->name;
+            }
+            if ($row->level_of_description_id) {
+                $lvl = DB::table('term_i18n')->where('id', $row->level_of_description_id)->where('culture', $culture)->value('name');
+                if ($lvl) {
+                    $obj->levelOfDescription = $lvl;
+                }
+            }
+
+            $informationObjects[] = $obj;
+        }
+
+        return view('ahg-io-manage::multi-file-update', [
+            'resource'           => $resource,
+            'informationObjects' => $informationObjects,
+        ]);
+    }
+
+    /**
+     * Convert PHP size string (e.g. 128M) to bytes.
+     */
+    protected function phpSizeToBytes(string $size): int
+    {
+        $unit = strtolower(substr(trim($size), -1));
+        $value = (int) $size;
+        return match ($unit) {
+            'g' => $value * 1073741824,
+            'm' => $value * 1048576,
+            'k' => $value * 1024,
+            default => $value,
+        };
+    }
+
+    /**
+     * Per-file AJAX upload for the multiFileUpload widget (blueimp). Stages the
+     * uploaded file under storage/app/uploads/tmp/<tmpName> and returns the
+     * {files:[{name,size,tmpName,...}]} JSON the widget expects; the form-submit
+     * phase of multiFileUpload() then moves each tmpName into a new child record.
+     * Per-file failures are reported in the file object (HTTP 200) so the widget
+     * shows a retry rather than treating the whole batch as dead.
+     */
+    public function multiFileUploadStore(Request $request, string $slug)
+    {
+        $io = $this->getIO($slug);
+        if (!$io) {
+            return response()->json(['files' => [['error' => 'Record not found']]], 404);
+        }
+
+        $file = $request->file('files') ?? $request->file('file');
+        if (is_array($file)) {
+            $file = $file[0] ?? null;
+        }
+        if (!$file) {
+            $file = collect($request->allFiles())->flatten()->first();
+        }
+        if (!$file) {
+            return response()->json(['files' => [['error' => 'No file received']]], 422);
+        }
+
+        $orig = $file->getClientOriginalName() ?: 'file';
+
+        // Security deny-list: refuse browser/server-executable files at the
+        // staging step so no tmpName is ever returned - the form-submit phase
+        // of multiFileUpload() then has nothing to import into /uploads.
+        $deniedExt = DigitalObjectService::deniedUploadExtension($file);
+        if ($deniedExt !== null) {
+            return response()->json(['files' => [[
+                'name'  => $orig,
+                'error' => DigitalObjectService::deniedUploadMessage($deniedExt),
+            ]]], 200);
+        }
+
+        try {
+            $tmpDir = storage_path('app/uploads/tmp');
+            if (!is_dir($tmpDir)) {
+                @mkdir($tmpDir, 0775, true);
+            }
+            $tmpName = \Illuminate\Support\Str::uuid()->toString() . '_' . preg_replace('/[^A-Za-z0-9._-]/', '_', $orig);
+            $file->move($tmpDir, $tmpName);
+
+            return response()->json(['files' => [[
+                'name'         => $orig,
+                'size'         => filesize($tmpDir . '/' . $tmpName) ?: 0,
+                'tmpName'      => $tmpName,
+                'url'          => null,
+                'thumbnailUrl' => null,
+            ]]]);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('[multiFileUpload] temp store failed: ' . $e->getMessage());
+
+            return response()->json(['files' => [['name' => $orig, 'error' => 'Upload failed']]], 200);
+        }
+    }
+
+    /**
+     * Best-effort GLAM sector for a record, to scope its level-of-description
+     * options: prefers display_object_config.object_type, then the sector its
+     * level maps to (non-archive preferred), defaulting to 'archive'. Never throws.
+     */
+    protected function resolveSectorForLevels(object $io): string
+    {
+        $valid = ['archive', 'library', 'museum', 'dam', 'gallery'];
+        try {
+            if (\Illuminate\Support\Facades\Schema::hasTable('display_object_config')) {
+                $t = DB::table('display_object_config')->where('object_id', $io->id)->value('object_type');
+                if (in_array($t, $valid, true)) {
+                    return $t;
+                }
+            }
+            if (($io->level_of_description_id ?? null) && \Illuminate\Support\Facades\Schema::hasTable('level_of_description_sector')) {
+                $s = DB::table('level_of_description_sector')->where('term_id', $io->level_of_description_id)->whereNotIn('sector', ['archive'])->value('sector')
+                    ?: DB::table('level_of_description_sector')->where('term_id', $io->level_of_description_id)->value('sector');
+                if (in_array($s, $valid, true)) {
+                    return $s;
+                }
+            }
+        } catch (\Throwable $e) {
+            // ignore - default to archive
+        }
+
+        return 'archive';
+    }
+
+    /**
+     * Get information object by slug.
+     *
+     * @param string $slug
+     *
+     * @return object|null
+     */
+    protected function getIO(string $slug): ?object
+    {
+        $slugRow = DB::table('slug')->where('slug', $slug)->first();
+        if (!$slugRow) {
+            return null;
+        }
+
+        $io = DB::table('information_object')
+            ->where('id', $slugRow->object_id)
+            ->first();
+
+        if (!$io) {
+            return null;
+        }
+
+        $i18n = DB::table('information_object_i18n')
+            ->where('id', $io->id)
+            ->where('culture', 'en')
+            ->first();
+
+        $io->title = $i18n->title ?? null;
+        $io->slug = $slug;
+
+        return $io;
+    }
+}

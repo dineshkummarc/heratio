@@ -1,0 +1,281 @@
+@extends('theme::layouts.1col')
+
+@section('title', 'Edit Workflow: ' . $workflow->name)
+@section('body-class', 'admin workflow')
+
+@section('content')
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="mb-0"><i class="fas fa-edit"></i> Edit Workflow: {{ $workflow->name }}</h1>
+    <div class="d-flex gap-2">
+      <a href="{{ route('workflow.diagram', $workflow->id) }}" class="btn btn-outline-info"><i class="fas fa-project-diagram me-1"></i>{{ __('View diagram') }}</a>
+      <a href="{{ route('workflow.designer', $workflow->id) }}" class="btn btn-outline-primary"><i class="fas fa-pencil-ruler me-1"></i>{{ __('Designer') }}</a>
+      <a href="{{ route('workflow.admin') }}" class="btn atom-btn-white"><i class="fas fa-arrow-left"></i> {{ __('Back') }}</a>
+    </div>
+  </div>
+
+  @if($errors->any())
+    <div class="alert alert-danger">
+      @foreach($errors->all() as $error)
+        <div>{{ $error }}</div>
+      @endforeach
+    </div>
+  @endif
+
+  {{-- Workflow Settings --}}
+  <div class="card mb-4">
+    <div class="card-header"><h5 class="mb-0">{{ __('Workflow Settings') }}</h5></div>
+    <div class="card-body">
+      <form action="{{ route('workflow.admin.edit', $workflow->id) }}" method="POST">
+        @csrf
+
+        <div class="row">
+          <div class="col-md-8">
+            <div class="mb-3">
+              <label for="name" class="form-label">{{ __('Workflow Name') }} <span class="text-danger">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <input type="text" class="form-control" id="name" name="name" value="{{ old('name', $workflow->name) }}" required maxlength="255">
+            </div>
+            <div class="mb-3">
+              <label for="description" class="form-label">{{ __('Description') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea class="form-control" id="description" name="description" rows="3">{{ old('description', $workflow->description) }}</textarea>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="mb-3">
+              <label for="scope_type" class="form-label">{{ __('Scope') }} <span class="text-danger">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <select class="form-select" id="scope_type" name="scope_type">
+                <option value="global" {{ $workflow->scope_type === 'global' ? 'selected' : '' }}>{{ __('Global') }}</option>
+                <option value="repository" {{ $workflow->scope_type === 'repository' ? 'selected' : '' }}>{{ __('Repository') }}</option>
+                <option value="collection" {{ $workflow->scope_type === 'collection' ? 'selected' : '' }}>{{ __('Collection') }}</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label for="scope_id" class="form-label">{{ __('Scope ID') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="number" class="form-control" id="scope_id" name="scope_id" value="{{ old('scope_id', $workflow->scope_id) }}">
+            </div>
+            <div class="mb-3">
+              <label for="trigger_event" class="form-label">{{ __('Trigger Event') }} <span class="text-danger">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <select class="form-select" id="trigger_event" name="trigger_event">
+                <option value="submit" {{ $workflow->trigger_event === 'submit' ? 'selected' : '' }}>{{ __('Submit') }}</option>
+                <option value="publish" {{ $workflow->trigger_event === 'publish' ? 'selected' : '' }}>{{ __('Publish') }}</option>
+                <option value="update" {{ $workflow->trigger_event === 'update' ? 'selected' : '' }}>{{ __('Update') }}</option>
+                <option value="create" {{ $workflow->trigger_event === 'create' ? 'selected' : '' }}>{{ __('Create') }}</option>
+                <option value="manual" {{ $workflow->trigger_event === 'manual' ? 'selected' : '' }}>{{ __('Manual') }}</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label for="applies_to" class="form-label">{{ __('Applies To') }} <span class="text-danger">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <select class="form-select" id="applies_to" name="applies_to">
+                <option value="information_object" {{ $workflow->applies_to === 'information_object' ? 'selected' : '' }}>{{ __('Information Object') }}</option>
+                <option value="actor" {{ $workflow->applies_to === 'actor' ? 'selected' : '' }}>{{ __('Actor') }}</option>
+                <option value="repository" {{ $workflow->applies_to === 'repository' ? 'selected' : '' }}>{{ __('Repository') }}</option>
+                <option value="accession" {{ $workflow->applies_to === 'accession' ? 'selected' : '' }}>{{ __('Accession') }}</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="col-md-6">
+            <div class="mb-3">
+              <label for="auto_archive_days" class="form-label">{{ __('Auto Archive (days)') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="number" class="form-control" id="auto_archive_days" name="auto_archive_days" value="{{ old('auto_archive_days', $workflow->auto_archive_days) }}">
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="mb-3">
+              <label for="spectrum_procedure" class="form-label">
+                <i class="fas fa-university me-1"></i>{{ __('Museum procedure') }}
+                <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span>
+              </label>
+              <select class="form-select" id="spectrum_procedure" name="spectrum_procedure">
+                <option value="">{{ __('- Not a museum procedure -') }}</option>
+                @foreach($spectrumProcedures ?? [] as $code => $label)
+                  <option value="{{ $code }}" {{ old('spectrum_procedure', $workflow->spectrum_procedure ?? '') === $code ? 'selected' : '' }}>{{ __($label) }}</option>
+                @endforeach
+              </select>
+              <small class="text-muted">{{ __('Tag this workflow if it implements one of the 21 museum procedures.') }}</small>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="col-md-3">
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" id="is_active" name="is_active" {{ $workflow->is_active ? 'checked' : '' }}>
+              <label class="form-check-label" for="is_active">{{ __('Active') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" id="is_default" name="is_default" {{ $workflow->is_default ? 'checked' : '' }}>
+              <label class="form-check-label" for="is_default">{{ __('Default Workflow') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" id="require_all_steps" name="require_all_steps" {{ $workflow->require_all_steps ? 'checked' : '' }}>
+              <label class="form-check-label" for="require_all_steps">{{ __('Require All Steps') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" id="allow_parallel" name="allow_parallel" {{ $workflow->allow_parallel ? 'checked' : '' }}>
+              <label class="form-check-label" for="allow_parallel">{{ __('Allow Parallel Steps') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-check mb-3">
+          <input class="form-check-input" type="checkbox" id="notification_enabled" name="notification_enabled" {{ $workflow->notification_enabled ? 'checked' : '' }}>
+          <label class="form-check-label" for="notification_enabled">{{ __('Enable Notifications') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+        </div>
+
+        <button type="submit" class="btn atom-btn-outline-success"><i class="fas fa-save"></i> {{ __('Save Changes') }}</button>
+      </form>
+    </div>
+  </div>
+
+  {{-- Steps --}}
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="mb-0"><i class="fas fa-list-ol"></i> {{ __('Workflow Steps') }}</h5>
+      <button type="button" class="btn btn-sm atom-btn-outline-success" data-bs-toggle="collapse" data-bs-target="#addStepForm">
+        <i class="fas fa-plus"></i> {{ __('Add Step') }}
+      </button>
+    </div>
+    <div class="card-body">
+      {{-- Add Step Form (collapsed) --}}
+      <div class="collapse mb-4" id="addStepForm">
+        <div class="card card-body bg-light">
+          <h6>{{ __('Add New Step') }}</h6>
+          <form action="{{ route('workflow.admin.step.add', $workflow->id) }}" method="POST">
+            @csrf
+            <div class="row">
+              <div class="col-md-4 mb-3">
+                <label for="step_name" class="form-label">{{ __('Step Name') }} <span class="text-danger">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+                <input type="text" class="form-control" id="step_name" name="name" required maxlength="255">
+              </div>
+              <div class="col-md-4 mb-3">
+                <label for="step_type" class="form-label">{{ __('Step Type') }} <span class="text-danger">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+                <select class="form-select" id="step_type" name="step_type">
+                  <option value="review">{{ __('Review') }}</option>
+                  <option value="approve">{{ __('Approve') }}</option>
+                  <option value="quality_check">{{ __('Quality Check') }}</option>
+                  <option value="final_review">{{ __('Final Review') }}</option>
+                  <option value="publish">{{ __('Publish') }}</option>
+                </select>
+              </div>
+              <div class="col-md-4 mb-3">
+                <label for="action_required" class="form-label">{{ __('Action Required') }} <span class="text-danger">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+                <select class="form-select" id="action_required" name="action_required">
+                  <option value="approve_reject">{{ __('Approve / Reject') }}</option>
+                  <option value="acknowledge">{{ __('Acknowledge') }}</option>
+                  <option value="review_only">{{ __('Review Only') }}</option>
+                </select>
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-md-6 mb-3">
+                <label for="step_description" class="form-label">{{ __('Description') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <textarea class="form-control" id="step_description" name="description" rows="2"></textarea>
+              </div>
+              <div class="col-md-3 mb-3">
+                <label for="escalation_days" class="form-label">{{ __('Escalation Days') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <input type="number" class="form-control" id="escalation_days" name="escalation_days">
+              </div>
+              <div class="col-md-3 mb-3">
+                <label for="step_order" class="form-label">{{ __('Step Order') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <input type="number" class="form-control" id="step_order" name="step_order" placeholder="{{ __('Auto') }}">
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-md-12 mb-3">
+                <label for="step_instructions" class="form-label">{{ __('Instructions') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <textarea class="form-control" id="step_instructions" name="instructions" rows="2"></textarea>
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-md-3">
+                <div class="form-check mb-3">
+                  <input class="form-check-input" type="checkbox" id="step_pool_enabled" name="pool_enabled" checked>
+                  <label class="form-check-label" for="step_pool_enabled">{{ __('Pool Enabled') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="form-check mb-3">
+                  <input class="form-check-input" type="checkbox" id="step_is_optional" name="is_optional">
+                  <label class="form-check-label" for="step_is_optional">{{ __('Optional') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="form-check mb-3">
+                  <input class="form-check-input" type="checkbox" id="step_is_active" name="is_active" checked>
+                  <label class="form-check-label" for="step_is_active">{{ __('Active') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                </div>
+              </div>
+            </div>
+            <button type="submit" class="btn atom-btn-outline-success"><i class="fas fa-plus"></i> {{ __('Add Step') }}</button>
+          </form>
+        </div>
+      </div>
+
+      {{-- Steps List --}}
+      @if(empty($workflow->steps))
+        <p class="text-muted">{{ __('No steps defined yet. Add a step to build the workflow.') }}</p>
+      @else
+        <div class="table-responsive">
+          <table class="table table-bordered table-hover mb-0">
+            <thead>
+              <tr>
+                <th>{{ __('Order') }}</th>
+                <th>{{ __('Name') }}</th>
+                <th>{{ __('Type') }}</th>
+                <th>{{ __('Action') }}</th>
+                <th>{{ __('Pool') }}</th>
+                <th>{{ __('Escalation') }}</th>
+                <th>{{ __('Status') }}</th>
+                <th>{{ __('Actions') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              @foreach($workflow->steps as $step)
+                <tr>
+                  <td><span class="badge bg-primary">{{ $step->step_order }}</span></td>
+                  <td>
+                    {{ $step->name }}
+                    @if($step->is_optional)
+                      <span class="badge bg-secondary">{{ __('Optional') }}</span>
+                    @endif
+                  </td>
+                  <td>{{ ucfirst(str_replace('_', ' ', $step->step_type)) }}</td>
+                  <td>{{ str_replace('_', ' ', ucfirst($step->action_required)) }}</td>
+                  <td>
+                    @if($step->pool_enabled)
+                      <span class="badge bg-success">{{ __('Yes') }}</span>
+                    @else
+                      <span class="badge bg-secondary">{{ __('No') }}</span>
+                    @endif
+                  </td>
+                  <td>{{ $step->escalation_days ? $step->escalation_days . ' days' : '-' }}</td>
+                  <td>
+                    @if($step->is_active)
+                      <span class="badge bg-success">{{ __('Active') }}</span>
+                    @else
+                      <span class="badge bg-secondary">{{ __('Inactive') }}</span>
+                    @endif
+                  </td>
+                  <td>
+                    <form action="{{ route('workflow.admin.step.delete', $step->id) }}" method="POST" class="d-inline" onsubmit="return confirm('Delete this step?')">
+                      @csrf
+                      <button type="submit" class="btn btn-sm atom-btn-outline-danger"><i class="fas fa-trash"></i></button>
+                    </form>
+                  </td>
+                </tr>
+              @endforeach
+            </tbody>
+          </table>
+        </div>
+      @endif
+    </div>
+  </div>
+@endsection

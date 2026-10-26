@@ -1,0 +1,129 @@
+<?php
+
+use AhgAccessionManage\Controllers\AccessionController;
+use AhgDonorManage\Controllers\DonorController;
+use Illuminate\Support\Facades\Route;
+
+// Accession create form requires auth
+Route::middleware('auth')->group(function () {
+    Route::get('/accession/add', [AccessionController::class, 'create'])->name('accession.create');
+});
+
+Route::middleware('auth')->group(function () {
+    Route::get('/accession/browse', [AccessionController::class, 'browse'])->name('accession.browse');
+    Route::post('/accession/add', [AccessionController::class, 'store'])->name('accession.store')->middleware('acl:create');
+    Route::get('/accession/{slug}/edit', [AccessionController::class, 'edit'])->name('accession.edit');
+    Route::post('/accession/{slug}/edit', [AccessionController::class, 'update'])->name('accession.update')->middleware('acl:update');
+
+    // #1267: persist an existing-donor selection from the "Related donor"
+    // modal. Links / unlinks the donor↔accession relation
+    // (subject=accession, object=donor, type=RELATION_DONOR) - the same
+    // representation AccessionService::getDonors() reads back on show/edit.
+    // These power the modal's add-existing + delete-row actions when the
+    // save isn't routed through the full accession update (e.g. an
+    // inline AJAX link/unlink). The accession update() also honours the
+    // donor_id field directly so a plain form save persists the link too.
+    Route::post('/accession/{slug}/donor/link', [AccessionController::class, 'linkDonor'])
+        ->name('accession.donor-link')->middleware('acl:update');
+    Route::post('/accession/{slug}/donor/unlink', [AccessionController::class, 'unlinkDonor'])
+        ->name('accession.donor-unlink')->middleware('acl:update');
+    // Finalise transition. Sets accession_v2.status='accepted' + accepted_at,
+    // gated on AccessionService::finalisationBlockers() (which honours
+    // accession_require_donor_agreement + accession_require_appraisal).
+    Route::post('/accession/{slug}/finalise', [AccessionController::class, 'finalise'])->name('accession.finalise')->middleware('acl:update');
+
+    // Create archival description from accession. Materialises a new IO,
+    // links it to the accession via the relation table (RELATION_ACCESSION),
+    // and invokes inheritRightsToIo() so accession_rights_inheritance_enabled
+    // actually fires. The last passive setting becomes enforcing here.
+    Route::post('/accession/{slug}/create-io', [AccessionController::class, 'createInformationObject'])->name('accession.create-io')->middleware('acl:create');
+});
+
+Route::middleware('admin')->group(function () {
+    Route::get('/accession/{slug}/delete', [AccessionController::class, 'confirmDelete'])->name('accession.confirmDelete');
+    Route::delete('/accession/{slug}/delete', [AccessionController::class, 'destroy'])->name('accession.destroy')->middleware('acl:delete');
+    Route::get('/accession/export-csv', [AccessionController::class, 'exportCsv'])->name('accession.export-csv');
+    // CAAIS 1.0 profile export (heratio#1514). Admin-only like the CSV export:
+    // it carries donor contact details unless ?external=1 withholds the
+    // sources marked confidential.
+    Route::get('/accession/caais-export', [AccessionController::class, 'caaisExportAll'])->name('accession.caais-export-all');
+    Route::get('/accession/{id}/caais-export', [AccessionController::class, 'caaisExport'])->name('accession.caais-export')->where('id', '[0-9]+');
+    Route::get('/accession/intake-queue', [AccessionController::class, 'intakeQueue'])->name('accession.intake-queue');
+    Route::get('/accession/dashboard', [AccessionController::class, 'dashboard'])->name('accession.dashboard');
+    Route::get('/accession/valuation-report', [AccessionController::class, 'valuationReport'])->name('accession.valuation-report');
+
+    // Appraisal & valuation
+    Route::get('/accession/{id}/appraisal', [AccessionController::class, 'appraisal'])->name('accession.appraisal')->where('id', '[0-9]+');
+    Route::post('/accession/{id}/appraisal', [AccessionController::class, 'appraisalStore'])->name('accession.appraisal-store')->middleware('acl:update')->where('id', '[0-9]+');
+    Route::get('/accession/appraisal-templates', [AccessionController::class, 'appraisalTemplates'])->name('accession.appraisal-templates');
+    Route::get('/accession/{id}/valuation', [AccessionController::class, 'valuation'])->name('accession.valuation')->where('id', '[0-9]+');
+
+    // Containers & rights
+    Route::get('/accession/{id}/containers', [AccessionController::class, 'containers'])->name('accession.containers')->where('id', '[0-9]+');
+    Route::get('/accession/{id}/rights', [AccessionController::class, 'rights'])->name('accession.rights')->where('id', '[0-9]+');
+    // Rights create/delete. The show page's "Create new rights" link pointed at
+    // the AtoM-legacy /right/add?slug=, which has no route here at all - it just
+    // 404'd, and the rights page it should have led to listed nothing because
+    // rights() hardcoded an empty collection.
+    Route::post('/accession/{id}/rights', [AccessionController::class, 'rightsStore'])->name('accession.rights-store')->middleware('acl:update')->where('id', '[0-9]+');
+    Route::delete('/accession/{id}/rights/{rightId}', [AccessionController::class, 'rightsDestroy'])->name('accession.rights-destroy')->middleware('acl:delete')->where(['id' => '[0-9]+', 'rightId' => '[0-9]+']);
+
+    // Deaccession. The show page's "Deaccession" button pointed at the
+    // AtoM-legacy /deaccession/add?accession=, which likewise had no route and
+    // no create path anywhere - the service could only READ deaccessions.
+    Route::get('/accession/{id}/deaccession', [AccessionController::class, 'deaccessionCreate'])->name('accession.deaccession-create')->where('id', '[0-9]+');
+
+    // AtoM-legacy URL compatibility (#1463). These are the URLs the old buttons
+    // used and that may still sit in bookmarks, saved links and old email. They
+    // are not resurrected features - they just forward to the real pages so an
+    // old link is a redirect rather than a 404.
+    Route::get('/right/add', [AccessionController::class, 'legacyRightAdd']);
+    Route::get('/deaccession/add', [AccessionController::class, 'legacyDeaccessionAdd']);
+    Route::post('/accession/{id}/deaccession', [AccessionController::class, 'deaccessionStore'])->name('accession.deaccession-store')->middleware('acl:create')->where('id', '[0-9]+');
+
+    // Intake workflow
+    Route::get('/accession/{id}/attachments', [AccessionController::class, 'attachments'])->name('accession.attachments')->where('id', '[0-9]+');
+    Route::post('/accession/{id}/attachments', [AccessionController::class, 'attachmentsStore'])->name('accession.attachments-store')->middleware('acl:update')->where('id', '[0-9]+');
+    Route::get('/accession/{id}/checklist', [AccessionController::class, 'checklist'])->name('accession.checklist')->where('id', '[0-9]+');
+    Route::post('/accession/{id}/checklist', [AccessionController::class, 'checklistStore'])->name('accession.checklist-store')->middleware('acl:update')->where('id', '[0-9]+');
+    Route::get('/accession/intake-config', [AccessionController::class, 'intakeConfig'])->name('accession.intake-config');
+    Route::post('/accession/intake-config', [AccessionController::class, 'intakeConfigStore'])->name('accession.intake-config-store')->middleware('acl:update');
+    Route::get('/accession/numbering', [AccessionController::class, 'numbering'])->name('accession.numbering');
+    Route::post('/accession/numbering', [AccessionController::class, 'numberingStore'])->name('accession.numbering-store')->middleware('acl:update');
+    Route::get('/accession/queue', [AccessionController::class, 'queue'])->name('accession.queue');
+    Route::get('/accession/{id}/queue-detail', [AccessionController::class, 'queueDetail'])->name('accession.queue-detail')->where('id', '[0-9]+');
+    Route::get('/accession/{id}/timeline', [AccessionController::class, 'timeline'])->name('accession.timeline')->where('id', '[0-9]+');
+});
+
+// Accession records hold donor contact PII (address/email/phone) + acquisition
+// terms and have no publication-status concept - staff-only. Gate the show page
+// under auth so anon can't read donor PII (#1381, web twin of #1370/#1377).
+Route::get('/accession/{slug}', [AccessionController::class, 'show'])->name('accession.show')->middleware('auth');
+
+// Donor typeahead/lookup for the accession edit form - gate under auth so anon
+// can't enumerate donor names/ids (#1381).
+Route::middleware(['web', 'auth'])->group(function () {
+
+    // Donor typeahead for the "Related donor" modal. Returns an HTML table
+    // consumed by the YUI form-autocomplete widget (TYPE_HTMLTABLE), not JSON.
+    Route::match(['get', 'post'], '/donor/autocomplete', [DonorController::class, 'autocomplete'])
+        ->name('donor.autocomplete');
+
+    // #1267: JSON donor typeahead for the accession edit form's TomSelect
+    // (id/label/slug). Distinct from /donor/autocomplete which returns the
+    // YUI HTML-table shape. The TomSelect writes the chosen donor's id into
+    // the hidden donor_id field that the accession save reads.
+    Route::get('/accession/donor/search', [AccessionController::class, 'donorSearch'])
+        ->name('accession.donor-search');
+
+    Route::match(['get', 'post'], '/donor/add', function () {
+        return view('ahg-accession-manage::add');
+    })->name('donor.add');
+
+    // Named route referenced by the related-donor row template
+    // (route('accession.relatedDonor', ['slug' => ...])). Resolves an
+    // existing donor by slug and returns its id/label so the modal can
+    // pre-fill the hidden donor_id when editing an already-linked donor.
+    Route::get('/accession/related-donor/{slug}', [AccessionController::class, 'relatedDonor'])
+        ->name('accession.relatedDonor');
+});

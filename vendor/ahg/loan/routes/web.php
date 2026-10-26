@@ -1,0 +1,31 @@
+<?php
+
+use AhgLoan\Controllers\LoanController;
+use AhgLoan\Controllers\TourController;
+use Illuminate\Support\Facades\Route;
+
+Route::middleware('auth')->group(function () {
+    // Touring-exhibition scheduling (#1190). Multi-segment URLs keep these
+    // clear of the single-segment /{slug} information-object catch-all.
+    Route::get('/loan/tour/object/{objectId}', [TourController::class, 'objectSchedule'])->where('objectId', '[0-9]+')->name('loan.tour.object');
+    Route::post('/loan/tour/object/{objectId}/book', [TourController::class, 'checkAndBook'])->where('objectId', '[0-9]+')->name('loan.tour.book')->middleware('acl:create');
+    Route::post('/loan/tour/object/{objectId}/check', [TourController::class, 'checkJson'])->where('objectId', '[0-9]+')->name('loan.tour.check');
+    Route::post('/loan/tour/object/{objectId}/booking/{bookingId}/cancel', [TourController::class, 'cancelBooking'])->where(['objectId' => '[0-9]+', 'bookingId' => '[0-9]+'])->name('loan.tour.cancel')->middleware('acl:update');
+
+    Route::get('/loan', [LoanController::class, 'index'])->name('loan.index');
+    // Specific routes MUST come before /loan/{id} or they get swallowed by it.
+    Route::get('/loan/create', [LoanController::class, 'create'])->name('loan.create');
+    Route::post('/loan/create', [LoanController::class, 'store'])->name('loan.store')->middleware('acl:create');
+    Route::get('/loan/search-objects', [LoanController::class, 'searchObjects'])->name('loan.search-objects');
+    Route::get('/loan/dashboard', [LoanController::class, 'dashboard'])->name('loan.dashboard');
+    Route::get('/loan/{id}', [LoanController::class, 'show'])->where('id', '[0-9]+')->name('loan.show')->middleware('acl:read');
+    Route::get('/loan/{id}/edit', [LoanController::class, 'edit'])->name('loan.edit')->middleware('acl:read');
+    Route::post('/loan/{id}/edit', [LoanController::class, 'update'])->name('loan.update')->middleware('acl:update');
+    Route::post('/loan/{id}/delete', [LoanController::class, 'delete'])->name('loan.delete')->middleware('acl:delete');
+    Route::post('/loan/{id}/add-object', [LoanController::class, 'addObject'])->name('loan.add-object')->middleware('acl:create');
+    Route::post('/loan/{id}/remove-object/{objectId}', [LoanController::class, 'removeObject'])->name('loan.remove-object')->middleware('acl:delete');
+    Route::post('/loan/{id}/transition', [LoanController::class, 'transition'])->name('loan.transition')->middleware('acl:update');
+    Route::post('/loan/{id}/extend', [LoanController::class, 'extend'])->name('loan.extend')->middleware('acl:update');
+    Route::post('/loan/{id}/return', [LoanController::class, 'returnLoan'])->name('loan.return')->middleware('acl:update');
+    Route::post('/loan/{id}/upload-document', [LoanController::class, 'uploadDocument'])->name('loan.upload-document')->middleware('acl:create');
+});

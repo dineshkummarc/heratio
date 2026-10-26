@@ -1,0 +1,183 @@
+<?php
+
+/**
+ *  - Service for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace AhgCore\Services;
+
+use Illuminate\Support\Facades\DB;
+
+abstract class BrowseService
+{
+    protected string $culture;
+
+    public function __construct(?string $culture = null)
+    {
+        $this->culture = $culture ?? (string) app()->getLocale();
+    }
+
+    /**
+     * Constrain a query to the active tenant's repository_id.
+     * Thin delegate to AhgCore\Support\TenantScope::apply() - kept on the
+     * base class so subclasses can call $this->applyTenantScope($q).
+     */
+    protected function applyTenantScope($query, string $repoIdColumn = 'repository_id'): void
+    {
+        \AhgCore\Support\TenantScope::apply($query, $repoIdColumn);
+    }
+
+    abstract protected function getTable(): string;
+
+    abstract protected function getI18nTable(): string;
+
+    abstract protected function getI18nNameColumn(): string;
+
+    protected function getBaseJoins($query)
+    {
+        $table = $this->getTable();
+
+        return $query
+            ->join($this->getI18nTable(), "{$table}.id", '=', $this->getI18nTable().'.id')
+            ->join('object', "{$table}.id", '=', 'object.id')
+            ->join('slug', "{$table}.id", '=', 'slug.object_id')
+            ->where($this->getI18nTable().'.culture', $this->culture);
+    }
+
+    protected function getBaseSelect(): array
+    {
+        $table = $this->getTable();
+        $i18nTable = $this->getI18nTable();
+        $nameCol = $this->getI18nNameColumn();
+
+        return [
+            "{$table}.id",
+            "{$i18nTable}.{$nameCol} as name",
+            'object.updated_at',
+            'slug.slug',
+        ];
+    }
+
+    protected function getSortOptions(): array
+    {
+        return [
+            'alphabetic' => __('Name'),
+            'lastUpdated' => __('Date modified'),
+            'identifier' => __('Identifier'),
+        ];
+    }
+
+    protected function applySort($query, string $sort, string $sortDir)
+    {
+        $i18nTable = $this->getI18nTable();
+        $nameCol = $this->getI18nNameColumn();
+
+        switch ($sort) {
+            case 'alphabetic':
+                $query->orderBy("{$i18nTable}.{$nameCol}", $sortDir);
+                break;
+            case 'identifier':
+                $query->orderBy('actor.description_identifier', $sortDir);
+                $query->orderBy("{$i18nTable}.{$nameCol}", $sortDir);
+                break;
+            case 'lastUpdated':
+            default:
+                $query->orderBy('object.updated_at', $sortDir);
+                break;
+        }
+
+        return $query;
+    }
+
+    protected function applySearch($query, string $subquery)
+    {
+        if ($subquery !== '') {
+            $i18nTable = $this->getI18nTable();
+            $nameCol = $this->getI18nNameColumn();
+            $query->where("{$i18nTable}.{$nameCol}", 'LIKE', "%{$subquery}%");
+        }
+
+        return $query;
+    }
+
+    public function browse(array $params): array
+    {
+        $page = max(1, (int) ($params['page'] ?? 1));
+        $limit = max(1, min(100, (int) ($params['limit'] ?? SettingHelper::hitsPerPage())));
+        $skip = ($page - 1) * $limit;
+        // Use ?? first so an absent key doesn't raise a notice; then ?: so
+        // an explicit empty-string default (controllers do `?? ''`) still
+        // falls back to the canonical default.
+        $sort = ($params['sort'] ?? '') ?: 'lastUpdated';
+        // SECURITY: $sortDir is concatenated into ORDER BY by subclasses' applySort()
+        // (orderByRaw), so it MUST be whitelisted to asc|desc - never the raw request
+        // value - or it is a SQL injection sink on the public browse endpoints.
+        $rawDir = strtolower((string) ($params['sortDir'] ?? ''));
+        $sortDir = in_array($rawDir, ['asc', 'desc'], true) ? $rawDir : (($sort === 'lastUpdated') ? 'desc' : 'asc');
+        $subquery = trim($params['subquery'] ?? '');
+
+        try {
+            $query = DB::table($this->getTable());
+            $query = $this->getBaseJoins($query);
+            $query->select($this->getBaseSelect());
+
+            $query = $this->applySearch($query, $subquery);
+
+            $total = $query->count();
+
+            $query = $this->applySort($query, $sort, $sortDir);
+
+            $rows = $query->skip($skip)->take($limit)->get();
+
+            $hits = [];
+            foreach ($rows as $row) {
+                $hits[] = $this->transformRow($row);
+            }
+
+            return [
+                'hits' => $hits,
+                'total' => $total,
+                'page' => $page,
+                'limit' => $limit,
+            ];
+        } catch (\Exception $e) {
+            \Log::error(static::class.' browse error: '.$e->getMessage());
+
+            return [
+                'hits' => [],
+                'total' => 0,
+                'page' => $page,
+                'limit' => $limit,
+            ];
+        }
+    }
+
+    protected function transformRow($row): array
+    {
+        return [
+            'id' => $row->id,
+            'name' => $row->name ?? '',
+            'updated_at' => $row->updated_at ?? '',
+            'slug' => $row->slug ?? '',
+        ];
+    }
+}

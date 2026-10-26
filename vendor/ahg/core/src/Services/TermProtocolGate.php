@@ -1,0 +1,258 @@
+<?php
+
+namespace AhgCore\Services;
+
+use AhgCore\Models\AclGroup;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+
+/**
+ * #1388 Phase 1.3 - the jurisdiction-neutral protocol-enforcement engine
+ * (sibling to {@see DisclosureGate}). Decides whether the current viewer may
+ * see a protocol-bearing term, or a record tagged with one, and provides query
+ * scopes for the retrieval choke points. Editors/administrators bypass; the
+ * per-region label sets that FEED this gate live in per-region plugins.
+ *
+ * Owner/community bypass (a viewer who belongs to the owning community) is a
+ * Phase-3 governance concern; for now only staff bypass.
+ */
+class TermProtocolGate
+{
+    /** May the current viewer see this term? */
+    public static function allowsTerm(int $termId): bool
+    {
+        if (self::staffBypass()) {
+            return true;
+        }
+
+        return ! TermProtocolService::isRestricted(TermProtocolService::effectiveCondition($termId));
+    }
+
+    /**
+     * May the current viewer see this record? Considers BOTH the terms tagged on
+     * it (inherited) AND any protocol attached directly to the object (#1406 P1);
+     * {@see TermProtocolService::conditionForRecord} unions the two.
+     */
+    public static function allowsRecord(int $objectId): bool
+    {
+        if (self::staffBypass()) {
+            return true;
+        }
+
+        return ! TermProtocolService::isRestricted(TermProtocolService::conditionForRecord($objectId));
+    }
+
+    /**
+     * May the current viewer see this object, considering ONLY protocols attached
+     * directly to it (object_protocol), ignoring inherited-term protocols. Use at
+     * choke points that operate on a bare object id where term inheritance has
+     * already been evaluated (e.g. a digital_object download).
+     */
+    public static function allowsObject(int $targetId, string $targetType = 'information_object'): bool
+    {
+        if (self::staffBypass()) {
+            return true;
+        }
+
+        return ! TermProtocolService::isRestricted(TermProtocolService::conditionForObject($targetId, $targetType));
+    }
+
+    /**
+     * #1406 P3 - the AI fence (#1388 Principle 5). Whether a record's content may
+     * be handed to an AI model (NER, summary, translate, HTR/OCR, embeddings,
+     * vision). FALSE when a community protocol restricts the record.
+     *
+     * Unlike {@see allowsRecord()} this is DATA-centric and deliberately does NOT
+     * staff-bypass: feeding sacred/secret material to a model (which may store
+     * embeddings, extract entities, or ship bytes to a gateway) is a data-
+     * sovereignty breach regardless of operator privilege. Open records - the
+     * default - are eligible, so this is a no-op for material carrying no protocol.
+     */
+    public static function isModelEligible(int $objectId): bool
+    {
+        return ! TermProtocolService::isRestricted(TermProtocolService::conditionForRecord($objectId));
+    }
+
+    /**
+     * Retrieval scope: hide protocol-restricted terms from guests/non-editors.
+     * $idColumn is the term id column of the outer query (e.g. 'term.id').
+     */
+    public static function addTermVisibilityCriteria($query, string $idColumn = 'term.id'): mixed
+    {
+        if (self::staffBypass() || ! self::protocolTableExists()) {
+            return $query;
+        }
+        $query->whereNotExists(function ($sub) use ($idColumn) {
+            $sub->select(DB::raw(1))
+                ->from('term_protocol as tp')
+                ->whereColumn('tp.term_id', $idColumn)
+                ->whereIn('tp.access_condition', TermProtocolService::RESTRICTED);
+        });
+
+        return $query;
+    }
+
+    /**
+     * Retrieval scope: hide records tagged with a protocol-restricted term from
+     * guests/non-editors. $idColumn is the object id column (e.g. 'io.id').
+     */
+    public static function excludeRestrictedRecords($query, string $idColumn = 'io.id'): mixed
+    {
+        if (self::staffBypass()) {
+            return $query;
+        }
+        // (a) records tagged with a protocol-restricted TERM (inherited)
+        if (self::protocolTableExists() && self::hasRestrictingRows('term_protocol', 'access_condition')) {
+            $query->whereNotExists(function ($sub) use ($idColumn) {
+                $sub->select(DB::raw(1))
+                    ->from('object_term_relation as otrx')
+                    ->join('term_protocol as tpx', 'tpx.term_id', '=', 'otrx.term_id')
+                    ->whereColumn('otrx.object_id', $idColumn)
+                    ->whereIn('tpx.access_condition', TermProtocolService::RESTRICTED);
+            });
+        }
+        // (b) records with a restricted protocol attached DIRECTLY (#1406 P1)
+        if (TermProtocolService::objectProtocolTableExists() && self::hasRestrictingRows('object_protocol', 'access_condition')) {
+            $query->whereNotExists(function ($sub) use ($idColumn) {
+                $sub->select(DB::raw(1))
+                    ->from('object_protocol as opx')
+                    ->where('opx.target_type', 'information_object')
+                    ->whereColumn('opx.target_id', $idColumn)
+                    ->whereIn('opx.access_condition', TermProtocolService::RESTRICTED);
+            });
+        }
+        // (c) records with a restricted ICIP TK/BC label applied via ahg-icip (#1406 P2)
+        //
+        // Checked against APPLIED labels, not the label vocabulary: the type
+        // table ships ~22 Local Contexts labels of which several are restricting,
+        // so testing it alone would keep this gate on for every install even
+        // when not one record has ever been labelled (atom.theahg.co.za has 22
+        // types and 0 applied labels).
+        if (TermProtocolService::icipLabelTablesExist() && self::hasAppliedRestrictingLabel()) {
+            $query->whereNotExists(function ($sub) use ($idColumn) {
+                $sub->select(DB::raw(1))
+                    ->from('icip_tk_label as ilx')
+                    ->join('icip_tk_label_type as iltx', 'iltx.id', '=', 'ilx.label_type_id')
+                    ->whereColumn('ilx.information_object_id', $idColumn)
+                    ->whereIn('iltx.default_access_condition', TermProtocolService::RESTRICTED);
+            });
+        }
+
+        return $query;
+    }
+
+    /**
+     * Whether the term_protocol table is present. Cached per request. When it's
+     * absent (fresh install, CI schema dump that predates the migration) the
+     * query scopes no-op - no table means no protocols to enforce, and a
+     * whereNotExists against a missing table would 500 the whole page.
+     */
+    private static ?bool $protocolTable = null;
+
+    /**
+     * Does this protocol table hold ANY row that actually restricts?
+     *
+     * A whereNotExists against a table with no restricting row is always true -
+     * it filters nothing, and only makes the planner walk a correlated subquery
+     * per candidate row. On a browse count over 454,393 records the three gates
+     * together cost ~1,792ms (3,719ms with them, 1,927ms without) while all
+     * three tables were EMPTY, so every one of those milliseconds enforced
+     * nothing. Skipping a gate that cannot exclude anything is exactly
+     * equivalent, not an approximation.
+     *
+     * Memoised per REQUEST only, never across requests: a protocol applied by
+     * an editor must take effect on the very next page load. PHP-FPM discards
+     * statics between requests, which is the property being relied on here -
+     * do not move this into the cache layer.
+     *
+     * @var array<string, bool>
+     */
+    private static array $restricting = [];
+
+    /**
+     * Drop the per-request memo.
+     *
+     * Only needed where one PHP process serves what would otherwise be several
+     * requests - i.e. tests. A test that applies a protocol after an earlier
+     * case has already cached "nothing restricts" would otherwise find the gate
+     * short-circuited and see the record it expects to be hidden. Mirrors
+     * AclService::forgetUser(). Not for use in request handling: under PHP-FPM
+     * the static dies with the request, which is the intended lifetime.
+     */
+    public static function forgetMemo(): void
+    {
+        self::$restricting = [];
+        self::$protocolTable = null;
+    }
+
+    private static function hasRestrictingRows(string $table, string $column): bool
+    {
+        $key = $table.'.'.$column;
+        if (array_key_exists($key, self::$restricting)) {
+            return self::$restricting[$key];
+        }
+
+        try {
+            self::$restricting[$key] = DB::table($table)
+                ->whereIn($column, TermProtocolService::RESTRICTED)
+                ->limit(1)
+                ->exists();
+        } catch (\Throwable $e) {
+            // Unreadable for any reason -> assume it restricts, so the gate
+            // stays on. This is a disclosure control: fail closed.
+            self::$restricting[$key] = true;
+        }
+
+        return self::$restricting[$key];
+    }
+
+    /** Is there at least one APPLIED ICIP label whose type restricts? */
+    private static function hasAppliedRestrictingLabel(): bool
+    {
+        if (array_key_exists('icip.applied', self::$restricting)) {
+            return self::$restricting['icip.applied'];
+        }
+
+        try {
+            self::$restricting['icip.applied'] = DB::table('icip_tk_label as ilx')
+                ->join('icip_tk_label_type as iltx', 'iltx.id', '=', 'ilx.label_type_id')
+                ->whereIn('iltx.default_access_condition', TermProtocolService::RESTRICTED)
+                ->limit(1)
+                ->exists();
+        } catch (\Throwable $e) {
+            self::$restricting['icip.applied'] = true;   // fail closed
+        }
+
+        return self::$restricting['icip.applied'];
+    }
+
+    /** Drop the per-request memo (tests, and after writing a protocol). */
+    public static function forgetRestricting(): void
+    {
+        self::$restricting = [];
+    }
+
+    private static function protocolTableExists(): bool
+    {
+        if (self::$protocolTable === null) {
+            try {
+                self::$protocolTable = Schema::hasTable('term_protocol');
+            } catch (\Throwable $e) {
+                self::$protocolTable = false;
+            }
+        }
+
+        return self::$protocolTable;
+    }
+
+    private static function staffBypass(): bool
+    {
+        $user = AclService::getUser();
+        if (! $user) {
+            return false;
+        }
+        $groups = AclService::getUserGroups($user->id ?? null);
+
+        return in_array(AclGroup::ADMINISTRATOR_ID, $groups) || in_array(AclGroup::EDITOR_ID, $groups);
+    }
+}

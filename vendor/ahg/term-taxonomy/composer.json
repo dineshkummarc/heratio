@@ -1,0 +1,21 @@
+{
+    "name": "ahg/term-taxonomy",
+    "description": "Term and taxonomy browse and management for Heratio (with SKOS export + cross-vocab matches + SHACL)",
+    "type": "library",
+    "license": "AGPL-3.0-or-later",
+    "require": {
+        "ahg/core": "@dev"
+    },
+    "autoload": {
+        "psr-4": {
+            "AhgTermTaxonomy\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "AhgTermTaxonomy\\Providers\\AhgTermTaxonomyServiceProvider"
+            ]
+        }
+    }
+}

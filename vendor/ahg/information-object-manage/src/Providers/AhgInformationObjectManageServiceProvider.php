@@ -1,0 +1,137 @@
+<?php
+
+namespace AhgInformationObjectManage\Providers;
+
+use Illuminate\Support\ServiceProvider;
+
+class AhgInformationObjectManageServiceProvider extends ServiceProvider
+{
+    public function register(): void
+    {
+        //
+    }
+
+    public function boot(): void
+    {
+        \Illuminate\Support\Facades\Route::middleware('web')
+            ->group(__DIR__ . '/../../routes/web.php');
+        $this->loadViewsFrom(__DIR__ . '/../../resources/views', 'ahg-io-manage');
+        $this->loadViewsFrom(__DIR__ . '/../../resources/views', 'ahg-information-object-manage');
+        $this->loadMigrationsFrom(__DIR__ . '/../../database/migrations');
+
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                \AhgInformationObjectManage\Console\Commands\ImportArchivesCsvCommand::class,
+            ]);
+        }
+
+        $this->ensureSecurityTable();
+        $this->ensureTemplateExtensions();
+
+        // #1355 - provenance controlled vocabularies live in ahg_dropdown so
+        // site admins manage them via the Dropdown Manager (skips itself once
+        // seeded; ProvenanceService falls back to hardcoded lists until then).
+        try {
+            \AhgInformationObjectManage\Services\ProvenanceDropdownSeeder::seed();
+        } catch (\Throwable $e) {
+            // No DB or partial schema - seeder retries on next boot.
+        }
+
+        $this->seedSpectrumDropdowns();
+    }
+
+    /**
+     * #1355 - move the SPECTRUM / GRAP heritage-form controlled vocabularies
+     * (recognition status, measurement basis, acquisition method, heritage
+     * significance, condition rating) into admin-managed ahg_dropdown
+     * taxonomies. Idempotent + guarded so a schema hiccup never kills boot.
+     */
+    private function seedSpectrumDropdowns(): void
+    {
+        try {
+            \AhgInformationObjectManage\Services\SpectrumDropdownSeeder::seed();
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('[ahg-io-manage] seedSpectrumDropdowns failed: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * #98 Phase 2 - install ahg_io_dacs / ahg_io_rad / ahg_io_mods
+     * sidecar tables + seed the per-chapter / per-area / per-element
+     * element_visibility flags so the show-{standard}.blade.php
+     * templates can render only the operator-enabled sections.
+     */
+    private function ensureTemplateExtensions(): void
+    {
+        try {
+            $alreadyInstalled =
+                \Illuminate\Support\Facades\Schema::hasTable('ahg_io_dacs')
+                && \Illuminate\Support\Facades\Schema::hasTable('ahg_io_rad')
+                && \Illuminate\Support\Facades\Schema::hasTable('ahg_io_mods');
+            if ($alreadyInstalled) return;
+
+            $sql = file_get_contents(__DIR__ . '/../../database/install_template_extensions.sql');
+            if (!is_string($sql) || trim($sql) === '') return;
+            \Illuminate\Support\Facades\DB::unprepared($sql);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('[ahg-io-manage] ensureTemplateExtensions failed: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Idempotent first-boot install for the ahg_io_security sidecar.
+     * Mirrors the convention used by ahg-dropdown-manage / ahg-registry -
+     * cheap Schema::hasTable() guard + CREATE TABLE IF NOT EXISTS so a
+     * fresh install lights up the security panel without a manual migrate.
+     */
+    private function ensureSecurityTable(): void
+    {
+        try {
+            if (!\Illuminate\Support\Facades\Schema::hasTable('ahg_io_security')) {
+                \Illuminate\Support\Facades\DB::unprepared(<<<'SQL'
+                    CREATE TABLE IF NOT EXISTS ahg_io_security (
+                        object_id                       INT          NOT NULL PRIMARY KEY,
+                        security_classification_id      INT UNSIGNED NULL,
+                        security_reason                 TEXT         NULL,
+                        security_review_date            DATE         NULL,
+                        security_declassify_date        DATE         NULL,
+                        security_handling_instructions  TEXT         NULL,
+                        security_inherit_to_children    TINYINT(1)   NOT NULL DEFAULT 0,
+                        watermark_type_id               INT UNSIGNED NULL,
+                        created_at                      DATETIME     NULL,
+                        updated_at                      DATETIME     NULL,
+                        CONSTRAINT fk_ahg_io_security_object
+                            FOREIGN KEY (object_id) REFERENCES information_object(id) ON DELETE CASCADE,
+                        CONSTRAINT fk_ahg_io_security_class
+                            FOREIGN KEY (security_classification_id) REFERENCES security_classification(id) ON DELETE SET NULL,
+                        CONSTRAINT fk_ahg_io_security_wm
+                            FOREIGN KEY (watermark_type_id) REFERENCES watermark_type(id) ON DELETE SET NULL
+                    );
+                SQL);
+                return;
+            }
+            // Forward-migrate existing installs: add the watermark_type_id
+            // column if it predates the watermark UI block.
+            if (!\Illuminate\Support\Facades\Schema::hasColumn('ahg_io_security', 'watermark_type_id')) {
+                \Illuminate\Support\Facades\DB::statement('ALTER TABLE ahg_io_security ADD COLUMN watermark_type_id INT UNSIGNED NULL');
+                try {
+                    \Illuminate\Support\Facades\DB::statement(
+                        'ALTER TABLE ahg_io_security ADD CONSTRAINT fk_ahg_io_security_wm '
+                        . 'FOREIGN KEY (watermark_type_id) REFERENCES watermark_type(id) ON DELETE SET NULL'
+                    );
+                } catch (\Throwable $e) { /* FK may already exist; skip */ }
+            }
+            // Forward-migrate: persistent "Make this the default for existing
+            // children" flag (sticky version of the form's updateDescendants
+            // checkbox - keeps the box visibly ticked across reloads).
+            if (!\Illuminate\Support\Facades\Schema::hasColumn('ahg_io_security', 'update_descendants_default')) {
+                \Illuminate\Support\Facades\DB::statement(
+                    'ALTER TABLE ahg_io_security ADD COLUMN update_descendants_default TINYINT(1) NOT NULL DEFAULT 0'
+                );
+            }
+        } catch (\Throwable $e) {
+            // Don't kill app boot on a schema hiccup; surface in the log.
+            \Illuminate\Support\Facades\Log::warning('[ahg-io-manage] ensureSecurityTable failed: ' . $e->getMessage());
+        }
+    }
+}

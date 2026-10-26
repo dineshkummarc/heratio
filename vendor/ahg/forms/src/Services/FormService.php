@@ -1,0 +1,320 @@
+<?php
+
+/**
+ * FormService - Service for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace AhgForms\Services;
+
+use Illuminate\Support\Facades\DB;
+
+class FormService
+{
+    public function getTemplates(?string $type = null): \Illuminate\Support\Collection
+    {
+        $query = DB::table('ahg_form_template')->orderBy('name');
+
+        if ($type) {
+            $query->where('form_type', $type);
+        }
+
+        return $query->get();
+    }
+
+    public function getTemplate(int $id): ?object
+    {
+        $template = DB::table('ahg_form_template')->where('id', $id)->first();
+
+        if ($template) {
+            $template->fields = DB::table('ahg_form_field')
+                ->where('template_id', $id)
+                ->orderBy('sort_order')
+                ->get();
+        }
+
+        return $template;
+    }
+
+    public function createTemplate(array $data): int
+    {
+        $insertData = [
+            'name' => $data['name'],
+            'description' => $data['description'] ?? null,
+            'form_type' => $data['form_type'] ?? 'information_object',
+            'config' => isset($data['config']) ? json_encode($data['config']) : null,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ];
+
+        return DB::table('ahg_form_template')->insertGetId($insertData);
+    }
+
+    public function updateTemplate(int $id, array $data): void
+    {
+        $updateData = ['updated_at' => now()];
+
+        if (isset($data['name'])) {
+            $updateData['name'] = $data['name'];
+        }
+        if (isset($data['description'])) {
+            $updateData['description'] = $data['description'];
+        }
+        if (isset($data['config'])) {
+            $updateData['config'] = is_array($data['config']) ? json_encode($data['config']) : $data['config'];
+        }
+        if (isset($data['is_default'])) {
+            $updateData['is_default'] = $data['is_default'] ? 1 : 0;
+        }
+
+        DB::table('ahg_form_template')->where('id', $id)->update($updateData);
+    }
+
+    public function deleteTemplate(int $id): void
+    {
+        DB::table('ahg_form_field')->where('template_id', $id)->delete();
+        DB::table('ahg_form_template')->where('id', $id)->delete();
+    }
+
+    public function cloneTemplate(int $sourceId, ?string $newName = null): int
+    {
+        $source = $this->getTemplate($sourceId);
+
+        if (! $source) {
+            throw new \Exception('Source template not found');
+        }
+
+        $newId = DB::table('ahg_form_template')->insertGetId([
+            'name' => $newName ?? $source->name.' (copy)',
+            'description' => $source->description,
+            'form_type' => $source->form_type,
+            'config' => $source->config,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        if ($source->fields) {
+            foreach ($source->fields as $field) {
+                DB::table('ahg_form_field')->insert([
+                    'template_id' => $newId,
+                    'field_name' => $field->field_name,
+                    'field_type' => $field->field_type,
+                    'label' => $field->label,
+                    'atom_field' => $field->atom_field ?? null,
+                    'help_text' => $field->help_text ?? null,
+                    'placeholder' => $field->placeholder ?? null,
+                    'default_value' => $field->default_value ?? null,
+                    'sort_order' => $field->sort_order,
+                    'is_required' => $field->is_required,
+                    'is_readonly' => $field->is_readonly ?? 0,
+                    'created_at' => now(),
+                ]);
+            }
+        }
+
+        return $newId;
+    }
+
+    public function exportTemplate(int $id): array
+    {
+        $template = $this->getTemplate($id);
+
+        if (! $template) {
+            return [];
+        }
+
+        return [
+            'name' => $template->name,
+            'description' => $template->description,
+            'form_type' => $template->form_type,
+            'config' => $template->config,
+            'fields' => $template->fields ? $template->fields->toArray() : [],
+        ];
+    }
+
+    public function importTemplate(array $data, ?string $name = null): int
+    {
+        $id = $this->createTemplate([
+            'name' => $name ?? $data['name'] ?? 'Imported Template',
+            'description' => $data['description'] ?? null,
+            'form_type' => $data['form_type'] ?? 'information_object',
+            'config' => $data['config'] ?? null,
+        ]);
+
+        foreach ($data['fields'] ?? [] as $i => $field) {
+            DB::table('ahg_form_field')->insert([
+                'template_id' => $id,
+                'field_name' => $field['field_name'] ?? 'field_'.$i,
+                'field_type' => $field['field_type'] ?? 'text',
+                'label' => $field['label'] ?? 'Field '.($i + 1),
+                'atom_field' => $field['atom_field'] ?? null,
+                'sort_order' => $field['sort_order'] ?? $i,
+                'is_required' => $field['is_required'] ?? 0,
+                'created_at' => now(),
+            ]);
+        }
+
+        return $id;
+    }
+
+    public function getFields(int $templateId): \Illuminate\Support\Collection
+    {
+        return DB::table('ahg_form_field')
+            ->where('template_id', $templateId)
+            ->orderBy('sort_order')
+            ->get();
+    }
+
+    public function getAssignments(): \Illuminate\Support\Collection
+    {
+        return DB::table('ahg_form_assignment as a')
+            ->leftJoin('ahg_form_template as t', 'a.template_id', '=', 't.id')
+            ->select('a.*', 't.name as template_name', 't.form_type')
+            ->orderBy('a.priority')
+            ->get();
+    }
+
+    public function createAssignment(array $data): int
+    {
+        $data['created_at'] = now();
+
+        return DB::table('ahg_form_assignment')->insertGetId($data);
+    }
+
+    public function deleteAssignment(int $id): void
+    {
+        DB::table('ahg_form_assignment')->where('id', $id)->delete();
+    }
+
+    /**
+     * Resolve the best-matching template for a form_type given an entity context.
+     *
+     * Order of precedence:
+     *   1. Active assignment whose repository_id / level_of_description_id / collection_id all match → highest priority wins
+     *   2. Active assignment matching any subset of the context (priority order)
+     *   3. is_default=1 active template for this form_type (global fallback)
+     *   4. null (no template - caller should fall back to standard edit)
+     *
+     * @param  string  $formType  e.g. 'information_object', 'actor', 'accession'
+     * @param  array<string,mixed>|null  $context  optional: ['repository_id'=>, 'level_of_description_id'=>, 'collection_id'=>]
+     */
+    public function resolveTemplate(string $formType, ?array $context = null): ?object
+    {
+        $ctx = $context ?? [];
+
+        // 1. Try assignments. Higher priority (lower number) wins; ties broken by specificity.
+        $assignments = DB::table('ahg_form_assignment as a')
+            ->join('ahg_form_template as t', 'a.template_id', '=', 't.id')
+            ->where('t.form_type', $formType)
+            ->where('a.is_active', 1)
+            ->where('t.is_active', 1)
+            ->select('a.*', 't.name', 't.config_json', 't.config', 't.descriptive_standard')
+            ->orderBy('a.priority')
+            ->get();
+
+        foreach ($assignments as $a) {
+            $matches = true;
+            if (! empty($a->repository_id) && (int) $a->repository_id !== (int) ($ctx['repository_id'] ?? 0)) {
+                $matches = false;
+            }
+            if ($matches && ! empty($a->level_of_description_id) && (int) $a->level_of_description_id !== (int) ($ctx['level_of_description_id'] ?? 0)) {
+                $matches = false;
+            }
+            if ($matches && ! empty($a->collection_id) && (int) $a->collection_id !== (int) ($ctx['collection_id'] ?? 0)) {
+                $matches = false;
+            }
+            if ($matches) {
+                return $this->getTemplate((int) $a->template_id);
+            }
+        }
+
+        // 2. Global default
+        $default = DB::table('ahg_form_template')
+            ->where('form_type', $formType)
+            ->where('is_default', 1)
+            ->where('is_active', 1)
+            ->orderByDesc('id')
+            ->first();
+
+        return $default ? $this->getTemplate((int) $default->id) : null;
+    }
+
+    /**
+     * List all active templates for a form_type - used to render a picker on the standard edit page.
+     */
+    public function getActiveTemplates(string $formType): \Illuminate\Support\Collection
+    {
+        return DB::table('ahg_form_template')
+            ->where('form_type', $formType)
+            ->where('is_active', 1)
+            ->orderByDesc('is_default')
+            ->orderBy('name')
+            ->get();
+    }
+
+    /**
+     * Field mappings for a template - keyed by field_id.
+     *
+     * @return array<int,array<int,object>> map: field_id => list of mapping rows (a field can map to multiple columns)
+     */
+    public function getMappingsForTemplate(int $templateId): array
+    {
+        $rows = DB::table('ahg_form_field_mapping as m')
+            ->join('ahg_form_field as f', 'm.field_id', '=', 'f.id')
+            ->where('f.template_id', $templateId)
+            ->select('m.*', 'f.field_name')
+            ->get();
+
+        $out = [];
+        foreach ($rows as $r) {
+            $out[(int) $r->field_id][] = $r;
+        }
+
+        return $out;
+    }
+
+    public function getStatistics(): array
+    {
+        $templatesByType = DB::table('ahg_form_template')
+            ->select('form_type', DB::raw('COUNT(*) as cnt'))
+            ->groupBy('form_type')
+            ->pluck('cnt', 'form_type')
+            ->toArray();
+
+        $activeAssignments = DB::table('ahg_form_assignment')->count();
+
+        $pendingDrafts = DB::table('ahg_form_draft')->count();
+
+        $submissions30Days = DB::table('ahg_form_submission_log')
+            ->where('submitted_at', '>=', now()->subDays(30))
+            ->count();
+
+        return [
+            'templates' => DB::table('ahg_form_template')->count(),
+            'templates_by_type' => $templatesByType,
+            'fields' => DB::table('ahg_form_field')->count(),
+            'assignments' => DB::table('ahg_form_assignment')->count(),
+            'active_assignments' => $activeAssignments,
+            'pending_drafts' => $pendingDrafts,
+            'submissions_30_days' => $submissions30Days,
+        ];
+    }
+}

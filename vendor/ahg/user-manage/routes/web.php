@@ -1,0 +1,94 @@
+<?php
+
+use AhgUserManage\Controllers\UserAclController;
+use AhgUserManage\Controllers\UserController;
+use Illuminate\Support\Facades\Route;
+
+// Per-user plugin preferences - admin + editor only. Authenticated-only
+// users (Contributor / Translator / Authenticated) don't get to manage
+// their own plugin nav clutter; admins still override at
+// /user/{slug}/plugins (capability layer, separate route below).
+Route::middleware(['web', 'auth'])->group(function () {
+    Route::get('/user/profile/plugins', [UserController::class, 'pluginPreferences'])
+        ->name('user.plugin-preferences');
+    Route::post('/user/profile/plugins', [UserController::class, 'savePluginPreferences'])
+        ->name('user.plugin-preferences.save');
+});
+
+Route::middleware('admin')->group(function () {
+
+    // Per-user plugin GRANTS (capability - admin sets, not user)
+    Route::get('/user/{slug}/plugins', [UserController::class, 'pluginGrants'])
+        ->name('user.plugin-grants');
+    Route::post('/user/{slug}/plugins', [UserController::class, 'savePluginGrants'])
+        ->name('user.plugin-grants.save');
+
+    Route::get('/admin/users', [UserController::class, 'browse'])->name('user.browse');
+    Route::get('/user/list', [UserController::class, 'browse'])->name('user.list'); // AtoM menu alias
+    Route::get('/user/browse', [UserController::class, 'browse']); // Heratio alias
+
+    Route::get('/user/add', [UserController::class, 'create'])->name('user.add');
+    Route::post('/user/add', [UserController::class, 'store'])->name('user.store')->middleware('acl:create');
+
+    Route::get('/user/{slug}/edit', [UserController::class, 'edit'])->name('user.edit')
+        ->where('slug', '(?!profile|password|passwordEdit|passwordReset|register|clipboard|registration|view|verify|add|list|browse)[a-zA-Z0-9][a-zA-Z0-9._-]*');
+    Route::post('/user/{slug}/edit', [UserController::class, 'update'])->name('user.update')->middleware('acl:update')
+        ->where('slug', '(?!profile|password|passwordEdit|passwordReset|register|clipboard|registration|view|verify|add|list|browse)[a-zA-Z0-9][a-zA-Z0-9._-]*');
+
+    Route::get('/user/{slug}/delete', [UserController::class, 'confirmDelete'])->name('user.confirmDelete')
+        ->where('slug', '(?!profile|password|register|clipboard|registration|view|verify|add|list|browse)[a-zA-Z0-9][a-zA-Z0-9._-]*');
+    Route::delete('/user/{slug}/delete', [UserController::class, 'destroy'])->name('user.destroy')->middleware('acl:delete')
+        ->where('slug', '(?!profile|password|register|clipboard|registration|view|verify|add|list|browse)[a-zA-Z0-9][a-zA-Z0-9._-]*');
+
+    // ACL permission pages (#52). Routes were registered pointing at
+    // UserController methods that didn't exist - repointed at the new
+    // UserAclController which mirrors the group ACL editor pattern from
+    // /admin/acl/group/{id}/{tab}. Index routes redirect to the matching
+    // edit form (the AtoM-style cross-group permissions matrix is a
+    // future enhancement). The editResearcherAcl route stays pointed at
+    // UserController for now - researcher-acl is its own concept and the
+    // existing stub view (60 lines, not the IO/Actor/Repo/Term shape)
+    // suggests a different design that #52 doesn't cover.
+    Route::get('/user/{slug}/indexActorAcl', [UserAclController::class, 'indexActorAcl'])->name('user.indexActorAcl');
+    Route::match(['get', 'post'], '/user/{slug}/editActorAcl', [UserAclController::class, 'editActorAcl'])->name('user.editActorAcl');
+
+    Route::get('/user/{slug}/indexInformationObjectAcl', [UserAclController::class, 'indexInformationObjectAcl'])->name('user.indexInformationObjectAcl');
+    Route::match(['get', 'post'], '/user/{slug}/editInformationObjectAcl', [UserAclController::class, 'editInformationObjectAcl'])->name('user.editInformationObjectAcl');
+
+    Route::get('/user/{slug}/indexRepositoryAcl', [UserAclController::class, 'indexRepositoryAcl'])->name('user.indexRepositoryAcl');
+    Route::match(['get', 'post'], '/user/{slug}/editRepositoryAcl', [UserAclController::class, 'editRepositoryAcl'])->name('user.editRepositoryAcl');
+
+    Route::get('/user/{slug}/indexTermAcl', [UserAclController::class, 'indexTermAcl'])->name('user.indexTermAcl');
+    Route::match(['get', 'post'], '/user/{slug}/editTermAcl', [UserAclController::class, 'editTermAcl'])->name('user.editTermAcl');
+
+    Route::match(['get', 'post'], '/user/{slug}/editResearcherAcl', [UserController::class, 'editResearcherAcl'])->name('user.editResearcherAcl'); // researcher-acl is a separate stub - out of #52 scope
+
+    Route::get('/user/{slug}', [UserController::class, 'show'])
+        ->name('user.show')
+        ->where('slug', '(?!register|profile|password|passwordEdit|passwordReset|add|list|browse|clipboard|registration|view|verify)[a-zA-Z0-9][a-zA-Z0-9._-]*');
+});
+Route::match(['get', 'post'], '/user/register', [UserController::class, 'register'])->name('user.register');
+Route::get('/user/verify/{token}', [UserController::class, 'verify'])->name('user.verify');
+// Admin-only: userView() reuses show(), which populates username, email,
+// roles, security clearance AND live REST/OAI API keys. Previously anonymous
+// (it sat between the admin and auth groups); gated to admins to match the
+// canonical /user/{slug} route it duplicates.
+Route::get('/user/view/{slug}', [UserController::class, 'userView'])->name('user.view')->middleware('admin');
+
+// Authenticated user self-service routes
+Route::middleware('auth')->group(function () {
+    Route::get('/user/profile', [UserController::class, 'profile'])->name('user.profile');
+    Route::get('/user/profile/edit', [UserController::class, 'profileEdit'])->name('user.profile.edit');
+    Route::get('/user/passwordEdit', [UserController::class, 'passwordEdit'])->name('user.passwordEdit');
+    Route::match(['get', 'post'], '/user/passwordReset', [UserController::class, 'passwordReset'])->name('user.passwordReset');
+    Route::get('/user/clipboard', [UserController::class, 'clipboard'])->name('user.clipboard');
+});
+
+// Legacy browse redirect
+Route::get('/user', fn () => redirect('/admin/users', 301));
+
+Route::middleware('admin')->group(function () {
+    Route::get('/user/registration/pending', [UserController::class, 'registrationPending'])->name('user.registration.pending');
+    Route::post('/user/registration/approve', [UserController::class, 'registrationApprove'])->name('user.registration.approve')->middleware('acl:update');
+    Route::post('/user/registration/reject', [UserController::class, 'registrationReject'])->name('user.registration.reject')->middleware('acl:delete');
+});

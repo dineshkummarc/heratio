@@ -1,0 +1,929 @@
+@extends('theme::layouts.1col')
+
+@section('title', ($accession ? 'Edit' : 'Add new') . ' accession record')
+
+@section('content')
+  <div class="multiline-header d-flex flex-column mb-3">
+    <h1 class="mb-0" aria-describedby="heading-label">
+      {{ $accession ? __('Edit accession record') : __('Add new accession record') }}
+    </h1>
+    @if($accession)
+      <span class="small" id="heading-label">{{ $accession->title ?: $accession->identifier }}</span>
+    @endif
+  </div>
+
+  @if(request('accession'))
+    <div class="alert alert-info" role="alert">
+      You are creating an accrual to accession {{ request('accession') }}
+    </div>
+  @endif
+
+  <form method="POST"
+        action="{{ $accession ? route('accession.update', $accession->slug) : route('accession.store') }}"
+        id="editForm" autocomplete="off">
+    @csrf
+
+    <div class="accordion mb-3">
+
+      {{-- ===== Basic info ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="basic-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#basic-collapse" aria-expanded="false" aria-controls="basic-collapse">
+            {{ __('Basic info') }}
+          </button>
+        </h2>
+        <div id="basic-collapse" class="accordion-collapse collapse" aria-labelledby="basic-heading">
+          <div class="accordion-body">
+            <div class="mb-3">
+              <label for="identifier" class="form-label">{{ __('Accession number') }} <span class="form-required text-danger">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <input type="text" name="identifier" id="identifier" class="form-control @error('identifier') is-invalid @enderror" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" data-lpignore="true" data-1p-ignore="true" data-form-type="other"
+                     value="{{ old('identifier', $accession->identifier ?? ($defaultIdentifier ?? '')) }}">
+              @error('identifier') <div class="invalid-feedback">{{ $message }}</div> @enderror
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="Accession number should be a combination of values recorded in the field and should be a unique accession number for the repository"><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <!-- Alternative identifier(s) -->
+            <div class="text-end mb-3">
+              <button class="btn atom-btn-white text-wrap collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#alternative-identifiers-table" aria-expanded="false" aria-controls="alternative-identifiers-table">
+                <i class="fas fa-plus me-1" aria-hidden="true"></i>
+                {{ __('Add alternative identifier(s)') }}
+              </button>
+            </div>
+
+            <div id="alternative-identifiers-table" class="collapse">
+              <h3 class="fs-6 mb-2">{{ __('Alternative identifier(s)') }}</h3>
+              <div class="table-responsive mb-2">
+                <table class="table table-bordered mb-0" id="altids-table">
+                  <thead>
+                    <tr>
+                      <th id="alt-identifiers-type-head" class="w-30">{{ __('Type') }}</th>
+                      <th id="alt-identifiers-identifier-head" class="w-35">{{ __('Identifier') }}</th>
+                      <th id="alt-identifiers-note-head" class="w-35">{{ __('Notes') }}</th>
+                      <th><span class="visually-hidden">{{ __('Delete') }}</span></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        <select name="alternativeIdentifiers[0][identifierType]" class="form-select form-select-sm" aria-labelledby="alt-identifiers-type-head" aria-describedby="alt-identifiers-table-help">
+                          <option value=""></option>
+                          @foreach($formChoices['altIdentifierTypes'] ?? [] as $ait)
+                            <option value="{{ $ait->id }}">{{ $ait->name }}</option>
+                          @endforeach
+                        </select>
+                      </td>
+                      <td>
+                        <input type="text" name="alternativeIdentifiers[0][identifier]" class="form-control form-control-sm" aria-labelledby="alt-identifiers-identifier-head" aria-describedby="alt-identifiers-table-help">
+                      </td>
+                      <td>
+                        <textarea name="alternativeIdentifiers[0][note]" class="form-control form-control-sm" rows="1" aria-labelledby="alt-identifiers-note-head" aria-describedby="alt-identifiers-table-help"></textarea>
+                      </td>
+                      <td>
+                        <button type="button" class="btn atom-btn-white remove-altid-row">
+                          <i class="fas fa-times" aria-hidden="true"></i>
+                          <span class="visually-hidden">{{ __('Delete row') }}</span>
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                  <tfoot>
+                    <tr>
+                      <td colspan="4">
+                        <button type="button" class="btn atom-btn-white" id="add-altid-row">
+                          <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+                        </button>
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+              <div class="form-text mb-3" id="alt-identifiers-table-help">
+                <strong>{{ __('Type:') }}</strong> {{ __('Enter a name for the alternative identifier field that indicates its purpose and usage.') }}<br><strong>{{ __('Identifier:') }}</strong> {{ __('Enter a legacy reference code, alternative identifier, or any other alpha-numeric string associated with the record.') }}
+              </div>
+            </div>
+
+            <div class="mb-3">
+              <label for="date" class="form-label">
+                {{ __('Acquisition date') }}
+                <span class="form-required" title="{{ __('This is a mandatory element.') }}">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <input type="date" name="date" id="date" class="form-control @error('date') is-invalid @enderror"
+                     value="{{ old('date', $accession->date ?? '') }}">
+              @error('date') <div class="invalid-feedback">{{ $message }}</div> @enderror
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="Accession date represents the date of receipt of the materials and is added during the donation process."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="source_of_acquisition" class="form-label">
+                {{ __('Immediate source of acquisition') }}
+                <span class="form-required" title="{{ __('This is a mandatory element.') }}">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <textarea name="source_of_acquisition" id="source_of_acquisition" class="form-control" rows="3">{{ old('source_of_acquisition', $accession->source_of_acquisition ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="Identify immediate source of acquisition or transfer, and date and method of acquisition IF the information is NOT confidential."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="location_information" class="form-label">
+                {{ __('Location information') }}
+                <span class="form-required" title="{{ __('This is a mandatory element.') }}">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+              <textarea name="location_information" id="location_information" class="form-control" rows="3">{{ old('location_information', $accession->location_information ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="A description of the physical location in the repository where the accession can be found."><i class="fas fa-question-circle"></i></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {{-- ===== Donor/Transferring body area ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="donor-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#donor-collapse" aria-expanded="false" aria-controls="donor-collapse">
+            {{ __('Donor/Transferring body area') }}
+          </button>
+        </h2>
+        <div id="donor-collapse" class="accordion-collapse collapse" aria-labelledby="donor-heading">
+          <div class="accordion-body">
+
+            <h3 class="fs-6 mb-2">{{ __('Related donors') }}</h3>
+
+            {{-- NOT class="atom-table-modal": that class makes the theme bundle's
+                 AtoM table-modal widget ($(".atom-table-modal").each(... new
+                 widget)) ALSO bind this modal and serialise its own (broken,
+                 13-field, empty) donors[] payload that overrode the custom
+                 multi-donor JS below. The custom manager targets #donor-modal /
+                 #donor-rows / #donor-hidden by id, so no class is needed. --}}
+            <div class="ahg-donor-manager">
+              <div class="table-responsive">
+                <table class="table table-bordered mb-0" id="donor-table">
+                  <thead>
+                    <tr>
+                      <th class="w-100">{{ __('Name') }}</th>
+                      <th><span class="visually-hidden">{{ __('Actions') }}</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="donor-rows">
+                    @foreach(($donorRows ?? []) as $i => $dr)
+                      <tr data-donor-idx="{{ $i }}">
+                        <td class="donor-name-cell">{{ $dr['name'] }}</td>
+                        <td class="text-nowrap">
+                          <button type="button" class="btn atom-btn-white me-1 edit-donor-row" data-bs-toggle="modal" data-bs-target="#donor-modal">
+                            <i class="fas fa-fw fa-pencil-alt" aria-hidden="true"></i>
+                            <span class="visually-hidden">{{ __('Edit row') }}</span>
+                          </button>
+                          <button type="button" class="btn atom-btn-white delete-donor-row">
+                            <i class="fas fa-fw fa-times" aria-hidden="true"></i>
+                            <span class="visually-hidden">{{ __('Delete row') }}</span>
+                          </button>
+                        </td>
+                      </tr>
+                    @endforeach
+                  </tbody>
+                  <tfoot>
+                    <tr>
+                      <td colspan="2">
+                        <button type="button" class="btn atom-btn-white donor-add-new" data-bs-toggle="modal" data-bs-target="#donor-modal">
+                          <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+                        </button>
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+
+              {{-- Hidden donors[] blocks: one per related donor, submitted with
+                   the accession save. The modal edits these via JS (add / edit /
+                   delete row); the controller creates, links or updates each. --}}
+              <div id="donor-hidden" class="d-none">
+                @php $donorFields = ['id','slug','name','contact_person','telephone','fax','email','url','street_address','region','country','postal_code','city','latitude','longitude','contact_type','note']; @endphp
+                @foreach(($donorRows ?? []) as $i => $dr)
+                  <div data-donor-idx="{{ $i }}">
+                    @foreach($donorFields as $f)
+                      <input type="hidden" name="donors[{{ $i }}][{{ $f }}]" value="{{ $dr[$f] ?? '' }}">
+                    @endforeach
+                  </div>
+                @endforeach
+              </div>
+
+              <!-- Donor Modal -->
+              <div class="modal fade" id="donor-modal" data-bs-backdrop="static" tabindex="-1" aria-labelledby="related-donor-heading" aria-hidden="true">
+                <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                  <div class="modal-content">
+                    <div class="modal-header">
+                      <h4 class="h5 modal-title" id="related-donor-heading">{{ __('Related donor record') }}</h4>
+                      <button type="button" class="btn-close" data-bs-dismiss="modal">
+                        <span class="visually-hidden">{{ __('Close') }}</span>
+                      </button>
+                    </div>
+
+                    <div class="modal-body pb-2">
+
+                      <div class="mb-3 position-relative">
+                        <label for="donor_name" class="form-label">{{ __('Name') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                        <input type="text" name="donor_name" id="donor_name" class="form-control" value="{{ old('donor_name', $donor->name ?? '') }}" placeholder="{{ __('Type to search donors...') }}" autocomplete="off" role="combobox" aria-expanded="false" aria-autocomplete="list">
+                        {{-- #1267: hidden id/slug carry the selected EXISTING donor through save.
+                             donor_id is the authoritative value (relation.object_id); donor_slug
+                             is the autocomplete-anchor fallback the controller resolves. --}}
+                        <input type="hidden" name="donor_id" id="donor_id" value="{{ old('donor_id', $donor->id ?? '') }}">
+                        <input type="hidden" name="donor_slug" id="donor_slug" value="{{ old('donor_slug', $donor->slug ?? '') }}">
+                        <div id="donor_suggestions" class="list-group position-absolute w-100 shadow-sm d-none" style="z-index:1080; max-height:240px; overflow-y:auto;"></div>
+                        <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="This is the legal entity field and provides the contact information for the person(s) or the institution that donated or transferred the materials. It has the option of multiple instances and provides the option of creating more than one contact record using the same form."><i class="fas fa-question-circle"></i></button>
+                      </div>
+
+                      <h5>{{ __('Primary contact information') }}</h5>
+
+                      <ul class="nav nav-pills mb-3 d-flex gap-2" role="tablist">
+                        <li class="nav-item" role="presentation">
+                          <button class="btn atom-btn-white active-primary text-wrap active" id="pills-main-tab" data-bs-toggle="pill" data-bs-target="#pills-main" type="button" role="tab" aria-controls="pills-main" aria-selected="true">{{ __('Main') }}</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                          <button class="btn atom-btn-white active-primary text-wrap" id="pills-phys-tab" data-bs-toggle="pill" data-bs-target="#pills-phys" type="button" role="tab" aria-controls="pills-phys" aria-selected="false">{{ __('Physical location') }}</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                          <button class="btn atom-btn-white active-primary text-wrap" id="pills-other-tab" data-bs-toggle="pill" data-bs-target="#pills-other" type="button" role="tab" aria-controls="pills-other" aria-selected="false">{{ __('Other details') }}</button>
+                        </li>
+                      </ul>
+
+                      <div class="tab-content">
+                        <div class="tab-pane fade show active" id="pills-main" role="tabpanel" aria-labelledby="pills-main-tab">
+                          <div class="mb-3">
+                            <label for="donor_contact_person" class="form-label">{{ __('Contact person') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="text" name="donor_contact_person" id="donor_contact_person" class="form-control" value="{{ old('donor_contact_person', $donorContact->contact_person ?? '') }}">
+                          </div>
+                          <div class="mb-3">
+                            <label for="donor_telephone" class="form-label">{{ __('Telephone') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="text" name="donor_telephone" id="donor_telephone" class="form-control" value="{{ old('donor_telephone', $donorContact->telephone ?? '') }}">
+                          </div>
+                          <div class="mb-3">
+                            <label for="donor_fax" class="form-label">{{ __('Fax') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="text" name="donor_fax" id="donor_fax" class="form-control" value="{{ old('donor_fax', $donorContact->fax ?? '') }}">
+                          </div>
+                          <div class="mb-3">
+                            <label for="donor_email" class="form-label">{{ __('Email') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="email" name="donor_email" id="donor_email" class="form-control" value="{{ old('donor_email', $donorContact->email ?? '') }}">
+                          </div>
+                          <div class="mb-3">
+                            <label for="donor_url" class="form-label">URL <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="url" name="donor_url" id="donor_url" class="form-control" value="{{ old('donor_url', $donorContact->website ?? '') }}">
+                          </div>
+                        </div>
+
+                        <div class="tab-pane fade" id="pills-phys" role="tabpanel" aria-labelledby="pills-phys-tab">
+                          <div class="mb-3">
+                            <label for="donor_street_address" class="form-label">{{ __('Street address') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="text" name="donor_street_address" id="donor_street_address" class="form-control" value="{{ old('donor_street_address', $donorContact->street_address ?? '') }}">
+                          </div>
+                          <div class="mb-3">
+                            <label for="donor_region" class="form-label">{{ __('Region/province') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="text" name="donor_region" id="donor_region" class="form-control" value="{{ old('donor_region', $donorContact->region ?? '') }}">
+                          </div>
+                          <div class="mb-3">
+                            <label for="donor_country" class="form-label">{{ __('Country') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="text" name="donor_country" id="donor_country" class="form-control" value="{{ old('donor_country', $donorContact->country_code ?? '') }}">
+                          </div>
+                          <div class="mb-3">
+                            <label for="donor_postal_code" class="form-label">{{ __('Postal code') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="text" name="donor_postal_code" id="donor_postal_code" class="form-control" value="{{ old('donor_postal_code', $donorContact->postal_code ?? '') }}">
+                          </div>
+                          <div class="mb-3">
+                            <label for="donor_city" class="form-label">{{ __('City') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="text" name="donor_city" id="donor_city" class="form-control" value="{{ old('donor_city', $donorContact->city ?? '') }}">
+                          </div>
+                          <div class="mb-3">
+                            <label for="donor_latitude" class="form-label">{{ __('Latitude') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="text" name="donor_latitude" id="donor_latitude" class="form-control" value="{{ old('donor_latitude', $donorContact->latitude ?? '') }}">
+                          </div>
+                          <div class="mb-3">
+                            <label for="donor_longitude" class="form-label">{{ __('Longitude') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="text" name="donor_longitude" id="donor_longitude" class="form-control" value="{{ old('donor_longitude', $donorContact->longitude ?? '') }}">
+                          </div>
+                        </div>
+
+                        <div class="tab-pane fade" id="pills-other" role="tabpanel" aria-labelledby="pills-other-tab">
+                          <div class="mb-3">
+                            <label for="donor_contact_type" class="form-label">{{ __('Contact type') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <input type="text" name="donor_contact_type" id="donor_contact_type" class="form-control" value="{{ old('donor_contact_type', $donorContact->contact_type ?? '') }}">
+                          </div>
+                          <div class="mb-3">
+                            <label for="donor_note" class="form-label">{{ __('Note') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                            <textarea name="donor_note" id="donor_note" class="form-control" rows="2">{{ old('donor_note', $donorContact->note ?? '') }}</textarea>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="modal-footer">
+                      <button type="button" class="btn atom-btn-outline-light" data-bs-dismiss="modal">{{ __('Cancel') }}</button>
+                      <button type="button" class="btn atom-btn-outline-success modal-submit">{{ __('Submit') }}</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      {{-- ===== Administrative area ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="admin-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#admin-collapse" aria-expanded="false" aria-controls="admin-collapse">
+            {{ __('Administrative area') }}
+          </button>
+        </h2>
+        <div id="admin-collapse" class="accordion-collapse collapse" aria-labelledby="admin-heading">
+          <div class="accordion-body">
+            <div class="mb-3">
+              <label for="acquisition_type_id" class="form-label">{{ __('Acquisition type') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <select name="acquisition_type_id" id="acquisition_type_id" class="form-select">
+                <option value=""></option>
+                @foreach($formChoices['acquisitionTypes'] as $type)
+                  <option value="{{ $type->id }}" @selected(old('acquisition_type_id', $accession->acquisition_type_id ?? '') == $type->id)>{{ $type->name }}</option>
+                @endforeach
+              </select>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="Term describing the type of accession transaction and referring to the way in which the accession was acquired."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="resource_type_id" class="form-label">{{ __('Resource type') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <select name="resource_type_id" id="resource_type_id" class="form-select">
+                <option value=""></option>
+                @foreach($formChoices['resourceTypes'] as $type)
+                  <option value="{{ $type->id }}" @selected(old('resource_type_id', $accession->resource_type_id ?? '') == $type->id)>{{ $type->name }}</option>
+                @endforeach
+              </select>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="Select the type of resource represented in the accession, either public or private."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="title" class="form-label">{{ __('Title') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="text" name="title" id="title" class="form-control" value="{{ old('title', $accession->title ?? '') }}">
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="The title of the accession, usually the creator name and term describing the format of the accession materials."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="creators" class="form-label">{{ __('Creators') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <input type="text" name="creators" id="creators" class="form-control" value="{{ old('creators', $accession->creators ?? '') }}" placeholder="{{ __('Type to search authority records...') }}" autocomplete="off">
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="The name of the creator of the accession or the name of the department that created the accession."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <!-- ISAD Date(s) multi-row table -->
+            <h3 class="fs-6 mb-2">
+              {{ __('Date(s)') }}
+              <span class="form-required" title="{{ __('This is a mandatory element.') }}">*</span> <span class="badge bg-danger ms-1">{{ __('Required') }}</span>
+            </h3>
+            <div class="table-responsive mb-2">
+              <table class="table table-bordered mb-0" id="isad-dates-table">
+                <thead>
+                  <tr>
+                    <th id="isad-events-type-head" class="w-25">{{ __('Type') }}</th>
+                    <th id="isad-events-date-head" class="w-30">{{ __('Date') }}</th>
+                    <th id="isad-events-start-head">{{ __('Start') }}</th>
+                    <th id="isad-events-end-head">{{ __('End') }}</th>
+                    <th><span class="visually-hidden">{{ __('Delete') }}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>
+                      <select name="editEvents[0][type]" class="form-select form-select-sm" aria-labelledby="isad-events-type-head" aria-describedby="isad-events-table-help">
+                        <option value=""></option>
+                        @foreach($formChoices['eventTypes'] ?? [] as $et)
+                          <option value="{{ $et->id }}">{{ $et->name }}</option>
+                        @endforeach
+                      </select>
+                    </td>
+                    <td>
+                      <input type="text" name="editEvents[0][date]" class="form-control form-control-sm" aria-labelledby="isad-events-date-head" aria-describedby="isad-events-table-help">
+                    </td>
+                    <td>
+                      <input type="text" name="editEvents[0][startDate]" class="form-control form-control-sm" placeholder="{{ __('YYYY-MM-DD') }}" aria-labelledby="isad-events-start-head" aria-describedby="isad-events-table-help">
+                    </td>
+                    <td>
+                      <input type="text" name="editEvents[0][endDate]" class="form-control form-control-sm" placeholder="{{ __('YYYY-MM-DD') }}" aria-labelledby="isad-events-end-head" aria-describedby="isad-events-table-help">
+                    </td>
+                    <td>
+                      <button type="button" class="btn atom-btn-white remove-isaddate-row">
+                        <i class="fas fa-times" aria-hidden="true"></i>
+                        <span class="visually-hidden">{{ __('Delete row') }}</span>
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colspan="5">
+                      <button type="button" class="btn atom-btn-white" id="add-isaddate-row">
+                        <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+                      </button>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+            <div class="form-text mb-3" id="isad-events-table-help">
+              "Identify and record the date(s) of the unit of description. Identify the type of date given. Record as a single date or a range of dates as appropriate." (ISAD 3.1.3). The Date display field can be used to enter free-text date information, including typographical marks to express approximation, uncertainty, or qualification. Use the start and end fields to make the dates searchable. Do not use any qualifiers or typographical symbols to express uncertainty. Acceptable date formats: YYYYMMDD, YYYY-MM-DD, YYYY-MM, YYYY.
+            </div>
+
+            <!-- Event(s) multi-row table -->
+            <h3 class="fs-6 mb-2">{{ __('Event(s)') }}</h3>
+            <div class="table-responsive mb-2">
+              <table class="table table-bordered mb-0" id="events-table">
+                <thead>
+                  <tr>
+                    <th id="accession-events-type-head" class="w-20">{{ __('Type') }}</th>
+                    <th id="accession-events-date-head" class="w-25">{{ __('Date') }}</th>
+                    <th id="accession-events-agent-head">{{ __('Agent') }}</th>
+                    <th id="accession-events-notes-head">{{ __('Notes') }}</th>
+                    <th><span class="visually-hidden">{{ __('Delete') }}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {{-- heratio#1520: existing events come back pre-filled with their id, so a
+                       save updates them instead of losing them; one empty row otherwise. --}}
+                  @php $eventRows = collect($accessionEvents ?? [])->values(); if ($eventRows->isEmpty()) { $eventRows = collect([(object) []]); } @endphp
+                  @foreach($eventRows as $i => $ev)
+                  <tr>
+                    <td>
+                      @if(!empty($ev->id))<input type="hidden" name="events[{{ $i }}][id]" value="{{ $ev->id }}">@endif
+                      <select name="events[{{ $i }}][eventType]" class="form-select form-select-sm" aria-labelledby="accession-events-type-head" aria-describedby="accession-events-help">
+                        <option value=""></option>
+                        @foreach($formChoices['eventTypes'] ?? [] as $et)
+                          <option value="{{ $et->id }}" @selected(old("events.$i.eventType", $ev->type_id ?? null) == $et->id)>{{ $et->name }}</option>
+                        @endforeach
+                      </select>
+                    </td>
+                    <td>
+                      <input type="text" name="events[{{ $i }}][date]" value="{{ old("events.$i.date", $ev->date ?? '') }}" class="form-control form-control-sm" aria-labelledby="accession-events-date-head" aria-describedby="accession-events-help">
+                    </td>
+                    <td>
+                      <input type="text" name="events[{{ $i }}][agent]" value="{{ old("events.$i.agent", $ev->agent ?? '') }}" class="form-control form-control-sm" aria-labelledby="accession-events-agent-head" aria-describedby="accession-events-help">
+                    </td>
+                    <td>
+                      <textarea name="events[{{ $i }}][note]" class="form-control form-control-sm" rows="1" aria-labelledby="accession-events-notes-head" aria-describedby="accession-events-help">{{ old("events.$i.note", $ev->note ?? '') }}</textarea>
+                    </td>
+                    <td>
+                      <button type="button" class="btn atom-btn-white remove-event-row">
+                        <i class="fas fa-times" aria-hidden="true"></i>
+                        <span class="visually-hidden">{{ __('Delete row') }}</span>
+                      </button>
+                    </td>
+                  </tr>
+                  @endforeach
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colspan="5">
+                      <button type="button" class="btn atom-btn-white" id="add-event-row">
+                        <i class="fas fa-plus me-1" aria-hidden="true"></i>{{ __('Add new') }}
+                      </button>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+            <div class="form-text mb-3" id="accession-events-help">
+              <strong>{{ __('Type:') }}</strong> {{ __('Select the type of the event.') }}
+              <strong>{{ __('Date:') }}</strong> {{ __('Enter the date of the event.') }}
+              <strong>{{ __('Agent:') }}</strong> {{ __('Enter the agent associated with the event.') }}
+              <strong>{{ __('Note:') }}</strong> {{ __('Enter notes associated with the event.') }}
+            </div>
+
+            <div class="mb-3">
+              <label for="archival_history" class="form-label">{{ __('Archival/Custodial history') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea name="archival_history" id="archival_history" class="form-control" rows="3">{{ old('archival_history', $accession->archival_history ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="Information on the history of the accession. When the accession is acquired directly from the creator, do not record an archival history but record the information as the Immediate Source of Acquisition."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="scope_and_content" class="form-label">{{ __('Scope and content') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea name="scope_and_content" id="scope_and_content" class="form-control" rows="4">{{ old('scope_and_content', $accession->scope_and_content ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="A description of the intellectual content and document types represented in the accession."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="appraisal" class="form-label">{{ __('Appraisal, destruction and scheduling') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea name="appraisal" id="appraisal" class="form-control" rows="3">{{ old('appraisal', $accession->appraisal ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="Record appraisal, destruction and scheduling actions taken on or planned for the unit of description, especially if they may affect the interpretation of the material."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="physical_characteristics" class="form-label">{{ __('Physical condition') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea name="physical_characteristics" id="physical_characteristics" class="form-control" rows="3">{{ old('physical_characteristics', $accession->physical_characteristics ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="A description of the physical condition of the accession and if any preservation or special handling is required."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="received_extent_units" class="form-label">{{ __('Received extent units') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea name="received_extent_units" id="received_extent_units" class="form-control" rows="2">{{ old('received_extent_units', $accession->received_extent_units ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="The number of units as a whole number and the measurement of the received volume of records in the accession."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="processing_status_id" class="form-label">{{ __('Processing status') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <select name="processing_status_id" id="processing_status_id" class="form-select">
+                <option value=""></option>
+                @foreach($formChoices['processingStatuses'] as $status)
+                  <option value="{{ $status->id }}" @selected(old('processing_status_id', $accession->processing_status_id ?? '') == $status->id)>{{ $status->name }}</option>
+                @endforeach
+              </select>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="An indicator of the accessioning process."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="processing_priority_id" class="form-label">{{ __('Processing priority') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <select name="processing_priority_id" id="processing_priority_id" class="form-select">
+                <option value=""></option>
+                @foreach($formChoices['processingPriorities'] as $priority)
+                  <option value="{{ $priority->id }}" @selected(old('processing_priority_id', $accession->processing_priority_id ?? ($defaultPriorityTermId ?? '')) == $priority->id)>{{ $priority->name }}</option>
+                @endforeach
+              </select>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="Indicates the priority the repository assigns to completing the processing of the accession."><i class="fas fa-question-circle"></i></button>
+            </div>
+
+            <div class="mb-3">
+              <label for="processing_notes" class="form-label">{{ __('Processing notes') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <textarea name="processing_notes" id="processing_notes" class="form-control" rows="3">{{ old('processing_notes', $accession->processing_notes ?? '') }}</textarea>
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-muted ahg-field-help" data-bs-toggle="popover" data-bs-trigger="click" data-bs-placement="auto" data-bs-content="Notes about the processing plan, describing what needs to be done for the accession to be processed completely."><i class="fas fa-question-circle"></i></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {{-- ===== Repository + CAAIS profile (heratio#1514) ===== --}}
+      @include('ahg-accession-manage::partials._caais-edit')
+
+      {{-- ===== Archival description area ===== --}}
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="io-heading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#io-collapse" aria-expanded="false" aria-controls="io-collapse">
+            {{ __(':label area', ['label' => __(config('app.ui_label_informationobject', 'Archival description'))]) }}
+          </button>
+        </h2>
+        <div id="io-collapse" class="accordion-collapse collapse" aria-labelledby="io-heading">
+          <div class="accordion-body">
+            <div class="mb-3">
+              <label for="information_objects" class="form-label">{{ __(config('app.ui_label_informationobject', 'Archival description')) }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+              <select name="information_objects[]" id="information_objects" class="form-select" multiple placeholder="{{ __('Type to search archival descriptions...') }}">
+                @if(isset($linkedInformationObjects) && $linkedInformationObjects->isNotEmpty())
+                  @foreach($linkedInformationObjects as $io)
+                    <option value="{{ $io->id }}" selected>{{ $io->title ?: '[Untitled]' }}</option>
+                  @endforeach
+                @endif
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    {{-- heratio#1548: admin-defined custom fields, saved with the record --}}
+    @include('ahg-custom-fields::partials._edit-fields', ['entityType' => 'accession', 'objectId' => $accession->id ?? null])
+
+    <ul class="actions mb-3 nav gap-2">
+      @if($accession)
+        <li><a class="btn atom-btn-outline-light" role="button" href="{{ route('accession.show', $accession->slug) }}">{{ __('Cancel') }}</a></li>
+        <li><input class="btn atom-btn-outline-success" type="submit" value="Save"></li>
+      @else
+        <li><a class="btn atom-btn-outline-light" role="button" href="{{ route('accession.browse') }}">{{ __('Cancel') }}</a></li>
+        <li><input class="btn atom-btn-outline-success" type="submit" value="Create"></li>
+      @endif
+    </ul>
+  </form>
+
+@push('css')
+<style>
+.accordion-button {
+  background-color: var(--ahg-primary) !important;
+  color: var(--ahg-card-header-text, #fff) !important;
+}
+.accordion-button:not(.collapsed) {
+  background-color: var(--ahg-primary) !important;
+  color: var(--ahg-card-header-text, #fff) !important;
+  box-shadow: none;
+}
+.accordion-button.collapsed {
+  background-color: var(--ahg-primary) !important;
+  color: var(--ahg-card-header-text, #fff) !important;
+}
+.accordion-button::after {
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23ffffff'%3e%3cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'//%3e%3c/svg%3e");
+}
+.accordion-button:focus {
+  box-shadow: 0 0 0 0.25rem var(--ahg-input-focus, rgba(0,88,55,0.25));
+}
+.ahg-field-help { cursor: pointer; font-size: 0.9em; }
+.ahg-field-help:hover { color: var(--ahg-primary, #005837) !important; }
+.ahg-help-popup {
+  position: absolute; z-index: 1060; bottom: 100%; left: 0; right: 0;
+  background: #fff; border: 1px solid #dee2e6; border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15); padding: 0; margin-bottom: 6px;
+  max-width: 400px; animation: ahgHelpIn 0.15s ease-out;
+}
+.ahg-help-popup-body { padding: 10px 14px; font-size: 0.85rem; line-height: 1.5; color: #333; }
+.ahg-help-popup-close {
+  position: absolute; top: 4px; right: 6px; background: none; border: none;
+  font-size: 1.1rem; color: #999; cursor: pointer; line-height: 1;
+}
+.ahg-help-popup-close:hover { color: #333; }
+.ahg-help-popup-arrow {
+  position: absolute; bottom: -6px; left: 20px;
+  width: 12px; height: 12px; background: #fff;
+  border-right: 1px solid #dee2e6; border-bottom: 1px solid #dee2e6;
+  transform: rotate(45deg);
+}
+@keyframes ahgHelpIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+</style>
+<link href="{{ asset('vendor/tom-select/2.2.2/tom-select.bootstrap5.min.css') }}" rel="stylesheet">
+@endpush
+@push('js')
+<script src="{{ asset('vendor/tom-select/2.2.2/tom-select.complete.min.js') }}"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  // Alternative identifiers multi-row
+  var altIdx = 1;
+  var altTypeOptions = document.querySelector('#altids-table select')?.innerHTML || '';
+  document.getElementById('add-altid-row')?.addEventListener('click', function() {
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td><select name="alternativeIdentifiers[' + altIdx + '][identifierType]" class="form-select form-select-sm">' + altTypeOptions + '</select></td>' +
+      '<td><input type="text" name="alternativeIdentifiers[' + altIdx + '][identifier]" class="form-control form-control-sm"></td>' +
+      '<td><input type="text" name="alternativeIdentifiers[' + altIdx + '][note]" class="form-control form-control-sm"></td>' +
+      '<td><button type="button" class="btn atom-btn-white remove-altid-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">Delete row</span></button></td>';
+    document.querySelector('#altids-table tbody').appendChild(tr);
+    altIdx++;
+  });
+
+  // Events multi-row
+  // Continue after any pre-filled rows, and copy the type options without the
+  // first row's selection (heratio#1520).
+  var eventIdx = document.querySelectorAll('#events-table tbody tr').length;
+  var eventTypeOptions = (document.querySelector('#events-table select')?.innerHTML || '').replace(/\sselected(="[^"]*")?/g, '');
+  document.getElementById('add-event-row')?.addEventListener('click', function() {
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td><select name="events[' + eventIdx + '][eventType]" class="form-select form-select-sm">' + eventTypeOptions + '</select></td>' +
+      '<td><input type="text" name="events[' + eventIdx + '][date]" class="form-control form-control-sm"></td>' +
+      '<td><input type="text" name="events[' + eventIdx + '][agent]" class="form-control form-control-sm"></td>' +
+      '<td><input type="text" name="events[' + eventIdx + '][note]" class="form-control form-control-sm"></td>' +
+      '<td><button type="button" class="btn atom-btn-white remove-event-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">Delete row</span></button></td>';
+    document.querySelector('#events-table tbody').appendChild(tr);
+    eventIdx++;
+  });
+
+  // ISAD Date(s) multi-row
+  var isadIdx = 1;
+  var isadTypeOptions = document.querySelector('#isad-dates-table select')?.innerHTML || '';
+  document.getElementById('add-isaddate-row')?.addEventListener('click', function() {
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td><select name="editEvents[' + isadIdx + '][type]" class="form-select form-select-sm">' + isadTypeOptions + '</select></td>' +
+      '<td><input type="text" name="editEvents[' + isadIdx + '][date]" class="form-control form-control-sm"></td>' +
+      '<td><input type="text" name="editEvents[' + isadIdx + '][startDate]" class="form-control form-control-sm" placeholder="YYYY-MM-DD"></td>' +
+      '<td><input type="text" name="editEvents[' + isadIdx + '][endDate]" class="form-control form-control-sm" placeholder="YYYY-MM-DD"></td>' +
+      '<td><button type="button" class="btn atom-btn-white remove-isaddate-row"><i class="fas fa-times" aria-hidden="true"></i><span class="visually-hidden">Delete row</span></button></td>';
+    document.querySelector('#isad-dates-table tbody').appendChild(tr);
+    isadIdx++;
+  });
+
+  // Remove row handler for all multi-row tables
+  document.addEventListener('click', function(e) {
+    var btn = e.target.closest('.remove-altid-row, .remove-event-row, .remove-isaddate-row');
+    if (btn) {
+      var table = btn.closest('table');
+      if (table.querySelectorAll('tbody tr').length > 1) {
+        btn.closest('tr').remove();
+      }
+    }
+  });
+
+  // ---- Related donors: multi-row manager -------------------------------
+  // The modal is a single-donor scratch editor. Submitting it writes the
+  // entered/selected donor into a hidden donors[idx][...] block (submitted
+  // with the accession Save) and adds/updates a visible row. "Edit row"
+  // re-opens a row in the modal; "Delete row" drops the row + its hidden
+  // block. On save the controller creates new donors, links existing ones
+  // (picked via search), and updates the contact of donors already linked.
+  (function() {
+    var FIELDS = {
+      name: 'donor_name', id: 'donor_id', slug: 'donor_slug',
+      contact_person: 'donor_contact_person', telephone: 'donor_telephone',
+      fax: 'donor_fax', email: 'donor_email', url: 'donor_url',
+      street_address: 'donor_street_address', region: 'donor_region',
+      country: 'donor_country', postal_code: 'donor_postal_code',
+      city: 'donor_city', latitude: 'donor_latitude', longitude: 'donor_longitude',
+      contact_type: 'donor_contact_type', note: 'donor_note'
+    };
+    var KEYS = Object.keys(FIELDS);
+
+    var modalEl = document.getElementById('donor-modal');
+    var rowsBody = document.getElementById('donor-rows');
+    var hidden = document.getElementById('donor-hidden');
+    var suggestBox = document.getElementById('donor_suggestions');
+    var nameInput = document.getElementById('donor_name');
+    var idInput = document.getElementById('donor_id');
+    var slugInput = document.getElementById('donor_slug');
+    if (!modalEl || !rowsBody || !hidden) return;
+
+    var submit = modalEl.querySelector('.modal-submit');
+    var editingIdx = null;
+    var nextIdx = (function() {
+      var max = -1;
+      hidden.querySelectorAll('[data-donor-idx]').forEach(function(b) {
+        var n = parseInt(b.getAttribute('data-donor-idx'), 10);
+        if (!isNaN(n) && n > max) max = n;
+      });
+      return max + 1;
+    })();
+
+    function getModal(k) { var el = document.getElementById(FIELDS[k]); return el ? el.value : ''; }
+    function setModal(values) { KEYS.forEach(function(k) { var el = document.getElementById(FIELDS[k]); if (el) el.value = (values && values[k]) || ''; }); }
+
+    function writeHidden(idx, values) {
+      var block = hidden.querySelector('[data-donor-idx="' + idx + '"]');
+      if (!block) { block = document.createElement('div'); block.setAttribute('data-donor-idx', idx); hidden.appendChild(block); }
+      block.innerHTML = '';
+      KEYS.forEach(function(k) {
+        var inp = document.createElement('input');
+        inp.type = 'hidden';
+        inp.name = 'donors[' + idx + '][' + k + ']';
+        inp.value = (values && values[k]) || '';
+        block.appendChild(inp);
+      });
+    }
+    function readHidden(idx) {
+      var v = {}, block = hidden.querySelector('[data-donor-idx="' + idx + '"]');
+      if (block) KEYS.forEach(function(k) {
+        var inp = block.querySelector('input[name="donors[' + idx + '][' + k + ']"]');
+        v[k] = inp ? inp.value : '';
+      });
+      return v;
+    }
+    function removeHidden(idx) { var b = hidden.querySelector('[data-donor-idx="' + idx + '"]'); if (b) b.remove(); }
+
+    function upsertRow(idx, name) {
+      var row = rowsBody.querySelector('tr[data-donor-idx="' + idx + '"]');
+      if (!row) {
+        row = document.createElement('tr');
+        row.setAttribute('data-donor-idx', idx);
+        row.innerHTML =
+          '<td class="donor-name-cell"></td>' +
+          '<td class="text-nowrap">' +
+            '<button type="button" class="btn atom-btn-white me-1 edit-donor-row" data-bs-toggle="modal" data-bs-target="#donor-modal">' +
+              '<i class="fas fa-fw fa-pencil-alt" aria-hidden="true"></i>' +
+              '<span class="visually-hidden">{{ __('Edit row') }}</span>' +
+            '</button>' +
+            '<button type="button" class="btn atom-btn-white delete-donor-row">' +
+              '<i class="fas fa-fw fa-times" aria-hidden="true"></i>' +
+              '<span class="visually-hidden">{{ __('Delete row') }}</span>' +
+            '</button>' +
+          '</td>';
+        rowsBody.appendChild(row);
+      }
+      row.querySelector('.donor-name-cell').textContent = name || '{{ __('(unnamed donor)') }}';
+    }
+
+    function hideSuggest() { if (suggestBox) { suggestBox.classList.add('d-none'); suggestBox.innerHTML = ''; } if (nameInput) nameInput.setAttribute('aria-expanded', 'false'); }
+
+    // "Add new" -> blank modal for a fresh entry.
+    document.querySelectorAll('.donor-add-new').forEach(function(btn) {
+      btn.addEventListener('click', function() { editingIdx = null; setModal({}); hideSuggest(); });
+    });
+
+    // "Edit row" -> load the row's stored values into the modal.
+    rowsBody.addEventListener('click', function(e) {
+      var btn = e.target.closest('.edit-donor-row');
+      if (!btn) return;
+      var row = btn.closest('tr');
+      editingIdx = parseInt(row.getAttribute('data-donor-idx'), 10);
+      setModal(readHidden(editingIdx));
+      hideSuggest();
+    });
+
+    // "Delete row" -> drop the row + its hidden block.
+    rowsBody.addEventListener('click', function(e) {
+      var btn = e.target.closest('.delete-donor-row');
+      if (!btn) return;
+      var row = btn.closest('tr');
+      removeHidden(parseInt(row.getAttribute('data-donor-idx'), 10));
+      row.remove();
+    });
+
+    // Modal "Submit" -> persist scratch fields into a hidden block + row.
+    if (submit) {
+      submit.addEventListener('click', function() {
+        var values = {};
+        KEYS.forEach(function(k) { values[k] = getModal(k); });
+        if (!(values.name || '').trim() && !(values.id || '').trim()) {
+          if (window.bootstrap) bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+          return;
+        }
+        var idx = (editingIdx !== null) ? editingIdx : nextIdx++;
+        writeHidden(idx, values);
+        upsertRow(idx, values.name);
+        editingIdx = null;
+        // Clear the scratch fields so leftover text can't be re-submitted as a
+        // phantom donor via the legacy flat-field fallback after a delete.
+        setModal({});
+        if (window.bootstrap) bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+      });
+    }
+
+    // Existing-donor search inside the modal: pick a suggestion to link an
+    // existing donor (fills the scratch name + id/slug). Typing a fresh query
+    // clears the resolved id so a new name becomes a new donor.
+    (function() {
+      if (!nameInput || !suggestBox) return;
+      var searchUrl = @json(route('accession.donor-search'));
+      var debounce;
+      function render(items) {
+        suggestBox.innerHTML = '';
+        if (!items || !items.length) { hideSuggest(); return; }
+        items.forEach(function(it) {
+          var a = document.createElement('button');
+          a.type = 'button';
+          a.className = 'list-group-item list-group-item-action';
+          a.textContent = it.name;
+          a.addEventListener('click', function() {
+            nameInput.value = it.name;
+            if (idInput) idInput.value = it.id;
+            if (slugInput) slugInput.value = it.slug || '';
+            hideSuggest();
+          });
+          suggestBox.appendChild(a);
+        });
+        suggestBox.classList.remove('d-none');
+        nameInput.setAttribute('aria-expanded', 'true');
+      }
+      nameInput.addEventListener('input', function() {
+        if (idInput) idInput.value = '';
+        if (slugInput) slugInput.value = '';
+        var q = nameInput.value.trim();
+        clearTimeout(debounce);
+        if (q.length < 2) { hideSuggest(); return; }
+        debounce = setTimeout(function() {
+          fetch(searchUrl + '?query=' + encodeURIComponent(q) + '&limit=15', { headers: { 'Accept': 'application/json' } })
+            .then(function(r) { return r.json(); })
+            .then(render)
+            .catch(hideSuggest);
+        }, 200);
+      });
+      document.addEventListener('click', function(e) {
+        if (!suggestBox.contains(e.target) && e.target !== nameInput) hideSuggest();
+      });
+    })();
+  })();
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('.ahg-field-help').forEach(function(btn, i) { btn.dataset.helpId = 'help-' + i; });
+  document.addEventListener('click', function(e) {
+    var btn = e.target.closest('.ahg-field-help');
+    document.querySelectorAll('.ahg-help-popup').forEach(function(p) {
+      if (!btn || p.dataset.owner !== btn.dataset.helpId) p.remove();
+    });
+    if (!btn) return;
+    e.preventDefault(); e.stopPropagation();
+    var existing = document.querySelector('.ahg-help-popup[data-owner="' + btn.dataset.helpId + '"]');
+    if (existing) { existing.remove(); return; }
+    var text = btn.getAttribute('data-bs-content') || '';
+    if (!text) return;
+    var tmp = document.createElement('textarea'); tmp.innerHTML = text; text = tmp.value;
+    var popup = document.createElement('div');
+    popup.className = 'ahg-help-popup'; popup.dataset.owner = btn.dataset.helpId;
+    popup.innerHTML = '<div class="ahg-help-popup-arrow"></div><div class="ahg-help-popup-body">' +
+      text.replace(/&/g,'&amp;').replace(/</g,'&lt;') +
+      '</div><button type="button" class="ahg-help-popup-close">&times;</button>';
+    popup.querySelector('.ahg-help-popup-close').addEventListener('click', function() { popup.remove(); });
+    btn.parentElement.style.position = 'relative';
+    btn.parentElement.appendChild(popup);
+  });
+
+  // TomSelect for Archival description autocomplete
+  var ioSelect = document.getElementById('information_objects');
+  if (ioSelect && typeof TomSelect !== 'undefined') {
+    new TomSelect(ioSelect, {
+      valueField: 'id',
+      labelField: 'name',
+      searchField: ['name'],
+      maxItems: 50,
+      plugins: ['remove_button'],
+      load: function(query, callback) {
+        if (query.length < 2) return callback();
+        fetch('{{ url("informationobject/autocomplete") }}?query=' + encodeURIComponent(query) + '&limit=15')
+          .then(function(r) { return r.json(); })
+          .then(function(data) { callback(data); })
+          .catch(function() { callback(); });
+      },
+      render: {
+        option: function(item, escape) {
+          return '<div class="d-flex justify-content-between align-items-center">'
+            + '<span><i class="fas fa-archive me-1"></i>' + escape(item.name) + '</span>'
+            + (item.identifier ? '<small class="text-muted ms-2">' + escape(item.identifier) + '</small>' : '')
+            + '</div>';
+        },
+        item: function(item, escape) {
+          return '<div><i class="fas fa-archive me-1"></i>' + escape(item.name) + '</div>';
+        }
+      }
+    });
+  }
+});
+</script>
+@endpush
+@endsection

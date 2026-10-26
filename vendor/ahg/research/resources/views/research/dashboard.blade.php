@@ -1,0 +1,376 @@
+{{-- Research Dashboard - Cloned from AtoM ahgResearchPlugin --}}
+@extends('theme::layouts.2col')
+
+@section('sidebar')
+  @include('research::research._sidebar', ['sidebarActive' => 'workspace'])
+@endsection
+
+@section('title', 'Research Services')
+
+@section('content')
+<h1><i class="fas fa-book-reader text-primary me-2"></i>{{ __('Research Services') }}</h1>
+
+{{-- Registration Banners --}}
+  @guest
+    <div class="alert alert-info mb-4">
+      <div class="row align-items-center">
+        <div class="col-md-8">
+          <h4><i class="fas fa-user-plus me-2"></i>{{ __('Register as a Researcher') }}</h4>
+          <p class="mb-0">{{ __('Create an account to book reading room visits, request materials, and save your research.') }}</p>
+        </div>
+        <div class="col-md-4 text-md-end mt-3 mt-md-0">
+          <a href="{{ route('research.publicRegister') }}" class="btn atom-btn-white btn-lg">
+            <i class="fas fa-user-plus me-2"></i>{{ __('Register Now') }}
+          </a>
+          <div class="mt-2">
+            <small><a href="{{ route('login') }}">{{ __('Already have an account? Login') }}</a></small>
+          </div>
+        </div>
+      </div>
+    </div>
+  @endguest
+
+  @auth
+    @if(!isset($researcher) || !$researcher)
+      <div class="alert alert-warning mb-4">
+        <div class="row align-items-center">
+          <div class="col-md-8">
+            <h4><i class="fas fa-clipboard-list me-2"></i>{{ __('Complete Your Researcher Profile') }}</h4>
+            <p class="mb-0">{{ __('You need to complete your researcher registration to book reading room visits.') }}</p>
+          </div>
+          <div class="col-md-4 text-md-end mt-3 mt-md-0">
+            <a href="{{ route('researcher.register') }}" class="btn atom-btn-white"><i class="fas fa-edit me-2"></i>{{ __('Complete Registration') }}</a>
+          </div>
+        </div>
+      </div>
+    @elseif(($researcher->status ?? '') === 'pending')
+      <div class="alert alert-info mb-4">
+        <h4><i class="fas fa-clock me-2"></i>{{ __('Registration Pending') }}</h4>
+        <p class="mb-0">{{ __('Your researcher registration is being reviewed. You will be notified once approved.') }}</p>
+      </div>
+    @elseif(($researcher->status ?? '') === 'expired')
+      <div class="alert alert-danger mb-4">
+        <div class="d-flex justify-content-between align-items-center">
+          <div>
+            <h4><i class="fas fa-exclamation-circle me-2"></i>{{ __('Registration Expired') }}</h4>
+            <p class="mb-0">{{ __('Your researcher registration has expired. Please request a renewal to continue.') }}</p>
+          </div>
+          <a href="{{ route('research.renewal') }}" class="btn atom-atom-btn-outline-danger"><i class="fas fa-sync-alt me-1"></i>{{ __('Request Renewal') }}</a>
+        </div>
+      </div>
+    @elseif(($researcher->status ?? '') === 'rejected')
+      <div class="alert alert-danger mb-4">
+        <div class="d-flex justify-content-between align-items-center">
+          <div>
+            <h4><i class="fas fa-times-circle me-2"></i>{{ __('Registration Rejected') }}</h4>
+            <p class="mb-0">
+              Your registration was not approved.
+              @if($researcher->rejection_reason ?? false)
+                <br><small>Reason: {{ e($researcher->rejection_reason) }}</small>
+              @endif
+            </p>
+          </div>
+          <a href="{{ route('researcher.register') }}" class="btn atom-atom-btn-outline-success"><i class="fas fa-redo me-1"></i>{{ __('Re-apply') }}</a>
+        </div>
+      </div>
+    @elseif(($researcher->status ?? '') === 'approved')
+      {{-- Welcome Card --}}
+      <div class="card bg-light mb-4">
+        <div class="card-body">
+          <div class="row align-items-center">
+            <div class="col-md-8">
+              <h5 class="mb-1">Welcome back, {{ e($researcher->first_name ?? '') }}!</h5>
+              <p class="text-muted mb-0">{{ e($researcher->institution ?? 'Independent Researcher') }}</p>
+            </div>
+            <div class="col-md-4 text-md-end mt-3 mt-md-0">
+              <a href="{{ route('research.profile') }}" class="btn atom-btn-white"><i class="fas fa-user me-2"></i>{{ __('My Profile') }}</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    @endif
+  @endauth
+
+  {{-- Quick Action Buttons (approved researchers) --}}
+  @auth
+    @if(isset($researcher) && ($researcher->status ?? '') === 'approved')
+      <div class="row mb-4">
+        <div class="col">
+          <div class="d-flex flex-wrap gap-2">
+            <a href="{{ route('research.book') }}" class="btn atom-btn-white"><i class="fas fa-calendar-plus me-1"></i>{{ __('Book Visit') }}</a>
+            <a href="{{ route('research.journal.create') }}" class="btn atom-atom-btn-outline-success"><i class="fas fa-pen-fancy me-1"></i>{{ __('New Journal Entry') }}</a>
+            <a href="{{ route('research.reports') }}" class="btn atom-btn-white"><i class="fas fa-file-alt me-1"></i>{{ __('New Report') }}</a>
+            <a href="{{ route('research.annotations') }}" class="btn atom-btn-white"><i class="fas fa-sticky-note me-1"></i>{{ __('My Notes') }}</a>
+          </div>
+        </div>
+      </div>
+
+      {{-- Knowledge Platform --}}
+      <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="fas fa-brain me-2"></i>{{ __('Knowledge Platform') }}</span>
+        </div>
+        <div class="card-body">
+          <div class="row g-2">
+            <div class="col-md-3 col-6">
+              <a href="{{ route('research.annotations') }}" class="btn atom-btn-white w-100 py-2 text-start">
+                <i class="fas fa-highlighter me-1"></i> {{ __('Annotations') }}
+              </a>
+            </div>
+            <div class="col-md-3 col-6">
+              <a href="{{ route('research.savedSearches') }}" class="btn atom-btn-white w-100 py-2 text-start">
+                <i class="fas fa-search me-1"></i> {{ __('Saved Searches') }}
+              </a>
+            </div>
+            <div class="col-md-3 col-6">
+              <a href="{{ route('research.validationQueue') }}" class="btn atom-atom-btn-outline-success w-100 py-2 text-start">
+                <i class="fas fa-check-double me-1"></i> {{ __('Validation Queue') }}
+              </a>
+            </div>
+            <div class="col-md-3 col-6">
+              <a href="{{ route('research.entityResolution') }}" class="btn atom-btn-white w-100 py-2 text-start">
+                <i class="fas fa-object-group me-1"></i> {{ __('Entity Resolution') }}
+              </a>
+            </div>
+            <div class="col-md-3 col-6">
+              <a href="{{ route('research.odrlPolicies') }}" class="btn atom-btn-white w-100 py-2 text-start">
+                <i class="fas fa-balance-scale me-1"></i> {{ __('ODRL Policies') }}
+              </a>
+            </div>
+            <div class="col-md-3 col-6">
+              <a href="{{ route('research.documentTemplates') }}" class="btn btn-outline-dark w-100 py-2 text-start">
+                <i class="fas fa-file-alt me-1"></i> {{ __('Doc Templates') }}
+              </a>
+            </div>
+          </div>
+          <p class="text-muted small mt-2 mb-0"><i class="fas fa-info-circle me-1"></i>{{ __('Project-specific tools (Knowledge Graph, Timeline, Map, AI Extraction) are available from each project page.') }}</p>
+        </div>
+      </div>
+    @endif
+  @endauth
+
+  {{-- Statistics (staff only) --}}
+  @if($isAdmin ?? false)
+  <div class="row mb-4">
+    <div class="col-md-3">
+      <div class="card text-center h-100">
+        <div class="card-body">
+          <h2 class="text-primary">{{ number_format($stats['total_researchers'] ?? 0) }}</h2>
+          <p class="mb-0">{{ __('Registered Researchers') }}</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="card text-center h-100">
+        <div class="card-body">
+          <h2 class="text-success">{{ number_format($stats['today_bookings'] ?? 0) }}</h2>
+          <p class="mb-0">{{ __('Today\'s Bookings') }}</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="card text-center h-100">
+        <div class="card-body">
+          <h2 class="text-info">{{ number_format($stats['week_bookings'] ?? 0) }}</h2>
+          <p class="mb-0">{{ __('This Week') }}</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="card text-center h-100">
+        <div class="card-body">
+          <h2 class="text-warning">{{ number_format($stats['pending_requests'] ?? 0) }}</h2>
+          <p class="mb-0">{{ __('Pending Requests') }}</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  @endif
+
+  {{-- Pending Approvals (Admin) --}}
+  @if($isAdmin ?? false)
+    @if(count($pendingApprovals ?? $pendingResearchers ?? []) > 0)
+      @php $pending = $pendingApprovals ?? $pendingResearchers ?? collect(); @endphp
+      <div class="card mb-4">
+        <div class="card-header bg-warning">
+          <i class="fas fa-user-clock me-2"></i>{{ __('Pending Approvals') }}
+          <span class="badge bg-dark float-end">{{ count($pending) }}</span>
+        </div>
+        <ul class="list-group list-group-flush">
+          @foreach(collect($pending)->take(5) as $applicant)
+            <li class="list-group-item d-flex justify-content-between align-items-center">
+              <div>
+                <strong>{{ e($applicant->first_name ?? '') }} {{ e($applicant->last_name ?? '') }}</strong><br>
+                <small class="text-muted">{{ e($applicant->institution ?? 'Independent') }}</small>
+              </div>
+              <a href="{{ route('research.viewResearcher', $applicant->id) }}" class="btn btn-sm atom-btn-white">{{ __('Review') }}</a>
+            </li>
+          @endforeach
+        </ul>
+        @if(count($pending) > 5)
+          <div class="card-footer text-center">
+            <a href="{{ route('research.researchers', ['status' => 'pending']) }}">{{ __('View all pending') }}</a>
+          </div>
+        @endif
+      </div>
+    @endif
+  @endif
+
+  {{-- Today's Schedule (staff only: it names other researchers) --}}
+  @if($isAdmin ?? false)
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span><i class="fas fa-calendar-day me-2"></i>{{ __("Today's Schedule") }}</span>
+      @auth
+        <a href="{{ route('research.bookings') }}" class="btn btn-sm atom-btn-white">{{ __('View All') }}</a>
+      @endauth
+    </div>
+    <div class="table-responsive">
+      <table class="table table-bordered table-hover mb-0">
+        <thead>
+          <tr>
+            <th>{{ __('Time') }}</th>
+            <th>{{ __('Researcher') }}</th>
+            <th>{{ __('Room') }}</th>
+            <th>{{ __('Status') }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          @forelse($todaySchedule ?? $todayBookings ?? [] as $booking)
+            <tr>
+              <td>{{ substr($booking->start_time ?? '', 0, 5) }} - {{ substr($booking->end_time ?? '', 0, 5) }}</td>
+              <td>{{ e(($booking->first_name ?? '') . ' ' . ($booking->last_name ?? $booking->researcher_name ?? '')) }}</td>
+              <td>{{ e($booking->room_name ?? '-') }}</td>
+              <td>
+                <span class="badge bg-{{ ($booking->status ?? '') === 'confirmed' ? 'success' : 'warning' }}">
+                  {{ ucfirst($booking->status ?? 'unknown') }}
+                </span>
+              </td>
+            </tr>
+          @empty
+            <tr><td colspan="4" class="text-center text-muted py-4">{{ __('No bookings scheduled for today') }}</td></tr>
+          @endforelse
+        </tbody>
+      </table>
+    </div>
+  </div>
+  @endif
+
+  {{-- Recent Activity --}}
+  @auth
+    @if(count($recentActivity ?? []) > 0)
+      <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="fas fa-stream me-2"></i>{{ __('Recent Activity') }}</span>
+        </div>
+        <ul class="list-group list-group-flush">
+          @foreach(collect($recentActivity)->take(5) as $activity)
+            <li class="list-group-item py-2">
+              <div class="d-flex justify-content-between align-items-center">
+                <div>
+                  <span class="badge bg-light text-dark me-1">{{ ucfirst(str_replace('_', ' ', $activity->activity_type ?? '')) }}</span>
+                  <span class="small">{{ e($activity->entity_title ?? $activity->description ?? '') }}</span>
+                </div>
+                <small class="text-muted">{{ isset($activity->created_at) ? \Carbon\Carbon::parse($activity->created_at)->format('M j, H:i') : '' }}</small>
+              </div>
+            </li>
+          @endforeach
+        </ul>
+      </div>
+    @endif
+  @endauth
+
+  {{-- Recent Notes --}}
+  @auth
+    @php $recentNotes = $enhancedData['recent_notes'] ?? []; @endphp
+    @if(!empty($recentNotes))
+      <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="fas fa-sticky-note me-2 text-warning"></i>{{ __('Recent Notes') }}</span>
+          <a href="{{ route('research.annotations') }}" class="btn btn-sm atom-btn-white">{{ __('All Notes') }}</a>
+        </div>
+        <ul class="list-group list-group-flush">
+          @foreach(collect($recentNotes)->take(5) as $note)
+            <li class="list-group-item py-2">
+              <a href="{{ route('research.annotations') }}#note-{{ $note->id ?? '' }}" class="text-decoration-none">
+                <strong>{{ e($note->title ?? 'Untitled Note') }}</strong>
+              </a>
+              <br><small class="text-muted">{{ isset($note->created_at) ? \Carbon\Carbon::parse($note->created_at)->format('M j, Y H:i') : '' }}</small>
+            </li>
+          @endforeach
+        </ul>
+      </div>
+    @endif
+  @endauth
+
+  {{-- Saved Search Alerts --}}
+  @auth
+    @php $searchAlerts = $enhancedData['search_alerts'] ?? []; @endphp
+    @if(!empty($searchAlerts))
+      <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="fas fa-search me-2 text-info"></i>{{ __('Saved Search Alerts') }}</span>
+          <a href="{{ route('research.savedSearches') }}" class="btn btn-sm atom-btn-white">{{ __('View All') }}</a>
+        </div>
+        <ul class="list-group list-group-flush">
+          @foreach($searchAlerts as $alert)
+            <li class="list-group-item py-2 d-flex justify-content-between align-items-center">
+              <span>{{ e($alert->name ?? '') }}</span>
+              <span class="badge bg-info rounded-pill">{{ (int) ($alert->new_results_count ?? 0) }} new</span>
+            </li>
+          @endforeach
+        </ul>
+      </div>
+    @endif
+  @endauth
+
+  {{-- Pending Invitations --}}
+  @auth
+    @php $pendingInvites = $enhancedData['pending_invitations'] ?? []; @endphp
+    @if(!empty($pendingInvites))
+      <div class="card mb-4">
+        <div class="card-header">
+          <i class="fas fa-envelope me-2"></i>{{ __('Pending Invitations') }}
+          <span class="badge bg-white text-info float-end">{{ count($pendingInvites) }}</span>
+        </div>
+        <ul class="list-group list-group-flush">
+          @foreach($pendingInvites as $invite)
+            <li class="list-group-item py-2 d-flex justify-content-between align-items-center">
+              <span>{{ e($invite->project_title ?? '') }}</span>
+              <a href="{{ route('research.viewProject', ['id' => $invite->project_id ?? 0]) }}" class="btn btn-sm atom-btn-white">{{ __('View') }}</a>
+            </li>
+          @endforeach
+        </ul>
+      </div>
+    @endif
+  @endauth
+
+  {{-- Recent Journal Entries (Heratio enhancement) --}}
+  @auth
+    @if(isset($researcher) && ($researcher->status ?? '') === 'approved')
+      <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="fas fa-journal-whills me-2"></i>{{ __('Recent Journal Entries') }}</span>
+          <a href="{{ route('research.journal') }}" class="btn btn-sm atom-btn-white">{{ __('View All') }}</a>
+        </div>
+        <div class="card-body">
+          @if(count($recentJournalEntries ?? []) > 0)
+            <ul class="list-group list-group-flush">
+              @foreach($recentJournalEntries as $entry)
+                <li class="list-group-item">
+                  <div class="d-flex justify-content-between">
+                    <strong><a href="{{ route('research.journal.show', $entry->id) }}">{{ e($entry->title) }}</a></strong>
+                    <small class="text-muted">{{ $entry->created_at ? \Carbon\Carbon::parse($entry->created_at)->format('Y-m-d') : '' }}</small>
+                  </div>
+                  <small class="text-muted">{{ e(\Illuminate\Support\Str::limit($entry->content ?? '', 100)) }}</small>
+                </li>
+              @endforeach
+            </ul>
+          @else
+            <p class="text-muted mb-0">{{ __('No journal entries yet.') }} <a href="{{ route('research.journal.create') }}">{{ __('Create your first entry') }}</a>.</p>
+          @endif
+        </div>
+      </div>
+    @endif
+  @endauth
+@endsection

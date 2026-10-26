@@ -1,0 +1,4889 @@
+<?php
+
+/**
+ * InformationObjectController - Controller for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+
+
+namespace AhgInformationObjectManage\Controllers;
+
+use AhgCore\Pagination\SimplePager;
+use AhgCore\Services\DigitalObjectService;
+use AhgCore\Services\SettingHelper;
+use AhgInformationObjectManage\Services\InformationObjectBrowseService;
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
+
+class InformationObjectController extends Controller
+{
+    /**
+     * ISO 639-1 / "common" language codes -> display names. Single source
+     * of truth for the language selects on the edit form and the resolved
+     * names rendered on the show page. Keep in sync with the edit blade.
+     */
+    public static function languageDisplayMap(): array
+    {
+        // Canonical list lives in ahg-core; kept as a public method so
+        // existing callers of this API keep working. See LanguageOptions.
+        return \AhgCore\Support\LanguageOptions::descriptionLanguages();
+    }
+
+    /** ISO 15924 script codes -> display names. */
+    public static function scriptDisplayMap(): array
+    {
+        return \AhgCore\Support\LanguageOptions::scripts();
+    }
+
+    /**
+     * Find a term in the given taxonomy by case-insensitive name (in the
+     * supplied culture), or create one. Returns the term id (= object.id).
+     * Used by the access-point save blocks when the user typed a free-text
+     * value that didn't come from the autocomplete dropdown.
+     *
+     * Notes on nested-set: AtoM/Heratio terms across all taxonomies share a
+     * single nested-set tree rooted at term id=110 in this install. Doing a
+     * full lft/rgt shift on every "type a new subject" action would touch
+     * thousands of rows, so we leave lft/rgt NULL - the autocomplete and
+     * access-point browse paths both filter by taxonomy_id and don't need
+     * the nested-set encoding for flat taxonomies.
+     */
+    public static function findOrCreateTerm(string $name, int $taxonomyId, string $culture): int
+    {
+        $name = trim($name);
+        if ($name === '') return 0;
+
+        $existing = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', $taxonomyId)
+            ->where('term_i18n.culture', $culture)
+            ->whereRaw('LOWER(term_i18n.name) = ?', [mb_strtolower($name)])
+            ->value('term.id');
+        if ($existing) return (int) $existing;
+
+        // Default parent = the taxonomy's most-common parent_id (its root term).
+        $parentId = (int) (DB::table('term')
+            ->where('taxonomy_id', $taxonomyId)
+            ->select('parent_id')
+            ->groupBy('parent_id')
+            ->orderByRaw('COUNT(*) DESC')
+            ->limit(1)
+            ->value('parent_id') ?? 110);
+
+        $termId = DB::table('object')->insertGetId([
+            'class_name' => 'QubitTerm',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('term')->insert([
+            'id'             => $termId,
+            'taxonomy_id'    => $taxonomyId,
+            'parent_id'      => $parentId,
+            'lft'            => null,
+            'rgt'            => null,
+            'source_culture' => $culture,
+        ]);
+
+        // #1333 dual-write: maintain the term closure tree alongside parent_id.
+        app(\AhgCore\Services\ClosureMaintenanceService::class)
+            ->addNode('term', (int) $termId, (int) $parentId);
+
+        DB::table('term_i18n')->insert([
+            'id'      => $termId,
+            'culture' => $culture,
+            'name'    => $name,
+        ]);
+
+        // Slug it so the term is reachable via /term/{slug}.
+        $base = \Illuminate\Support\Str::slug($name) ?: ('term-' . $termId);
+        $slug = $base; $n = 1;
+        while (DB::table('slug')->where('slug', $slug)->exists()) {
+            $slug = $base . '-' . $n++;
+        }
+        DB::table('slug')->insert(['object_id' => $termId, 'slug' => $slug]);
+
+        return $termId;
+    }
+
+    /**
+     * Find an actor by case-insensitive authorized form of name (in the supplied
+     * culture), or create one. Used by the Name access-points save block for
+     * free-text entries.
+     */
+    public static function findOrCreateActor(string $name, string $culture): int
+    {
+        $name = trim($name);
+        if ($name === '') return 0;
+
+        $existing = DB::table('actor')
+            ->join('actor_i18n', 'actor.id', '=', 'actor_i18n.id')
+            ->where('actor_i18n.culture', $culture)
+            ->whereRaw('LOWER(actor_i18n.authorized_form_of_name) = ?', [mb_strtolower($name)])
+            ->value('actor.id');
+        if ($existing) return (int) $existing;
+
+        $actorId = DB::table('object')->insertGetId([
+            'class_name' => 'QubitActor',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('actor')->insert([
+            'id'             => $actorId,
+            'parent_id'      => null,
+            'source_culture' => $culture,
+        ]);
+        DB::table('actor_i18n')->insert([
+            'id'                      => $actorId,
+            'culture'                 => $culture,
+            'authorized_form_of_name' => $name,
+        ]);
+
+        $base = \Illuminate\Support\Str::slug($name) ?: ('actor-' . $actorId);
+        $slug = $base; $n = 1;
+        while (DB::table('slug')->where('slug', $slug)->exists()) {
+            $slug = $base . '-' . $n++;
+        }
+        DB::table('slug')->insert(['object_id' => $actorId, 'slug' => $slug]);
+
+        return $actorId;
+    }
+
+    public function browse(Request $request)
+    {
+        // Redirect to GLAM browse with translated params (single browse page, no duplication)
+        $params = $request->query();
+        // Map AtoM params to GLAM browse params
+        if (isset($params['collection'])) {
+            $params['ancestor'] = $params['collection'];
+            unset($params['collection']);
+        }
+        if (isset($params['topLod'])) {
+            $params['topLevel'] = $params['topLod'];
+            unset($params['topLod']);
+        }
+        if (isset($params['onlyMedia'])) {
+            $params['hasDigital'] = $params['onlyMedia'];
+            unset($params['onlyMedia']);
+        }
+        return redirect()->route('glam.browse', $params);
+    }
+
+    public function show(string $slug)
+    {
+        $culture = app()->getLocale();
+        $fallback = config('app.fallback_locale', 'en');
+
+        // Main information object - culture-fallback pattern: prefer requested
+        // culture, fall back to default locale so records authored in another
+        // language still render instead of 404'ing.
+        $io = DB::table('information_object')
+            ->leftJoin('information_object_i18n as ioi_cur', function ($j) use ($culture) {
+                $j->on('ioi_cur.id', '=', 'information_object.id')
+                    ->where('ioi_cur.culture', '=', $culture);
+            })
+            ->leftJoin('information_object_i18n as ioi_fb', function ($j) use ($fallback) {
+                $j->on('ioi_fb.id', '=', 'information_object.id')
+                    ->where('ioi_fb.culture', '=', $fallback);
+            })
+            ->join('object', 'information_object.id', '=', 'object.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->select([
+                'information_object.id',
+                'information_object.identifier',
+                'information_object.level_of_description_id',
+                'information_object.repository_id',
+                'information_object.parent_id',
+                'information_object.lft',
+                'information_object.rgt',
+                'information_object.description_status_id',
+                'information_object.description_detail_id',
+                'information_object.description_identifier',
+                'information_object.source_standard',
+                'information_object.display_standard_id',
+                'information_object.collection_type_id',
+                'information_object.source_culture',
+                DB::raw('COALESCE(ioi_cur.title, ioi_fb.title) AS title'),
+                DB::raw('COALESCE(ioi_cur.alternate_title, ioi_fb.alternate_title) AS alternate_title'),
+                DB::raw('COALESCE(ioi_cur.edition, ioi_fb.edition) AS edition'),
+                DB::raw('COALESCE(ioi_cur.extent_and_medium, ioi_fb.extent_and_medium) AS extent_and_medium'),
+                DB::raw('COALESCE(ioi_cur.archival_history, ioi_fb.archival_history) AS archival_history'),
+                DB::raw('COALESCE(ioi_cur.acquisition, ioi_fb.acquisition) AS acquisition'),
+                DB::raw('COALESCE(ioi_cur.scope_and_content, ioi_fb.scope_and_content) AS scope_and_content'),
+                DB::raw('COALESCE(ioi_cur.appraisal, ioi_fb.appraisal) AS appraisal'),
+                DB::raw('COALESCE(ioi_cur.accruals, ioi_fb.accruals) AS accruals'),
+                DB::raw('COALESCE(ioi_cur.arrangement, ioi_fb.arrangement) AS arrangement'),
+                DB::raw('COALESCE(ioi_cur.access_conditions, ioi_fb.access_conditions) AS access_conditions'),
+                DB::raw('COALESCE(ioi_cur.reproduction_conditions, ioi_fb.reproduction_conditions) AS reproduction_conditions'),
+                DB::raw('COALESCE(ioi_cur.physical_characteristics, ioi_fb.physical_characteristics) AS physical_characteristics'),
+                DB::raw('COALESCE(ioi_cur.finding_aids, ioi_fb.finding_aids) AS finding_aids'),
+                DB::raw('COALESCE(ioi_cur.location_of_originals, ioi_fb.location_of_originals) AS location_of_originals'),
+                DB::raw('COALESCE(ioi_cur.location_of_copies, ioi_fb.location_of_copies) AS location_of_copies'),
+                DB::raw('COALESCE(ioi_cur.related_units_of_description, ioi_fb.related_units_of_description) AS related_units_of_description'),
+                DB::raw('COALESCE(ioi_cur.rules, ioi_fb.rules) AS rules'),
+                DB::raw('COALESCE(ioi_cur.sources, ioi_fb.sources) AS sources'),
+                DB::raw('COALESCE(ioi_cur.revision_history, ioi_fb.revision_history) AS revision_history'),
+                DB::raw('COALESCE(ioi_cur.institution_responsible_identifier, ioi_fb.institution_responsible_identifier) AS institution_responsible_identifier'),
+                'object.created_at',
+                'object.updated_at',
+                'slug.slug',
+            ])
+            ->first();
+
+        if (!$io) {
+            // Slug may belong to a different entity - check object table and redirect
+            $slugRow = DB::table('slug')->where('slug', $slug)->first();
+            // heratio#1533: a slug retired by a dedupe merge redirects to the record kept.
+            if (! $slugRow && class_exists(\AhgDedupe\Services\RecordMergeService::class)
+                && ($mergedInto = \AhgDedupe\Services\RecordMergeService::redirectTarget($slug))) {
+                return redirect('/' . $mergedInto, 301);
+            }
+            if ($slugRow) {
+                $className = DB::table('object')->where('id', $slugRow->object_id)->value('class_name');
+                $redirectMap = [
+                    'QubitTerm' => '/term/' . $slug,
+                    'QubitActor' => '/actor/' . $slug,
+                    'QubitRepository' => '/repository/' . $slug,
+                    'QubitDonor' => '/donor/' . $slug,
+                    'QubitAccession' => '/accession/' . $slug,
+                    'QubitRightsHolder' => '/rightsholder/' . $slug,
+                    'QubitFunctionObject' => '/function/' . $slug,
+                    'QubitPhysicalObject' => '/physicalobject/' . $slug,
+                ];
+                if (isset($redirectMap[$className])) {
+                    return redirect($redirectMap[$className]);
+                }
+            }
+
+            // Admin: show detailed diagnostic instead of generic 404
+            if (auth()->check()) {
+                $diagnostics = ['slug' => $slug, 'issues' => []];
+
+                // Check if an IO exists without a slug matching this URL
+                $orphan = DB::table('information_object as io')
+                    ->leftJoin('information_object_i18n as i18n', function ($j) use ($culture) {
+                        $j->on('io.id', '=', 'i18n.id')->where('i18n.culture', '=', $culture);
+                    })
+                    ->leftJoin('slug as s', 'io.id', '=', 's.object_id')
+                    ->whereNull('s.slug')
+                    ->where('io.id', '>', 1)
+                    ->select('io.id', 'i18n.title', 'io.parent_id', 'io.lft', 'io.rgt', 'io.source_culture')
+                    ->limit(20)
+                    ->get();
+
+                if ($orphan->isNotEmpty()) {
+                    $diagnostics['issues'][] = [
+                        'type' => 'missing_slugs',
+                        'message' => $orphan->count() . ' information object(s) have no slug and cannot be accessed via URL.',
+                        'records' => $orphan->map(fn($r) => [
+                            'id' => $r->id,
+                            'title' => $r->title ?? '[Untitled]',
+                            'parent_id' => $r->parent_id,
+                            'has_nested_set' => $r->lft !== null,
+                        ])->toArray(),
+                    ];
+                }
+
+                if ($slugRow && !isset($redirectMap[$className ?? ''])) {
+                    $diagnostics['issues'][] = [
+                        'type' => 'unknown_class',
+                        'message' => "Slug '{$slug}' exists (object_id={$slugRow->object_id}) but class '{$className}' has no route mapping.",
+                    ];
+                }
+
+                if (!$slugRow && $orphan->isEmpty()) {
+                    $diagnostics['issues'][] = [
+                        'type' => 'not_found',
+                        'message' => "No slug '{$slug}' found in the database and no orphan records detected.",
+                    ];
+                }
+
+                return response()->view('ahg-io-manage::errors.admin-404', [
+                    'diagnostics' => $diagnostics,
+                ], 404);
+            }
+
+            abort(404);
+        }
+
+        // #51 ACL enforcement: read-side gate. AclService::hasPermission
+        // returns true for administrators (admin bypass built in) and false
+        // for unauthenticated users without per-record read grants. abort(403)
+        // is harsher than AtoM's hide-with-notice UX but matches the audit's
+        // stated acceptance criterion.
+        if (!\AhgCore\Services\AclService::hasPermission(\Illuminate\Support\Facades\Auth::id(), 'read', (int) $io->id)) {
+            abort(403, 'You do not have permission to view this record.');
+        }
+
+        // Draft records must never leak to anonymous visitors. The global
+        // anonymous 'read' grant (group 98) makes the ACL gate above a no-op
+        // for guests, so publication status is enforced directly here: a guest
+        // may only see published records. 404 (not 403) so drafts are not even
+        // confirmed to exist.
+        if (\Illuminate\Support\Facades\Auth::guest()
+            && ! app(\AhgCore\Services\MultilingualRecordService::class)->isPublished((int) $io->id)) {
+            abort(404);
+        }
+
+        // #1427 graded ICIP cultural-access enforcement on the staff show page.
+        // DisclosureGate already withholds restricted records from public/machine
+        // surfaces; this honours the community's protocol for authenticated staff
+        // too. The check runs first so access to a restricted record is audited
+        // (icip_access_log) for EVERY viewer, including custodians. Only the block
+        // is bypassed for custodians: anyone who can EDIT the record (admins
+        // included, via AclService's admin bypass) - and, inside the check, a
+        // steward of the restricting community. Everyone else fails closed on an
+        // unsatisfied restriction. Workflow-state protocols (elder approval /
+        // under consultation) are non-blocking. Unrestricted records return early
+        // in the service with no log write, so the common path stays cheap.
+        if (class_exists(\AhgIcip\Services\IcipAccessService::class)) {
+            $icipAccess = app(\AhgIcip\Services\IcipAccessService::class)->check((int) $io->id, \Illuminate\Support\Facades\Auth::id());
+            if (! ($icipAccess['allowed'] ?? true)
+                && ! \AhgCore\Services\AclService::hasPermission(\Illuminate\Support\Facades\Auth::id(), 'update', (int) $io->id)) {
+                abort(403, $icipAccess['blocked_reason'] ?: 'Access to this record is restricted by an Indigenous cultural protocol.');
+            }
+        }
+
+        // #1464: community-protocol gate. TermProtocolGate was already enforced
+        // on browse, display, exports, OAI, RiC and GraphQL, but NOT here - the
+        // show page guarded ICIP through IcipAccessService, which reads cultural
+        // notices rather than TK-label-derived protocol conditions. So a record
+        // carrying a restricting TK/BC label vanished from every listing while
+        // its direct URL still served: protected everywhere except the one place
+        // a bookmark reaches. Deliberately placed AFTER the ICIP block so that
+        // check still audits the view first. 404 rather than 403, matching the
+        // gate's behaviour elsewhere and the draft gate above - a restricted
+        // record is not confirmed to exist. allowsRecord() bypasses staff
+        // internally, so editors and admins are unaffected.
+        if (! \AhgCore\Services\TermProtocolGate::allowsRecord((int) $io->id)) {
+            abort(404);
+        }
+
+        // #74 encryption_field_access_restrictions: decrypt the two
+        // registered i18n columns before the show-page blade renders them.
+        // The show() method does its own inline query (not via
+        // InformationObjectService::getById), so the central decrypt at the
+        // service level doesn't catch this read - we have to wrap here too.
+        // decrypt() is idempotent for plaintext so the call is safe whether
+        // the operator has the category on or off.
+        $__enc = new \AhgCore\Services\EncryptionService();
+        foreach (['access_conditions', 'reproduction_conditions'] as $__col) {
+            if (isset($io->{$__col}) && $io->{$__col} !== null && $io->{$__col} !== '') {
+                $io->{$__col} = $__enc->decrypt(
+                    \AhgCore\Services\EncryptionService::CATEGORY_ACCESS_RESTRICTIONS,
+                    (string) $io->{$__col},
+                    'information_object_i18n', $__col, (int) $io->id
+                );
+            }
+        }
+
+        // Level of description name
+        $levelName = null;
+        if ($io->level_of_description_id) {
+            $levelName = DB::table('term_i18n')
+                ->where('id', $io->level_of_description_id)
+                ->where('culture', $culture)
+                ->value('name');
+        }
+
+        // Repository (direct or inherited from nearest ancestor - matching AtoM behaviour)
+        $repository = null;
+        $repoId = $io->repository_id;
+        if (!$repoId && $io->parent_id && $io->parent_id != 1) {
+            // Walk up the tree to find the nearest ancestor with a repository_id
+            $ancestorId = $io->parent_id;
+            $maxDepth = 50; // safety limit
+            while ($ancestorId && $ancestorId != 1 && $maxDepth-- > 0) {
+                $ancestor = DB::table('information_object')
+                    ->where('id', $ancestorId)
+                    ->select('repository_id', 'parent_id')
+                    ->first();
+                if (!$ancestor) {
+                    break;
+                }
+                if ($ancestor->repository_id) {
+                    $repoId = $ancestor->repository_id;
+                    break;
+                }
+                $ancestorId = $ancestor->parent_id;
+            }
+        }
+        if ($repoId) {
+            $repository = DB::table('repository')
+                ->join('actor_i18n', 'repository.id', '=', 'actor_i18n.id')
+                ->join('slug', 'repository.id', '=', 'slug.object_id')
+                ->where('repository.id', $repoId)
+                ->where('actor_i18n.culture', $culture)
+                ->select('repository.id', 'actor_i18n.authorized_form_of_name as name', 'slug.slug')
+                ->first();
+        }
+
+        // Events (dates)
+        $events = DB::table('event')
+            ->join('event_i18n', 'event.id', '=', 'event_i18n.id')
+            ->where('event.object_id', $io->id)
+            ->where('event_i18n.culture', $culture)
+            ->select(
+                'event.id',
+                'event.type_id',
+                'event.actor_id',
+                'event.start_date',
+                'event.end_date',
+                'event_i18n.date as date_display',
+                'event_i18n.name as event_name'
+            )
+            ->get();
+
+        // Resolve event type names
+        $eventTypeIds = $events->pluck('type_id')->filter()->unique()->values()->toArray();
+        $eventTypeNames = [];
+        if (!empty($eventTypeIds)) {
+            $eventTypeNames = DB::table('term_i18n')
+                ->whereIn('id', $eventTypeIds)
+                ->where('culture', $culture)
+                ->pluck('name', 'id')
+                ->toArray();
+        }
+
+        // Creators (events where type_id = 111 = creation) - include history and entity type
+        $creators = DB::table('event')
+            ->join('actor', 'event.actor_id', '=', 'actor.id')
+            ->join('actor_i18n', 'event.actor_id', '=', 'actor_i18n.id')
+            ->join('slug', 'event.actor_id', '=', 'slug.object_id')
+            ->where('event.object_id', $io->id)
+            ->where('event.type_id', 111) // Creation event
+            ->where('actor_i18n.culture', $culture)
+            ->whereNotNull('event.actor_id')
+            ->select(
+                'event.actor_id as id',
+                'actor_i18n.authorized_form_of_name as name',
+                'actor_i18n.history',
+                'actor_i18n.dates_of_existence',
+                'actor.entity_type_id',
+                'slug.slug'
+            )
+            ->distinct()
+            ->get();
+
+        // Digital objects (organized by usage type: master, reference, thumbnail)
+        $digitalObjects = DigitalObjectService::getForObject($io->id);
+
+        // Notes
+        $notes = DB::table('note')
+            ->join('note_i18n', 'note.id', '=', 'note_i18n.id')
+            ->where('note.object_id', $io->id)
+            ->where('note_i18n.culture', $culture)
+            ->select('note.id', 'note.type_id', 'note_i18n.content')
+            ->get();
+
+        // Resolve note type names
+        $noteTypeIds = $notes->pluck('type_id')->filter()->unique()->values()->toArray();
+        $noteTypeNames = [];
+        if (!empty($noteTypeIds)) {
+            $noteTypeNames = DB::table('term_i18n')
+                ->whereIn('id', $noteTypeIds)
+                ->where('culture', $culture)
+                ->pluck('name', 'id')
+                ->toArray();
+        }
+
+        // Children (child information objects)
+        $children = DB::table('information_object')
+            ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('information_object.parent_id', $io->id)
+            ->where('information_object_i18n.culture', $culture)
+            ->orderBy('information_object.lft')
+            ->select(
+                'information_object.id',
+                'information_object.level_of_description_id',
+                'information_object_i18n.title',
+                'slug.slug'
+            )
+            ->get();
+
+        // Resolve child level names
+        $childLevelIds = $children->pluck('level_of_description_id')->filter()->unique()->values()->toArray();
+        $childLevelNames = [];
+        if (!empty($childLevelIds)) {
+            $childLevelNames = DB::table('term_i18n')
+                ->whereIn('id', $childLevelIds)
+                ->where('culture', $culture)
+                ->pluck('name', 'id')
+                ->toArray();
+        }
+
+        // Thumbnails for the image carousel (matching AtoM imageflow component).
+        // Walk the WHOLE descendant subtree (closure-backed), not just the direct
+        // children: a top-level collection's direct children are frequently
+        // intermediate series with no images of their own - the images live
+        // deeper - so a direct-children-only query left the carousel empty for
+        // collections like demonstration-collections (7 image-less children, 68
+        // thumbnails on descendants). Falls back to direct children if the
+        // closure isn't available. (nested-set lft/rgt is not used - it is
+        // frequently stale; see HierarchyQueryService.)
+        // #1493: honour the 'Digital object carousel' switch on Admin -> Settings ->
+        // Default page elements. It has always been written by that form and read by
+        // nothing, so unticking it did nothing at all. Gated here rather than in the
+        // view so a disabled carousel also skips the queries that build it.
+        $carouselOn = \AhgCore\Support\DisplayToggles::carousel();
+
+        $childThumbnails = collect();
+        $carouselIds = [];
+
+        // #1481: "View children as compound?" on the digital-object edit page
+        // decides whether this record presents its children as one compound
+        // object - the carousel strip below - or leaves them to be reached
+        // individually. Until now the control stored nothing and nothing read
+        // it, so the carousel always rendered regardless of what was chosen.
+        //
+        // Absent means never chosen, and defaults to TRUE so existing records
+        // keep behaving exactly as they do today. Only an explicit "No" turns
+        // the strip off, which is what makes the control safe to honour.
+        $displayAsCompound = \AhgCore\Support\PropertyRow::bool(
+            (int) $io->id, 'displayAsCompoundObject', true, 'digital_object'
+        );
+        if ($displayAsCompound && class_exists(\AhgCore\Services\HierarchyQueryService::class)) {
+            $carouselIds = app(\AhgCore\Services\HierarchyQueryService::class)
+                ->descendantIds('information_object', (int) $io->id, false);
+        }
+        if ($displayAsCompound && empty($carouselIds)) {
+            $carouselIds = $children->pluck('id')->toArray();
+        }
+        // Guard the IN() against MySQL's placeholder ceiling on huge collections;
+        // a 10-item carousel never needs more than a few thousand candidates.
+        if (count($carouselIds) > 20000) {
+            $carouselIds = array_slice($carouselIds, 0, 20000);
+        }
+        if (!empty($carouselIds)) {
+            $childThumbnails = ! $carouselOn ? collect() : DB::table('digital_object')
+                ->join('slug', 'digital_object.object_id', '=', 'slug.object_id')
+                ->join('information_object_i18n', function ($join) use ($culture) {
+                    $join->on('digital_object.object_id', '=', 'information_object_i18n.id')
+                         ->where('information_object_i18n.culture', '=', $culture);
+                })
+                ->whereIn('digital_object.object_id', $carouselIds)
+                ->where('digital_object.usage_id', 142) // Thumbnail usage
+                ->select(
+                    'digital_object.id',
+                    'digital_object.object_id',
+                    'digital_object.name',
+                    'digital_object.path',
+                    'digital_object.mime_type',
+                    'digital_object.byte_size',
+                    'slug.slug',
+                    'information_object_i18n.title'
+                )
+                ->orderBy('digital_object.object_id')
+                ->limit(10) // Limit carousel items like AtoM
+                ->get();
+        }
+        $childThumbnailTotal = !empty($carouselIds) ? DB::table('digital_object')
+            ->whereIn('digital_object.object_id', $carouselIds)
+            ->where('digital_object.usage_id', 142)
+            ->count() : 0;
+
+        // Parent breadcrumb chain (walk up the tree)
+        $breadcrumbs = [];
+        $parentId = $io->parent_id;
+        while ($parentId && $parentId != 1) {
+            $parent = DB::table('information_object')
+                ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+                ->join('slug', 'information_object.id', '=', 'slug.object_id')
+                ->where('information_object.id', $parentId)
+                ->where('information_object_i18n.culture', $culture)
+                ->select('information_object.id', 'information_object.parent_id', 'information_object_i18n.title', 'slug.slug')
+                ->first();
+
+            if (!$parent) {
+                break;
+            }
+
+            array_unshift($breadcrumbs, $parent);
+            $parentId = $parent->parent_id;
+        }
+
+        // Subject access points (taxonomy_id = 35)
+        $subjects = DB::table('object_term_relation')
+            ->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->leftJoin('slug', 'object_term_relation.term_id', '=', 'slug.object_id')
+            ->where('object_term_relation.object_id', $io->id)
+            ->where('term.taxonomy_id', 35)
+            ->where('term_i18n.culture', $culture)
+            ->select('term_i18n.name', 'slug.slug')
+            ->get();
+
+        // Place access points (taxonomy_id = 42)
+        $places = DB::table('object_term_relation')
+            ->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->leftJoin('slug', 'object_term_relation.term_id', '=', 'slug.object_id')
+            ->where('object_term_relation.object_id', $io->id)
+            ->where('term.taxonomy_id', 42)
+            ->where('term_i18n.culture', $culture)
+            ->select('term_i18n.name', 'slug.slug')
+            ->get();
+
+        // Name access points (via relation table - actors linked as name access points)
+        $nameAccessPoints = DB::table('relation')
+            ->join('actor_i18n', 'relation.object_id', '=', 'actor_i18n.id')
+            ->leftJoin('slug', 'relation.object_id', '=', 'slug.object_id')
+            ->where('relation.subject_id', $io->id)
+            ->where('relation.type_id', 161) // Name access point relation
+            ->where('actor_i18n.culture', $culture)
+            ->select('actor_i18n.authorized_form_of_name as name', 'slug.slug')
+            ->get();
+
+        // Genre access points (taxonomy_id = 78)
+        $genres = DB::table('object_term_relation')
+            ->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->leftJoin('slug', 'object_term_relation.term_id', '=', 'slug.object_id')
+            ->where('object_term_relation.object_id', $io->id)
+            ->where('term.taxonomy_id', 78)
+            ->where('term_i18n.culture', $culture)
+            ->select('term_i18n.name', 'slug.slug')
+            ->get();
+
+        // Language of material
+        $languages = DB::table('information_object')
+            ->join('object_term_relation', 'information_object.id', '=', 'object_term_relation.object_id')
+            ->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->where('information_object.id', $io->id)
+            ->where('term.taxonomy_id', 7) // Language taxonomy
+            ->where('term_i18n.culture', $culture)
+            ->select('term_i18n.name')
+            ->get();
+
+        // Publication status (from status table - type_id=158 is publication status)
+        $publicationStatus = null;
+        $publicationStatusId = null;
+        $statusRow = DB::table('status')
+            ->where('object_id', $io->id)
+            ->where('type_id', 158)
+            ->first();
+        if ($statusRow && $statusRow->status_id) {
+            $publicationStatusId = (int) $statusRow->status_id;
+            $publicationStatus = DB::table('term_i18n')
+                ->where('id', $statusRow->status_id)
+                ->where('culture', $culture)
+                ->value('name');
+        }
+
+        // Function relations (function_object table may not exist in all installs)
+        $functionRelations = collect();
+        try {
+            $functionRelations = DB::table('relation')
+                ->join('function_object', 'relation.subject_id', '=', 'function_object.id')
+                ->join('function_object_i18n', 'function_object.id', '=', 'function_object_i18n.id')
+                ->join('slug', 'function_object.id', '=', 'slug.object_id')
+                ->where('relation.object_id', $io->id)
+                ->where('function_object_i18n.culture', $culture)
+                ->select('function_object.id', 'function_object_i18n.authorized_form_of_name as name', 'slug.slug')
+                ->get();
+        } catch (\Exception $e) {
+            // function_object table may not exist
+        }
+
+        // Alternative identifiers (from property table)
+        $alternativeIdentifiers = DB::table('property')
+            ->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $io->id)
+            ->where('property.name', 'alternativeIdentifiers')
+            ->where('property_i18n.culture', $culture)
+            ->select('property.id', 'property.scope as label', 'property_i18n.value')
+            ->get();
+
+        // Physical storage (relation type 151 = HAS_PHYSICAL_OBJECT)
+        $physicalObjects = DB::table('relation')
+            ->join('physical_object', 'relation.object_id', '=', 'physical_object.id')
+            ->join('physical_object_i18n', 'physical_object.id', '=', 'physical_object_i18n.id')
+            ->leftJoin('slug', 'physical_object.id', '=', 'slug.object_id')
+            ->where('relation.subject_id', $io->id)
+            ->where('relation.type_id', 151)
+            ->where('physical_object_i18n.culture', $culture)
+            ->select('physical_object.id', 'physical_object_i18n.name', 'physical_object_i18n.description', 'physical_object_i18n.location', 'physical_object.type_id', 'slug.slug')
+            ->get();
+
+        // Resolve physical object type names
+        $physicalObjectTypeIds = $physicalObjects->pluck('type_id')->filter()->unique()->values()->toArray();
+        $physicalObjectTypeNames = [];
+        if (!empty($physicalObjectTypeIds)) {
+            $physicalObjectTypeNames = DB::table('term_i18n')
+                ->whereIn('id', $physicalObjectTypeIds)
+                ->where('culture', $culture)
+                ->pluck('name', 'id')
+                ->toArray();
+        }
+
+        // Rights (authenticated users only, linked via relation table)
+        $rights = collect();
+        $extendedRights = collect();
+        $extendedRightsTkLabels = [];
+        $activeEmbargo = null;
+        if (auth()->check()) {
+            try {
+                $rights = DB::table('relation')
+                    ->join('rights', 'relation.object_id', '=', 'rights.id')
+                    ->join('rights_i18n', 'rights.id', '=', 'rights_i18n.id')
+                    ->where('relation.subject_id', $io->id)
+                    ->where('relation.type_id', 168) // RIGHT relation type
+                    ->where('rights_i18n.culture', $culture)
+                    ->select('rights.*', 'rights_i18n.rights_note')
+                    ->get();
+            } catch (\Exception $e) {
+                // rights table structure may vary
+            }
+
+            // Extended rights (from extended_rights + extended_rights_i18n tables)
+            $erService = new \AhgInformationObjectManage\Services\ExtendedRightsService($culture);
+            try {
+                $extendedRights = $erService->getExtendedRights($io->id);
+                foreach ($extendedRights as $er) {
+                    $extendedRightsTkLabels[$er->id] = $erService->getTkLabelsForRights($er->id);
+                }
+            } catch (\Exception $e) {
+                // extended_rights tables may not exist in all installs
+            }
+
+            // Active embargo for sidebar display
+            try {
+                $activeEmbargo = $erService->getActiveEmbargo($io->id);
+            } catch (\Exception $e) {
+                // embargo table may not exist
+            }
+        }
+
+        // Approved NER entity count (for PDF Entity Overlay link in sidebar)
+        $nerEntityCount = 0;
+        try {
+            $nerEntityCount = DB::table('ahg_ner_entity')
+                ->where('object_id', $io->id)
+                ->where('status', 'approved')
+                ->count();
+        } catch (\Exception $e) {
+            // ahg_ner_entity table may not exist in all installs
+        }
+
+        // Accessions (via relation table)
+        $accessions = collect();
+        try {
+            $accessions = DB::table('relation')
+                ->join('accession', 'relation.object_id', '=', 'accession.id')
+                ->join('accession_i18n', 'accession.id', '=', 'accession_i18n.id')
+                ->join('slug', 'accession.id', '=', 'slug.object_id')
+                ->where('relation.subject_id', $io->id)
+                ->where('accession_i18n.culture', $culture)
+                ->select('accession.id', 'accession.identifier', 'accession_i18n.title', 'slug.slug')
+                ->get();
+        } catch (\Exception $e) {
+            // accession table may not exist
+        }
+
+        // Description status name
+        $descriptionStatusName = null;
+        if ($io->description_status_id) {
+            $descriptionStatusName = DB::table('term_i18n')
+                ->where('id', $io->description_status_id)
+                ->where('culture', $culture)
+                ->value('name');
+        }
+
+        // Description detail name
+        $descriptionDetailName = null;
+        if ($io->description_detail_id) {
+            $descriptionDetailName = DB::table('term_i18n')
+                ->where('id', $io->description_detail_id)
+                ->where('culture', $culture)
+                ->value('name');
+        }
+
+        // Collection type name
+        $collectionTypeName = null;
+        if ($io->collection_type_id) {
+            $collectionTypeName = DB::table('term_i18n')
+                ->where('id', $io->collection_type_id)
+                ->where('culture', $culture)
+                ->value('name');
+        }
+
+        // Helpers: resolve ISO 639-1 / ISO 15924 codes to display names. Same
+        // map the edit-form selects use, so what shows on the public record
+        // matches what the cataloguer picked.
+        $resolveProp = function (string $name) use ($io, $culture) {
+            $raw = DB::table('property')
+                ->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+                ->where('property.object_id', $io->id)
+                ->where('property.name', $name)
+                ->where('property_i18n.culture', $culture)
+                ->value('property_i18n.value');
+            if (!$raw) return collect();
+            $decoded = @unserialize($raw, ['allowed_classes' => false]);
+            return is_array($decoded) ? collect($decoded) : collect();
+        };
+        $langNames = self::languageDisplayMap();
+        $scriptNames = self::scriptDisplayMap();
+        $resolveLang = fn ($code) => $langNames[$code] ?? $code;
+        $resolveScript = fn ($code) => $scriptNames[$code] ?? $code;
+
+        $languagesOfDescription = $resolveProp('languageOfDescription')->map($resolveLang);
+        $scriptsOfDescription   = $resolveProp('scriptOfDescription')->map($resolveScript);
+        $materialLanguages      = $resolveProp('language')->map($resolveLang);
+        $materialScripts        = $resolveProp('script')->map($resolveScript);
+
+        // Visual redactions (PSIS parity). Non-admin viewers see the redacted
+        // version: black rectangles overlaid on the preview image at the
+        // coordinates the cataloguer drew. Admins see the un-redacted view -
+        // matches PdfRedactionService::canBypassRedaction() in PSIS.
+        $visualRedactions = collect();
+        $canBypassRedaction = (bool) (auth()->check() && auth()->user()
+            && (method_exists(auth()->user(), 'isAdministrator')
+                ? auth()->user()->isAdministrator()
+                : (auth()->user()->is_admin ?? false)));
+        try {
+            if (\Schema::hasTable('privacy_visual_redaction')) {
+                // The displayed master's regions only: those are what the
+                // overlay paints on the primary image. An attached image's
+                // regions are burnt into its own derivative (heratio#1503).
+                $__redactor = app(\AhgInformationObjectManage\Services\RedactionRenderService::class);
+                $__default = $__redactor->masterOrDefault((int) $io->id, isset($digitalObjects['master']->id) ? (int) $digitalObjects['master']->id : null);
+                $visualRedactions = ! $__default ? collect() : $__redactor
+                    ->regionsQuery((int) $io->id, (int) $__default->id)
+                    ->orderBy('page_number')
+                    ->orderBy('id')
+                    ->get();
+                // Decode the coordinates JSON once so the view doesn't have to,
+                // and through the shared reader so the overlay sees one shape.
+                // It used to decode raw, which handed an x/y row straight to a
+                // renderer that only knows left/top.
+                foreach ($visualRedactions as $r) {
+                    $r->coords = \AhgInformationObjectManage\Services\PrivacyService::redactionRect($r->coordinates ?? '{}');
+                }
+            }
+        } catch (\Throwable $e) { /* table missing in some installs */ }
+
+        // Security Classification (sidecar). Pre-resolves the classification's
+        // display name + colour + watermark name so the show view doesn't need
+        // to do any joins.
+        $security = null;
+        try {
+            $sec = DB::table('ahg_io_security')->where('object_id', $io->id)->first();
+            if ($sec) {
+                $cls = !empty($sec->security_classification_id)
+                    ? DB::table('security_classification')
+                        ->where('id', $sec->security_classification_id)
+                        ->select('name', 'color', 'icon')
+                        ->first()
+                    : null;
+                $wm = !empty($sec->watermark_type_id)
+                    ? DB::table('watermark_type')->where('id', $sec->watermark_type_id)->value('name')
+                    : null;
+                $security = (object) [
+                    'classification_id'      => $sec->security_classification_id,
+                    'classification_name'    => $cls->name  ?? null,
+                    'classification_color'   => $cls->color ?? null,
+                    'classification_icon'    => $cls->icon  ?? null,
+                    'reason'                 => $sec->security_reason,
+                    'review_date'            => $sec->security_review_date,
+                    'declassify_date'        => $sec->security_declassify_date,
+                    'handling_instructions'  => $sec->security_handling_instructions,
+                    'inherit_to_children'    => (int) ($sec->security_inherit_to_children ?? 0),
+                    'watermark_name'         => $wm,
+                ];
+            }
+        } catch (\Throwable $e) { /* sidecar table missing in some installs */ }
+
+        // Finding aid link - check if a finding aid file exists for the collection root
+        $findingAid = null;
+        $collectionRootId = $io->id;
+        $collectionRootSlug = $io->slug;
+        if ($io->parent_id && $io->parent_id != 1) {
+            // Walk up to the top-level description (collection root)
+            $rootId = $io->parent_id;
+            while ($rootId && $rootId != 1) {
+                $rootParent = DB::table('information_object')
+                    ->where('id', $rootId)
+                    ->select('id', 'parent_id')
+                    ->first();
+                if (!$rootParent || $rootParent->parent_id == 1) {
+                    $collectionRootId = $rootId;
+                    break;
+                }
+                $rootId = $rootParent->parent_id;
+            }
+            $collectionRootSlug = DB::table('slug')
+                ->where('object_id', $collectionRootId)
+                ->value('slug') ?? $io->slug;
+        }
+        // Check findingAidStatus property for the collection root
+        $findingAidStatusValue = DB::table('property')
+            ->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $collectionRootId)
+            ->where('property.name', 'findingAidStatus')
+            ->value('property_i18n.value');
+        if ($findingAidStatusValue) {
+            $faStatus = (int) $findingAidStatusValue;
+            $findingAid = (object) [
+                'status' => $faStatus,
+                'label' => $faStatus === 2 ? __('Uploaded finding aid') : ($faStatus === 1 ? __('Generated finding aid') : __('Finding aid')),
+                'slug' => $collectionRootSlug,
+            ];
+        }
+        // Fallback: check if finding aid file exists on disk
+        if (!$findingAid) {
+            $downloadsDir = storage_path('app/public/downloads');
+            foreach (['pdf', 'xml', 'rtf'] as $ext) {
+                if (file_exists($downloadsDir . '/finding-aid-' . $collectionRootId . '.' . $ext)) {
+                    $findingAid = (object) [
+                        'status' => 1,
+                        'label' => __('Generated finding aid'),
+                        'slug' => $collectionRootSlug,
+                    ];
+                    break;
+                }
+            }
+        }
+
+        // Related material descriptions (relation type_id = 176)
+        $relatedMaterialDescriptions = collect();
+        // Relations where this IO is the subject
+        $relatedBySubject = DB::table('relation')
+            ->join('information_object', 'relation.object_id', '=', 'information_object.id')
+            ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('relation.subject_id', $io->id)
+            ->where('relation.type_id', 176)
+            ->where('information_object_i18n.culture', $culture)
+            ->select('information_object.id', 'information_object_i18n.title', 'slug.slug')
+            ->get();
+        // Relations where this IO is the object
+        $relatedByObject = DB::table('relation')
+            ->join('information_object', 'relation.subject_id', '=', 'information_object.id')
+            ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('relation.object_id', $io->id)
+            ->where('relation.type_id', 176)
+            ->where('information_object_i18n.culture', $culture)
+            ->select('information_object.id', 'information_object_i18n.title', 'slug.slug')
+            ->get();
+        $relatedMaterialDescriptions = $relatedBySubject->merge($relatedByObject)->unique('id');
+
+        // Museum metadata (CCO fields) - present when this IO has a museum_metadata row.
+        // Culture-aware: per-culture overrides in museum_metadata_i18n with en fallback.
+        $museumMetadata = [];
+        try {
+            $museumMetadata = \AhgMuseum\Services\MuseumService::fetchTranslated((int) $io->id, app()->getLocale());
+        } catch (\Exception $e) {
+            // museum_metadata table may not exist in all installs
+        }
+
+        // Provenance chain (from provenance_entry table - CCO custody history)
+        $provenanceEntries = collect();
+        try {
+            $provenanceEntries = DB::table('provenance_entry')
+                ->where('information_object_id', $io->id)
+                ->orderBy('sequence', 'asc')
+                ->get();
+        } catch (\Exception $e) {
+            // provenance_entry table may not exist in all installs
+        }
+
+        // Previous sibling (only if lft is set - records without nested set values have no siblings)
+        $prevSibling = null;
+        $nextSibling = null;
+        if ($io->lft !== null) {
+            $prevSibling = DB::table('information_object')
+                ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+                ->join('slug', 'information_object.id', '=', 'slug.object_id')
+                ->where('information_object.parent_id', $io->parent_id)
+                ->where('information_object.lft', '<', $io->lft)
+                ->where('information_object_i18n.culture', $culture)
+                ->orderBy('information_object.lft', 'desc')
+                ->select('information_object.id', 'information_object_i18n.title', 'slug.slug')
+                ->first();
+
+            // Next sibling
+            $nextSibling = DB::table('information_object')
+                ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+                ->join('slug', 'information_object.id', '=', 'slug.object_id')
+                ->where('information_object.parent_id', $io->parent_id)
+                ->where('information_object.lft', '>', $io->lft)
+                ->where('information_object_i18n.culture', $culture)
+                ->orderBy('information_object.lft', 'asc')
+                ->select('information_object.id', 'information_object_i18n.title', 'slug.slug')
+                ->first();
+        }
+
+        // Display standard name (for Administration area)
+        $displayStandardName = null;
+        if ($io->display_standard_id) {
+            $displayStandardName = DB::table('term_i18n')
+                ->where('id', $io->display_standard_id)
+                ->where('culture', $culture)
+                ->value('name');
+        }
+
+        // Display standard options (taxonomy_id for display standards)
+        // AtoM uses taxonomy_id = 67 for "Display Standard" terms
+        $displayStandardOptions = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', 67)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('term_i18n.name')
+            ->select('term.id', 'term_i18n.name')
+            ->get();
+        // If taxonomy 67 yields nothing, fallback - check if terms exist under another id
+        if ($displayStandardOptions->isEmpty()) {
+            $displayStandardOptions = collect([
+                (object) ['id' => null, 'name' => 'ISAD(G)'],
+            ]);
+        }
+
+        // Audit log enabled setting
+        $auditLogEnabled = \AhgCore\Services\SettingHelper::isAuditLogEnabled();
+
+        // Source language name (for Administration area)
+        $sourceLanguageName = null;
+        if ($io->source_culture) {
+            $sourceLanguageName = \Locale::getDisplayLanguage($io->source_culture, $culture);
+        }
+
+        // Keymap entries (for Administration area - source name from imports)
+        $keymapEntries = collect();
+        try {
+            $keymapEntries = DB::table('keymap')
+                ->where('target_id', $io->id)
+                ->whereNotNull('source_name')
+                ->select('source_name')
+                ->get();
+        } catch (\Exception $e) {
+            // keymap table may not exist
+        }
+
+        // Translation links: get available cultures for this IO (other than current)
+        $translationLinks = [];
+        $availableCultures = DB::table('information_object_i18n')
+            ->where('id', $io->id)
+            ->where('culture', '!=', $culture)
+            ->pluck('title', 'culture');
+        foreach ($availableCultures as $code => $title) {
+            $langName = \Locale::getDisplayLanguage($code, $culture);
+            $translationLinks[$code] = [
+                'language' => ucfirst($langName),
+                'name' => $title ?: ($io->title ?? '[Untitled]'),
+            ];
+        }
+
+        // Digital object rights (rights linked to each digital object via relation)
+        $digitalObjectRights = [];
+        if (auth()->check() && isset($digitalObjects) && $digitalObjects['master']) {
+            foreach (['master', 'reference', 'thumbnail'] as $usageKey) {
+                $doObj = $digitalObjects[$usageKey] ?? null;
+                if (!$doObj) {
+                    continue;
+                }
+                try {
+                    $doRights = DB::table('relation')
+                        ->join('rights', 'relation.object_id', '=', 'rights.id')
+                        ->join('rights_i18n', 'rights.id', '=', 'rights_i18n.id')
+                        ->where('relation.subject_id', $doObj->id)
+                        ->where('relation.type_id', 168)
+                        ->where('rights_i18n.culture', $culture)
+                        ->select('rights.*', 'rights_i18n.rights_note')
+                        ->get();
+                    if ($doRights->isNotEmpty()) {
+                        // Get usage name from term_i18n
+                        $usageName = DB::table('term_i18n')
+                            ->where('id', $doObj->usage_id ?? 0)
+                            ->where('culture', $culture)
+                            ->value('name') ?? ucfirst($usageKey);
+                        $digitalObjectRights[$usageKey] = [
+                            'usageName' => $usageName,
+                            'rights' => $doRights,
+                        ];
+                    }
+                } catch (\Exception $e) {
+                    // rights table structure may vary
+                }
+            }
+        }
+
+        // GLAM routing: prefer the object's OWN GLAM type (display_object_config) over
+        // the level's sector. An object the curator explicitly typed (e.g. 'archive')
+        // must not be force-redirected to a sector viewer just because its level
+        // (e.g. Photograph -> dam sector) maps elsewhere; the type viewers gate on
+        // display_object_config.object_type, so a mismatch 404s. 'archive' and any
+        // unmapped type render the ISAD view here. Fall back to the level-sector only
+        // when the object has no per-object GLAM type.
+        if ($io->level_of_description_id || Schema::hasTable('display_object_config')) {
+            $sectorRoutes = [
+                'library' => 'library.show',
+                'museum'  => 'museum.show',
+                'gallery' => 'gallery.show',
+                'dam'     => 'dam.show',
+            ];
+
+            $glamType = Schema::hasTable('display_object_config')
+                ? DB::table('display_object_config')->where('object_id', $io->id)->value('object_type')
+                : null;
+
+            if ($glamType !== null && $glamType !== '') {
+                // Per-object type is authoritative; 'archive'/unmapped => no redirect (ISAD view).
+                $sector = isset($sectorRoutes[$glamType]) ? $glamType : null;
+            } elseif ($io->level_of_description_id && Schema::hasTable('level_of_description_sector')) {
+                $sector = DB::table('level_of_description_sector')
+                    ->where('term_id', $io->level_of_description_id)
+                    ->whereNotIn('sector', ['archive'])
+                    ->orderBy('display_order')
+                    ->value('sector');
+            } else {
+                $sector = null;
+            }
+
+            if ($sector && isset($sectorRoutes[$sector])) {
+                try {
+                    $targetRoute = $sectorRoutes[$sector];
+                    if (\Illuminate\Support\Facades\Route::has($targetRoute)) {
+                        session()->reflash();
+                        return redirect()->route($targetRoute, $slug);
+                    }
+                } catch (\Exception $e) {
+                    // Sector route not available - fall through to ISAD view
+                }
+            }
+        }
+
+        // #98 Phase 2: pull per-standard sidecar rows so show-dacs.blade.php /
+        // show-rad.blade.php / show-mods.blade.php can render the standard-
+        // specific elements that aren't in information_object_i18n. Each
+        // returns null when no row exists; templates use null-safe access.
+        $dacsExt = \Illuminate\Support\Facades\Schema::hasTable('ahg_io_dacs')
+            ? \Illuminate\Support\Facades\DB::table('ahg_io_dacs')->where('information_object_id', $io->id)->first()
+            : null;
+        $radExt  = \Illuminate\Support\Facades\Schema::hasTable('ahg_io_rad')
+            ? \Illuminate\Support\Facades\DB::table('ahg_io_rad')->where('information_object_id', $io->id)->first()
+            : null;
+        $modsExt = \Illuminate\Support\Facades\Schema::hasTable('ahg_io_mods')
+            ? \Illuminate\Support\Facades\DB::table('ahg_io_mods')->where('information_object_id', $io->id)->first()
+            : null;
+
+        // #1425: RiC-O JSON-LD for the show-ric template, engine-guarded so a
+        // minimal install without ahg/ric simply renders no RiC panel.
+        $ricEnt = null;
+        if (\Illuminate\Support\Facades\View::exists('ahg-io-manage::show-ric')
+            && class_exists(\AhgRic\Services\RicSerializationService::class)) {
+            try {
+                $ric = app(\AhgRic\Services\RicSerializationService::class)->serializeRecord($io->id);
+                $ricEnt = is_array($ric) && ! isset($ric['error']) ? $ric : null;
+            } catch (\Throwable $e) {
+                $ricEnt = null;
+            }
+        }
+
+        // #98 Phase 1 + #1425: pick the view PER RECORD from this IO's own
+        // display_standard_id (its taxonomy-70 code -> show-{code}), falling
+        // back to the instance-wide setting.scope='default_template' when the
+        // record sets none. This is what makes one record render show-ric /
+        // show-dacs / show-rad / show-mods while its neighbours stay on isad.
+        return view(\AhgCore\Services\SettingHelper::resolveObjectTemplateView('informationobject', 'ahg-io-manage::show', 'isad', $io->display_standard_id ?? null), [
+            'io' => $io,
+            'dacsExt' => $dacsExt,
+            'radExt'  => $radExt,
+            'modsExt' => $modsExt,
+            'ricEnt'  => $ricEnt,
+            'levelName' => $levelName,
+            'repository' => $repository,
+            'events' => $events,
+            'eventTypeNames' => $eventTypeNames,
+            'creators' => $creators,
+            'digitalObjects' => $digitalObjects,
+            'notes' => $notes,
+            'noteTypeNames' => $noteTypeNames,
+            'children' => $children,
+            'childLevelNames' => $childLevelNames,
+            'breadcrumbs' => $breadcrumbs,
+            'subjects' => $subjects,
+            'places' => $places,
+            'nameAccessPoints' => $nameAccessPoints,
+            'genres' => $genres,
+            'languages' => $languages,
+            'publicationStatus' => $publicationStatus,
+            'publicationStatusId' => $publicationStatusId,
+            'functionRelations' => $functionRelations,
+            'alternativeIdentifiers' => $alternativeIdentifiers,
+            'physicalObjects' => $physicalObjects,
+            'physicalObjectTypeNames' => $physicalObjectTypeNames,
+            'rights' => $rights,
+            'extendedRights' => $extendedRights,
+            'extendedRightsTkLabels' => $extendedRightsTkLabels,
+            'accessions' => $accessions,
+            'descriptionStatusName' => $descriptionStatusName,
+            'descriptionDetailName' => $descriptionDetailName,
+            'collectionTypeName' => $collectionTypeName,
+            'languagesOfDescription' => $languagesOfDescription,
+            'scriptsOfDescription' => $scriptsOfDescription,
+            'materialLanguages' => $materialLanguages,
+            'materialScripts' => $materialScripts,
+            'prevSibling' => $prevSibling,
+            'nextSibling' => $nextSibling,
+            'findingAid' => $findingAid,
+            'relatedMaterialDescriptions' => $relatedMaterialDescriptions,
+            'museumMetadata' => $museumMetadata,
+            'security' => $security,
+            'visualRedactions' => $visualRedactions,
+            'canBypassRedaction' => $canBypassRedaction,
+            'collectionRootId' => $collectionRootId,
+            'hasChildren' => ($io->rgt - $io->lft) > 1,
+            'displayStandardName' => $displayStandardName,
+            'sourceLanguageName' => $sourceLanguageName,
+            'keymapEntries' => $keymapEntries,
+            'translationLinks' => $translationLinks,
+            'digitalObjectRights' => $digitalObjectRights,
+            'activeEmbargo' => $activeEmbargo,
+            'childThumbnails' => $childThumbnails,
+            'childThumbnailTotal' => $childThumbnailTotal,
+            'nerEntityCount' => $nerEntityCount,
+            'displayStandardOptions' => $displayStandardOptions,
+            'auditLogEnabled' => $auditLogEnabled,
+            'provenanceEntries' => $provenanceEntries,
+        ]);
+    }
+
+    /**
+     * Update the display standard for an information object (Administration area).
+     */
+    public function updateDisplayStandard(Request $request, string $slug)
+    {
+        $io = DB::table('information_object')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->select('information_object.id', 'information_object.lft', 'information_object.rgt')
+            ->first();
+
+        if (!$io) {
+            abort(404);
+        }
+
+        $displayStandardId = $request->input('display_standard_id');
+        $updateDescendants = $request->boolean('update_descendants', false);
+
+        $previousDisplayStandardId = DB::table('information_object')->where('id', $io->id)->value('display_standard_id');
+
+        // Update this IO
+        DB::table('information_object')
+            ->where('id', $io->id)
+            ->update(['display_standard_id' => $displayStandardId ?: null]);
+
+        // Optionally update all descendants
+        if ($updateDescendants) {
+            DB::table('information_object')
+                ->where('lft', '>', $io->lft)
+                ->where('rgt', '<', $io->rgt)
+                ->update(['display_standard_id' => $displayStandardId ?: null]);
+        }
+
+        \AhgCore\Support\AuditLog::captureMutation((int) $io->id, 'information_object', 'display_standard_change', [
+            'data' => [
+                'before' => $previousDisplayStandardId,
+                'after' => $displayStandardId ?: null,
+                'cascade_descendants' => (bool) $updateDescendants,
+            ],
+        ]);
+
+        return redirect()->route('informationobject.show', $slug)
+            ->with('success', 'Display standard updated.' . ($updateDescendants ? ' Descendants updated.' : ''));
+    }
+
+    /**
+     * AI Describe - uses vision model (llava) if image exists, else text LLM.
+     */
+    public function aiDescribe(Request $request, int $id)
+    {
+        $startTime = microtime(true);
+        $culture = app()->getLocale();
+
+        // Get IO title and metadata
+        $io = DB::table('information_object_i18n')
+            ->where('id', $id)->where('culture', $culture)->first();
+        $title = $io->title ?? 'Untitled';
+
+        // Check for digital object (any usage - master=140, external=166, etc.)
+        $master = DB::table('digital_object')
+            ->where('object_id', $id)->orderBy('usage_id')->first();
+
+        // External embed - not describable by AI
+        if ($master && $master->path && (str_contains($master->path, 'http://') || str_contains($master->path, 'https://'))) {
+            return response()->json([
+                'success' => true,
+                'description' => "This record links to an external digital object:\n\n" . $master->path . "\n\nThe object is hosted externally and cannot be analysed by the local AI. Visit the link above to view the original.",
+                'method' => 'external',
+                'processing_time_ms' => round((microtime(true) - $startTime) * 1000),
+            ]);
+        }
+
+        $refImage = null;
+        if ($master) {
+            $ref = DB::table('digital_object')
+                ->where('parent_id', $master->id)
+                ->where('usage_id', 141) // reference
+                ->first();
+            if ($ref) {
+                $imgPath = config('heratio.uploads_path') . '/' . ltrim($ref->path, '/') . $ref->name;
+                if (file_exists($imgPath)) {
+                    $refImage = $imgPath;
+                }
+            }
+            // Fallback to master if it's an image
+            if (!$refImage && $master->mime_type && str_starts_with($master->mime_type, 'image/')) {
+                $imgPath = config('heratio.uploads_path') . '/' . ltrim($master->path, '/') . $master->name;
+                if (file_exists($imgPath)) {
+                    $refImage = $imgPath;
+                }
+            }
+        }
+
+        if ($refImage) {
+            // Issue #99: route through VoiceLLMService so /admin/ahgSettings/voice_ai
+            // controls (provider local/cloud/hybrid, timeout, daily cloud limit,
+            // audit toggle, anthropic key + cloud model) all take effect on the
+            // describe-image flow. The previous inline Http::post() honoured only
+            // voice_local_llm_url + a hardcoded llava:7b model.
+            $imageBase64 = base64_encode(file_get_contents($refImage));
+            $mimeType = function_exists('mime_content_type') ? (mime_content_type($refImage) ?: 'image/jpeg') : 'image/jpeg';
+            $prompt = "You are an archival description specialist. Describe this image in detail for an archival record titled \"{$title}\". "
+                . "Write a professional scope and content note (3-5 sentences) following ISAD(G) standards. "
+                . "Describe what you see: the subject, composition, condition, any text visible, and historical context if apparent.";
+
+            $llmResult = (new \AhgCore\Services\VoiceLLMService())->chat($prompt, $imageBase64, [
+                'temperature' => 0.3,
+                'media_type'  => $mimeType,
+                'max_tokens'  => 1024,
+            ]);
+            if ($llmResult['ok']) {
+                return response()->json([
+                    'success'            => true,
+                    'description'        => (string) $llmResult['text'],
+                    'method'             => 'vision',
+                    'model'              => $llmResult['model'],
+                    'provider'           => $llmResult['provider'],
+                    'processing_time_ms' => round((microtime(true) - $startTime) * 1000),
+                ]);
+            }
+            // VoiceLLMService failure (Ollama unreachable, daily limit hit,
+            // bad cloud key, etc.) - fall through to text LLM fallback below.
+        }
+
+        // Text LLM fallback - describe from title and metadata
+        try {
+            $svc = new \AhgAiServices\Services\LlmService();
+            $context = ($io->scope_and_content ?? '') . ' ' . ($io->extent_and_medium ?? '');
+            $desc = $svc->suggestDescription($title, trim($context));
+
+            if ($desc) {
+                return response()->json([
+                    'success' => true,
+                    'description' => $desc,
+                    'method' => 'text',
+                    'processing_time_ms' => round((microtime(true) - $startTime) * 1000),
+                ]);
+            }
+        } catch (\Exception $e) {
+            // Fall through
+        }
+
+        return response()->json([
+            'success' => false,
+            'error' => 'AI description failed. Check LLM configuration.',
+        ], 500);
+    }
+
+    /**
+     * Print-friendly view for an information object.
+     */
+    public function print(string $slug)
+    {
+        // Reuse show() data gathering via a helper, then render print view
+        $culture = app()->getLocale();
+
+        $io = DB::table('information_object')
+            ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+            ->join('object', 'information_object.id', '=', 'object.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->where('information_object_i18n.culture', $culture)
+            ->select([
+                'information_object.id',
+                'information_object.identifier',
+                'information_object.level_of_description_id',
+                'information_object.repository_id',
+                'information_object.parent_id',
+                'information_object.lft',
+                'information_object.rgt',
+                'information_object.description_status_id',
+                'information_object.description_detail_id',
+                'information_object.description_identifier',
+                'information_object.source_standard',
+                'information_object.display_standard_id',
+                'information_object.collection_type_id',
+                'information_object.source_culture',
+                'information_object_i18n.title',
+                'information_object_i18n.alternate_title',
+                'information_object_i18n.edition',
+                'information_object_i18n.extent_and_medium',
+                'information_object_i18n.archival_history',
+                'information_object_i18n.acquisition',
+                'information_object_i18n.scope_and_content',
+                'information_object_i18n.appraisal',
+                'information_object_i18n.accruals',
+                'information_object_i18n.arrangement',
+                'information_object_i18n.access_conditions',
+                'information_object_i18n.reproduction_conditions',
+                'information_object_i18n.physical_characteristics',
+                'information_object_i18n.finding_aids',
+                'information_object_i18n.location_of_originals',
+                'information_object_i18n.location_of_copies',
+                'information_object_i18n.related_units_of_description',
+                'information_object_i18n.rules',
+                'information_object_i18n.sources',
+                'information_object_i18n.revision_history',
+                'information_object_i18n.institution_responsible_identifier',
+                'object.created_at',
+                'object.updated_at',
+                'slug.slug',
+            ])
+            ->first();
+
+        if (!$io) {
+            abort(404);
+        }
+
+        $levelName = null;
+        if ($io->level_of_description_id) {
+            $levelName = DB::table('term_i18n')->where('id', $io->level_of_description_id)->where('culture', $culture)->value('name');
+        }
+
+        $repository = null;
+        if ($io->repository_id) {
+            $repository = DB::table('repository')
+                ->join('actor_i18n', 'repository.id', '=', 'actor_i18n.id')
+                ->join('slug', 'repository.id', '=', 'slug.object_id')
+                ->where('repository.id', $io->repository_id)->where('actor_i18n.culture', $culture)
+                ->select('repository.id', 'actor_i18n.authorized_form_of_name as name', 'slug.slug')->first();
+        }
+
+        $events = DB::table('event')->join('event_i18n', 'event.id', '=', 'event_i18n.id')
+            ->where('event.object_id', $io->id)->where('event_i18n.culture', $culture)
+            ->select('event.id', 'event.type_id', 'event.actor_id', 'event.start_date', 'event.end_date', 'event_i18n.date as date_display', 'event_i18n.name as event_name')->get();
+
+        $eventTypeIds = $events->pluck('type_id')->filter()->unique()->values()->toArray();
+        $eventTypeNames = [];
+        if (!empty($eventTypeIds)) {
+            $eventTypeNames = DB::table('term_i18n')->whereIn('id', $eventTypeIds)->where('culture', $culture)->pluck('name', 'id')->toArray();
+        }
+
+        $creators = DB::table('event')
+            ->join('actor', 'event.actor_id', '=', 'actor.id')
+            ->join('actor_i18n', 'event.actor_id', '=', 'actor_i18n.id')
+            ->join('slug', 'event.actor_id', '=', 'slug.object_id')
+            ->where('event.object_id', $io->id)->where('event.type_id', 111)->where('actor_i18n.culture', $culture)->whereNotNull('event.actor_id')
+            ->select('event.actor_id as id', 'actor_i18n.authorized_form_of_name as name', 'actor_i18n.history', 'actor_i18n.dates_of_existence', 'actor.entity_type_id', 'slug.slug')
+            ->distinct()->get();
+
+        $notes = DB::table('note')->join('note_i18n', 'note.id', '=', 'note_i18n.id')
+            ->where('note.object_id', $io->id)->where('note_i18n.culture', $culture)
+            ->select('note.id', 'note.type_id', 'note_i18n.content')->get();
+
+        $children = DB::table('information_object')
+            ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('information_object.parent_id', $io->id)->where('information_object_i18n.culture', $culture)
+            ->orderBy('information_object.lft')
+            ->select('information_object.id', 'information_object.level_of_description_id', 'information_object_i18n.title', 'slug.slug')->get();
+
+        $childLevelIds = $children->pluck('level_of_description_id')->filter()->unique()->values()->toArray();
+        $childLevelNames = [];
+        if (!empty($childLevelIds)) {
+            $childLevelNames = DB::table('term_i18n')->whereIn('id', $childLevelIds)->where('culture', $culture)->pluck('name', 'id')->toArray();
+        }
+
+        $breadcrumbs = [];
+        $parentId = $io->parent_id;
+        while ($parentId && $parentId != 1) {
+            $parent = DB::table('information_object')
+                ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+                ->join('slug', 'information_object.id', '=', 'slug.object_id')
+                ->where('information_object.id', $parentId)->where('information_object_i18n.culture', $culture)
+                ->select('information_object.id', 'information_object.parent_id', 'information_object_i18n.title', 'slug.slug')->first();
+            if (!$parent) break;
+            array_unshift($breadcrumbs, $parent);
+            $parentId = $parent->parent_id;
+        }
+
+        $subjects = DB::table('object_term_relation')->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->where('object_term_relation.object_id', $io->id)->where('term.taxonomy_id', 35)->where('term_i18n.culture', $culture)
+            ->select('term_i18n.name')->get();
+
+        $places = DB::table('object_term_relation')->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->where('object_term_relation.object_id', $io->id)->where('term.taxonomy_id', 42)->where('term_i18n.culture', $culture)
+            ->select('term_i18n.name')->get();
+
+        $nameAccessPoints = DB::table('relation')->join('actor_i18n', 'relation.object_id', '=', 'actor_i18n.id')
+            ->where('relation.subject_id', $io->id)->where('relation.type_id', 161)->where('actor_i18n.culture', $culture)
+            ->select('actor_i18n.authorized_form_of_name as name')->get();
+
+        $genres = DB::table('object_term_relation')->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->where('object_term_relation.object_id', $io->id)->where('term.taxonomy_id', 78)->where('term_i18n.culture', $culture)
+            ->select('term_i18n.name')->get();
+
+        $languages = DB::table('information_object')
+            ->join('object_term_relation', 'information_object.id', '=', 'object_term_relation.object_id')
+            ->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->where('information_object.id', $io->id)->where('term.taxonomy_id', 7)->where('term_i18n.culture', $culture)
+            ->select('term_i18n.name')->get();
+
+        $publicationStatus = null;
+        $statusRow = DB::table('status')->where('object_id', $io->id)->where('type_id', 158)->first();
+        if ($statusRow && $statusRow->status_id) {
+            $publicationStatus = DB::table('term_i18n')->where('id', $statusRow->status_id)->where('culture', $culture)->value('name');
+        }
+
+        $functionRelations = collect();
+        try {
+            $functionRelations = DB::table('relation')
+                ->join('function_object', 'relation.subject_id', '=', 'function_object.id')
+                ->join('function_object_i18n', 'function_object.id', '=', 'function_object_i18n.id')
+                ->join('slug', 'function_object.id', '=', 'slug.object_id')
+                ->where('relation.object_id', $io->id)->where('function_object_i18n.culture', $culture)
+                ->select('function_object.id', 'function_object_i18n.authorized_form_of_name as name', 'slug.slug')->get();
+        } catch (\Exception $e) {}
+
+        $alternativeIdentifiers = DB::table('property')->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $io->id)->where('property.name', 'alternativeIdentifiers')->where('property_i18n.culture', $culture)
+            ->select('property_i18n.value')->get();
+
+        $physicalObjects = DB::table('relation')
+            ->join('physical_object', 'relation.object_id', '=', 'physical_object.id')
+            ->join('physical_object_i18n', 'physical_object.id', '=', 'physical_object_i18n.id')
+            ->where('relation.subject_id', $io->id)->where('relation.type_id', 151)->where('physical_object_i18n.culture', $culture)
+            ->select('physical_object.id', 'physical_object_i18n.name', 'physical_object_i18n.description', 'physical_object_i18n.location', 'physical_object.type_id')->get();
+
+        $physicalObjectTypeIds = $physicalObjects->pluck('type_id')->filter()->unique()->values()->toArray();
+        $physicalObjectTypeNames = [];
+        if (!empty($physicalObjectTypeIds)) {
+            $physicalObjectTypeNames = DB::table('term_i18n')->whereIn('id', $physicalObjectTypeIds)->where('culture', $culture)->pluck('name', 'id')->toArray();
+        }
+
+        $rights = collect();
+        if (auth()->check()) {
+            try {
+                $rights = DB::table('relation')->join('rights', 'relation.object_id', '=', 'rights.id')
+                    ->join('rights_i18n', 'rights.id', '=', 'rights_i18n.id')
+                    ->where('relation.subject_id', $io->id)->where('relation.type_id', 168)->where('rights_i18n.culture', $culture)
+                    ->select('rights.*', 'rights_i18n.rights_note')->get();
+            } catch (\Exception $e) {}
+        }
+
+        $accessions = collect();
+        try {
+            $accessions = DB::table('relation')
+                ->join('accession', 'relation.object_id', '=', 'accession.id')
+                ->join('accession_i18n', 'accession.id', '=', 'accession_i18n.id')
+                ->join('slug', 'accession.id', '=', 'slug.object_id')
+                ->where('relation.subject_id', $io->id)->where('accession_i18n.culture', $culture)
+                ->select('accession.id', 'accession.identifier', 'accession_i18n.title', 'slug.slug')->get();
+        } catch (\Exception $e) {}
+
+        $descriptionStatusName = null;
+        if ($io->description_status_id) {
+            $descriptionStatusName = DB::table('term_i18n')->where('id', $io->description_status_id)->where('culture', $culture)->value('name');
+        }
+        $descriptionDetailName = null;
+        if ($io->description_detail_id) {
+            $descriptionDetailName = DB::table('term_i18n')->where('id', $io->description_detail_id)->where('culture', $culture)->value('name');
+        }
+
+        $languagesOfDescriptionRaw = DB::table('property')->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $io->id)->where('property.name', 'languageOfDescription')->where('property_i18n.culture', $culture)->value('property_i18n.value');
+        $languagesOfDescription = collect();
+        if ($languagesOfDescriptionRaw) { $decoded = @unserialize($languagesOfDescriptionRaw, ['allowed_classes' => false]); if (is_array($decoded) && !empty($decoded)) { $languagesOfDescription = collect($decoded); } }
+
+        $scriptsOfDescriptionRaw = DB::table('property')->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $io->id)->where('property.name', 'scriptOfDescription')->where('property_i18n.culture', $culture)->value('property_i18n.value');
+        $scriptsOfDescription = collect();
+        if ($scriptsOfDescriptionRaw) { $decoded = @unserialize($scriptsOfDescriptionRaw, ['allowed_classes' => false]); if (is_array($decoded) && !empty($decoded)) { $scriptsOfDescription = collect($decoded); } }
+
+        $materialScriptsRaw = DB::table('property')->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $io->id)->where('property.name', 'script')->where('property_i18n.culture', $culture)->value('property_i18n.value');
+        $materialScripts = collect();
+        if ($materialScriptsRaw) { $decoded = @unserialize($materialScriptsRaw, ['allowed_classes' => false]); if (is_array($decoded) && !empty($decoded)) { $materialScripts = collect($decoded); } }
+
+        return view('ahg-io-manage::print', [
+            'io' => $io,
+            'levelName' => $levelName,
+            'repository' => $repository,
+            'events' => $events,
+            'eventTypeNames' => $eventTypeNames,
+            'creators' => $creators,
+            'notes' => $notes,
+            'children' => $children,
+            'childLevelNames' => $childLevelNames,
+            'breadcrumbs' => $breadcrumbs,
+            'subjects' => $subjects,
+            'places' => $places,
+            'nameAccessPoints' => $nameAccessPoints,
+            'genres' => $genres,
+            'languages' => $languages,
+            'publicationStatus' => $publicationStatus,
+            'functionRelations' => $functionRelations,
+            'alternativeIdentifiers' => $alternativeIdentifiers,
+            'physicalObjects' => $physicalObjects,
+            'physicalObjectTypeNames' => $physicalObjectTypeNames,
+            'rights' => $rights,
+            'accessions' => $accessions,
+            'descriptionStatusName' => $descriptionStatusName,
+            'descriptionDetailName' => $descriptionDetailName,
+            'languagesOfDescription' => $languagesOfDescription,
+            'scriptsOfDescription' => $scriptsOfDescription,
+            'materialScripts' => $materialScripts,
+        ]);
+    }
+
+    /**
+     * Fetch dropdown options used by edit and create forms.
+     */
+    private function getFormDropdowns(string $culture, ?string $sector = null): array
+    {
+        // Level of description options (taxonomy_id = 34), filtered to the
+        // record's SECTOR via level_of_description_sector: an archival record
+        // offers the nine ISAD levels, a museum record offers museum levels,
+        // etc. Without a sector filter every sector's levels appear, the user
+        // picks the wrong one, and save redirects to the wrong sector viewer.
+        // Falls back to 'archive' when the sector is unknown (e.g. a brand-new
+        // top-level record with no context). DISTINCT because a term can carry
+        // duplicate sector-mapping rows (seed drift), which otherwise shows the
+        // same level twice in the dropdown.
+        $sector = in_array($sector, ['archive', 'library', 'museum', 'dam', 'gallery'], true) ? $sector : 'archive';
+        $levels = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->join('level_of_description_sector', function ($j) use ($sector) {
+                $j->on('term.id', '=', 'level_of_description_sector.term_id')
+                  ->where('level_of_description_sector.sector', '=', $sector);
+            })
+            ->where('term.taxonomy_id', 34)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('level_of_description_sector.display_order')
+            ->distinct()
+            // display_order must be SELECTed too: DISTINCT + ORDER BY on a
+            // non-selected column is rejected by MySQL (error 3065). The extra
+            // column is harmless (the view reads id + name).
+            ->select('term.id', 'term_i18n.name', 'level_of_description_sector.display_order')
+            ->get();
+
+        // Repositories
+        $repositories = DB::table('repository')
+            ->join('actor_i18n', 'repository.id', '=', 'actor_i18n.id')
+            ->where('actor_i18n.culture', $culture)
+            ->orderBy('actor_i18n.authorized_form_of_name')
+            ->select('repository.id', 'actor_i18n.authorized_form_of_name as name')
+            ->get();
+
+        // Description status options (AtoM QubitTaxonomy::DESCRIPTION_STATUS_ID = 33)
+        $descriptionStatuses = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', 33)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('term_i18n.name')
+            ->select('term.id', 'term_i18n.name')
+            ->get();
+
+        // Description detail options (AtoM QubitTaxonomy::DESCRIPTION_DETAIL_LEVEL_ID = 31)
+        $descriptionDetails = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', 31)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('term_i18n.name')
+            ->select('term.id', 'term_i18n.name')
+            ->get();
+
+        // Display standard options (taxonomy_id = 52 - descriptive standards)
+        // Taxonomy 70 = "Information object templates" (AtoM
+        // INFORMATION_OBJECT_TEMPLATE_ID): ISAD(G), Dublin Core, MODS, RAD,
+        // DACS, Museum (CCO), Photo/DAM, Gallery, Library. Was wrongly pointed
+        // at taxonomy 52 ("RAD Title Note"), which filled the Display standard
+        // dropdown with title-note terms.
+        $displayStandards = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', 70)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('term_i18n.name')
+            // #1425: `code` drives the dynamic field-set swap (data-code on the option).
+            ->select('term.id', 'term_i18n.name', 'term.code')
+            ->get();
+
+        // Event type options (taxonomy_id = 40)
+        $eventTypes = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', 40)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('term_i18n.name')
+            ->select('term.id', 'term_i18n.name')
+            ->get();
+
+        // Note types for general notes (ISAD)
+        $noteTypes = collect([
+            (object) ['id' => 125, 'name' => 'General note'],
+            (object) ['id' => 174, 'name' => 'Language note'],
+        ]);
+
+        // Security classifications
+        $securityClassifications = DB::table('security_classification')
+            ->orderBy('level')
+            ->select('id', 'name', 'level')
+            ->get();
+
+        // Watermark types
+        $watermarkTypes = DB::table('watermark_type')
+            ->orderBy('name')
+            ->select('id', 'name', 'image_file')
+            ->get();
+
+        // Collection type options (AtoM QubitTaxonomy::COLLECTION_TYPE_ID = 45)
+        $collectionTypes = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', 45)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('term_i18n.name')
+            ->select('term.id', 'term_i18n.name')
+            ->get();
+
+        return compact('levels', 'repositories', 'descriptionStatuses', 'descriptionDetails', 'displayStandards', 'eventTypes', 'noteTypes', 'securityClassifications', 'watermarkTypes', 'collectionTypes');
+    }
+
+    /**
+     * Best-effort GLAM sector for a record, used to scope the level-of-description
+     * dropdown. Prefers the record's own display_object_config.object_type; falls
+     * back to the sector its current level maps to (preferring a non-archive
+     * sector, mirroring the show-page routing); null when unknown (the caller then
+     * defaults to 'archive'). Read-only, never throws.
+     */
+    private function resolveIoSector(?int $ioId, ?int $levelId): ?string
+    {
+        $valid = ['archive', 'library', 'museum', 'dam', 'gallery'];
+        try {
+            if ($ioId && Schema::hasTable('display_object_config')) {
+                $t = DB::table('display_object_config')->where('object_id', $ioId)->value('object_type');
+                if (in_array($t, $valid, true)) {
+                    return $t;
+                }
+            }
+            if ($levelId && Schema::hasTable('level_of_description_sector')) {
+                $s = DB::table('level_of_description_sector')->where('term_id', $levelId)->whereNotIn('sector', ['archive'])->value('sector')
+                    ?: DB::table('level_of_description_sector')->where('term_id', $levelId)->value('sector');
+                if (in_array($s, $valid, true)) {
+                    return $s;
+                }
+            }
+        } catch (\Throwable $e) {
+            // ignore - fall through to null (caller defaults to archive)
+        }
+
+        return null;
+    }
+
+    /**
+     * Show the edit form for an information object.
+     */
+    public function edit(string $slug)
+    {
+        $culture = app()->getLocale();
+
+        // Legacy AtoM-style ?storage=1 query param - that flag means "Link
+        // physical storage", not "edit the description". Forward to the
+        // physical-storage UI so old bookmarks / external links still work.
+        if (request()->has('storage') && (int) request()->query('storage') === 1) {
+            return redirect()->route('physicalobject.link-to', $slug);
+        }
+
+        // LEFT JOIN i18n on (id, culture) so the edit form still renders when
+        // the target culture has no row yet - translator sees empty fields and
+        // can populate them. INNER JOIN here would 404 on every untranslated
+        // record opened with ?sf_culture=<new-locale>.
+        $io = DB::table('information_object')
+            ->leftJoin('information_object_i18n', function ($j) use ($culture) {
+                $j->on('information_object.id', '=', 'information_object_i18n.id')
+                  ->where('information_object_i18n.culture', '=', $culture);
+            })
+            ->join('object', 'information_object.id', '=', 'object.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->select([
+                'information_object.id',
+                'information_object.identifier',
+                'information_object.oai_local_identifier',
+                'information_object.level_of_description_id',
+                'information_object.collection_type_id',
+                'information_object.repository_id',
+                'information_object.parent_id',
+                'information_object.description_status_id',
+                'information_object.description_detail_id',
+                'information_object.description_identifier',
+                'information_object.source_standard',
+                'information_object.display_standard_id',
+                'information_object.source_culture',
+                'information_object.icip_sensitivity',
+                'information_object_i18n.title',
+                'information_object_i18n.alternate_title',
+                'information_object_i18n.edition',
+                'information_object_i18n.extent_and_medium',
+                'information_object_i18n.archival_history',
+                'information_object_i18n.acquisition',
+                'information_object_i18n.scope_and_content',
+                'information_object_i18n.appraisal',
+                'information_object_i18n.accruals',
+                'information_object_i18n.arrangement',
+                'information_object_i18n.access_conditions',
+                'information_object_i18n.reproduction_conditions',
+                'information_object_i18n.physical_characteristics',
+                'information_object_i18n.finding_aids',
+                'information_object_i18n.location_of_originals',
+                'information_object_i18n.location_of_copies',
+                'information_object_i18n.related_units_of_description',
+                'information_object_i18n.institution_responsible_identifier',
+                'information_object_i18n.rules',
+                'information_object_i18n.sources',
+                'information_object_i18n.revision_history',
+                'object.created_at',
+                'object.updated_at',
+                'slug.slug',
+            ])
+            ->first();
+
+        if (!$io) {
+            abort(404);
+        }
+
+        // #1425: hand a record off to its own description-standard editor when
+        // it has one (RiC/DACS/RAD/MODS/DC). standardEditRoute() returns the
+        // generic 'informationobject.edit' when the record sets no standard OR
+        // the matching *-manage package is absent (Route::has guard), so this
+        // is a no-op on a minimal install and never loops back here.
+        $standardRoute = \AhgCore\Services\SettingHelper::standardEditRoute($io->display_standard_id ?? null);
+        if ($standardRoute !== 'informationobject.edit') {
+            return redirect()->route($standardRoute, ['slug' => $slug]);
+        }
+
+        // Scope the level-of-description options to THIS record's sector.
+        $dropdowns = $this->getFormDropdowns($culture, $this->resolveIoSector((int) $io->id, $io->level_of_description_id ?? null));
+
+        // Museum metadata (CCO fields) - present when this IO has a museum_metadata row
+        $museumMetadata = [];
+        try {
+            $mmRow = DB::table('museum_metadata')
+                ->where('object_id', $io->id)
+                ->first();
+            if ($mmRow) {
+                $museumMetadata = (array) $mmRow;
+            }
+        } catch (\Exception $e) {
+            // museum_metadata table may not exist in all installs
+        }
+
+        // Events (dates) - multi-row with type, date display, start/end, actor
+        $events = DB::table('event')
+            ->join('event_i18n', 'event.id', '=', 'event_i18n.id')
+            ->where('event.object_id', $io->id)
+            ->where('event_i18n.culture', $culture)
+            ->select('event.id', 'event.type_id', 'event.actor_id', 'event.start_date', 'event.end_date', 'event_i18n.date as date_display', 'event_i18n.name as event_name')
+            ->get();
+        // Resolve actor names for events
+        foreach ($events as $evt) {
+            $evt->actor_name = null;
+            if ($evt->actor_id) {
+                $evt->actor_name = DB::table('actor_i18n')->where('id', $evt->actor_id)->where('culture', $culture)->value('authorized_form_of_name');
+            }
+        }
+
+        // Creators (events where type_id = 111)
+        $creators = DB::table('event')
+            ->join('actor', 'event.actor_id', '=', 'actor.id')
+            ->join('actor_i18n', 'event.actor_id', '=', 'actor_i18n.id')
+            ->where('event.object_id', $io->id)
+            ->where('event.type_id', 111)
+            ->where('actor_i18n.culture', $culture)
+            ->whereNotNull('event.actor_id')
+            ->select('event.actor_id as id', 'actor_i18n.authorized_form_of_name as name')
+            ->distinct()
+            ->get();
+
+        // Notes (all note types)
+        $notes = DB::table('note')
+            ->join('note_i18n', 'note.id', '=', 'note_i18n.id')
+            ->where('note.object_id', $io->id)
+            ->where('note_i18n.culture', $culture)
+            ->select('note.id', 'note.type_id', 'note_i18n.content')
+            ->get();
+
+        // Note type ids in taxonomy 37: 120 = Publication note, 124 = Archivist's
+        // note. Generals (125 = General, 174 = Language) and any other types fall
+        // through to $generalNotes for the typed multi-row table.
+        $publicationNotes = $notes->where('type_id', 120)->values();
+        $archivistNotes = $notes->where('type_id', 124)->values();
+        $generalNotes = $notes->whereNotIn('type_id', [120, 124])->values();
+
+        // Subject access points (taxonomy_id = 35)
+        $subjects = DB::table('object_term_relation')
+            ->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->where('object_term_relation.object_id', $io->id)
+            ->where('term.taxonomy_id', 35)
+            ->where('term_i18n.culture', $culture)
+            ->select('term.id as term_id', 'term_i18n.name')
+            ->get();
+
+        // Place access points (taxonomy_id = 42)
+        $places = DB::table('object_term_relation')
+            ->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->where('object_term_relation.object_id', $io->id)
+            ->where('term.taxonomy_id', 42)
+            ->where('term_i18n.culture', $culture)
+            ->select('term.id as term_id', 'term_i18n.name')
+            ->get();
+
+        // Genre access points (taxonomy_id = 78)
+        $genres = DB::table('object_term_relation')
+            ->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->where('object_term_relation.object_id', $io->id)
+            ->where('term.taxonomy_id', 78)
+            ->where('term_i18n.culture', $culture)
+            ->select('term.id as term_id', 'term_i18n.name')
+            ->get();
+
+        // Name access points (via relation table, type_id = 161)
+        $nameAccessPoints = DB::table('relation')
+            ->join('actor_i18n', 'relation.object_id', '=', 'actor_i18n.id')
+            ->where('relation.subject_id', $io->id)
+            ->where('relation.type_id', 161)
+            ->where('actor_i18n.culture', $culture)
+            ->select('relation.object_id as actor_id', 'actor_i18n.authorized_form_of_name as name')
+            ->get();
+
+        // Alternative identifiers (from property table)
+        $alternativeIdentifiers = DB::table('property')
+            ->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $io->id)
+            ->where('property.name', 'alternativeIdentifiers')
+            ->where('property_i18n.culture', $culture)
+            ->select('property.id', 'property.scope as label', 'property_i18n.value')
+            ->get();
+
+        // Publication status
+        $publicationStatusId = null;
+        $statusRow = DB::table('status')->where('object_id', $io->id)->where('type_id', 158)->first();
+        if ($statusRow && $statusRow->status_id) {
+            $publicationStatusId = (int) $statusRow->status_id;
+        }
+
+        // Languages/scripts of material (from property table, serialized)
+        $materialLanguagesRaw = DB::table('property')->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $io->id)->where('property.name', 'language')->where('property_i18n.culture', $culture)->value('property_i18n.value');
+        $materialLanguages = collect();
+        if ($materialLanguagesRaw) { $decoded = @unserialize($materialLanguagesRaw, ['allowed_classes' => false]); if (is_array($decoded)) { $materialLanguages = collect($decoded); } }
+
+        $materialScriptsRaw = DB::table('property')->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $io->id)->where('property.name', 'script')->where('property_i18n.culture', $culture)->value('property_i18n.value');
+        $materialScripts = collect();
+        if ($materialScriptsRaw) { $decoded = @unserialize($materialScriptsRaw, ['allowed_classes' => false]); if (is_array($decoded)) { $materialScripts = collect($decoded); } }
+
+        // Languages/scripts of description (from property table, serialized)
+        $languagesOfDescriptionRaw = DB::table('property')->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $io->id)->where('property.name', 'languageOfDescription')->where('property_i18n.culture', $culture)->value('property_i18n.value');
+        $languagesOfDescription = collect();
+        if ($languagesOfDescriptionRaw) { $decoded = @unserialize($languagesOfDescriptionRaw, ['allowed_classes' => false]); if (is_array($decoded)) { $languagesOfDescription = collect($decoded); } }
+
+        $scriptsOfDescriptionRaw = DB::table('property')->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $io->id)->where('property.name', 'scriptOfDescription')->where('property_i18n.culture', $culture)->value('property_i18n.value');
+        $scriptsOfDescription = collect();
+        if ($scriptsOfDescriptionRaw) { $decoded = @unserialize($scriptsOfDescriptionRaw, ['allowed_classes' => false]); if (is_array($decoded)) { $scriptsOfDescription = collect($decoded); } }
+
+        // Related material descriptions (relation type 176 - same id as save +
+        // show paths). Pull both directions: this IO can appear as either
+        // subject or object of the relation; the form needs both.
+        $relatedBySubject = DB::table('relation')
+            ->join('information_object_i18n', 'relation.object_id', '=', 'information_object_i18n.id')
+            ->join('slug', 'relation.object_id', '=', 'slug.object_id')
+            ->where('relation.subject_id', $io->id)
+            ->where('relation.type_id', 176)
+            ->where('information_object_i18n.culture', $culture)
+            ->select('relation.object_id as id', 'information_object_i18n.title', 'slug.slug')
+            ->get();
+        $relatedByObject = DB::table('relation')
+            ->join('information_object_i18n', 'relation.subject_id', '=', 'information_object_i18n.id')
+            ->join('slug', 'relation.subject_id', '=', 'slug.object_id')
+            ->where('relation.object_id', $io->id)
+            ->where('relation.type_id', 176)
+            ->where('information_object_i18n.culture', $culture)
+            ->select('relation.subject_id as id', 'information_object_i18n.title', 'slug.slug')
+            ->get();
+        $relatedMaterialDescriptions = $relatedBySubject->merge($relatedByObject)->unique('id')->values();
+
+        // Language and script free-text notes (saved as property name=languageNote
+        // to avoid an i18n column add). Merge back onto $io so the form
+        // pre-populates from the saved value.
+        $langNoteRaw = DB::table('property')
+            ->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $io->id)
+            ->where('property.name', 'languageNote')
+            ->where('property_i18n.culture', $culture)
+            ->value('property_i18n.value');
+        $io->language_notes = $langNoteRaw ?: '';
+
+        // Parent info for admin area
+        $parentTitle = null;
+        $parentSlug = null;
+        if ($io->parent_id && $io->parent_id != 1) {
+            $parent = DB::table('information_object')
+                ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+                ->join('slug', 'information_object.id', '=', 'slug.object_id')
+                ->where('information_object.id', $io->parent_id)
+                ->where('information_object_i18n.culture', $culture)
+                ->select('information_object_i18n.title', 'slug.slug')
+                ->first();
+            if ($parent) {
+                $parentTitle = $parent->title;
+                $parentSlug = $parent->slug;
+            }
+        }
+
+        // Form choices for security and other dropdowns
+        $formChoices = [
+            'securityLevels' => $dropdowns['securityClassifications'] ?? collect(),
+            // #1425: pass the full term collection (id, name, code) - the edit
+            // dropdown iterates $std->id/$std->name, and the dynamic-standard
+            // driver needs $std->code. (Was plucked to {id:name}.)
+            'displayStandards' => ($dropdowns['displayStandards'] ?? collect()),
+        ];
+
+        // ahg_io_security sidecar: pre-populate the security panel. Missing row =
+        // unclassified record, fields render blank.
+        $sec = DB::table('ahg_io_security')->where('object_id', $io->id)->first();
+        $io->security_classification_id     = $sec->security_classification_id     ?? null;
+        $io->security_reason                = $sec->security_reason                ?? null;
+        $io->security_review_date           = $sec->security_review_date           ?? null;
+        $io->security_declassify_date       = $sec->security_declassify_date       ?? null;
+        $io->security_handling_instructions = $sec->security_handling_instructions ?? null;
+        $io->security_inherit_to_children   = (int) ($sec->security_inherit_to_children ?? 0);
+        $io->update_descendants_default     = (int) ($sec->update_descendants_default ?? 0);
+        $io->watermark_type_id              = $sec->watermark_type_id              ?? null;
+
+        // Watermark Settings - uses the canonical PSIS object_watermark_setting
+        // table so global tools (DerivativeWatermarkService etc.) see the same
+        // shape Heratio writes. Custom_watermark feeds the "Or use Custom..."
+        // dropdown (global rows + this object's own rows).
+        $watermarkSetting = null;
+        $customWatermarks = collect();
+        try {
+            $watermarkSetting = DB::table('object_watermark_setting')->where('object_id', $io->id)->first();
+            $customWatermarks = DB::table('custom_watermark')
+                ->where('active', 1)
+                ->where(function ($q) use ($io) {
+                    $q->whereNull('object_id')->orWhere('object_id', $io->id);
+                })
+                ->orderBy('name')
+                ->get();
+        } catch (\Throwable $e) { /* tables missing in some installs */ }
+
+        return view('ahg-io-manage::edit', array_merge(
+            [
+                'io' => $io,
+                'museumMetadata' => $museumMetadata,
+                'events' => $events,
+                'creators' => $creators,
+                'notes' => $generalNotes,
+                'publicationNotes' => $publicationNotes,
+                'archivistNotes' => $archivistNotes,
+                'subjects' => $subjects,
+                'places' => $places,
+                'genres' => $genres,
+                'nameAccessPoints' => $nameAccessPoints,
+                'alternativeIdentifiers' => $alternativeIdentifiers,
+                'publicationStatusId' => $publicationStatusId,
+                'materialLanguages' => $materialLanguages,
+                'materialScripts' => $materialScripts,
+                'languagesOfDescription' => $languagesOfDescription,
+                'scriptsOfDescription' => $scriptsOfDescription,
+                'relatedMaterialDescriptions' => $relatedMaterialDescriptions,
+                'parentTitle' => $parentTitle,
+                'parentSlug' => $parentSlug,
+                'formChoices' => $formChoices,
+                'watermarkSetting' => $watermarkSetting,
+                'customWatermarks' => $customWatermarks,
+            ],
+            $dropdowns
+        ));
+    }
+
+    /**
+     * Show the create form for a new information object.
+     */
+    /**
+     * Default values from the form template that resolves for a new description
+     * (heratio#1537), keyed by the create form's input names: the field's
+     * atom_field when set, else its field_name in snake_case (scopeAndContent
+     * -> scope_and_content). Empty when ahg-forms is absent or nothing resolves.
+     *
+     * @return array<string,string>
+     */
+    private function templateDefaults(?int $parentId): array
+    {
+        try {
+            if (! class_exists(\AhgForms\Services\FormService::class) || ! \Illuminate\Support\Facades\Schema::hasTable('ahg_form_template')) {
+                return [];
+            }
+            $repositoryId = $parentId ? DB::table('information_object')->where('id', $parentId)->value('repository_id') : null;
+            $template = app(\AhgForms\Services\FormService::class)->resolveTemplate('information_object', ['repository_id' => $repositoryId]);
+            if (! $template) {
+                return [];
+            }
+
+            $defaults = [];
+            // Whole rows: atom_field is absent on installs built from older schemas.
+            foreach (DB::table('ahg_form_field')->where('template_id', $template->id)->get() as $f) {
+                if (($f->default_value ?? null) === null || $f->default_value === '') {
+                    continue;
+                }
+                $defaults[($f->atom_field ?? null) ?: \Illuminate\Support\Str::snake((string) $f->field_name)] = (string) $f->default_value;
+            }
+
+            return $defaults;
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    public function create(Request $request)
+    {
+        $culture = app()->getLocale();
+        // Accept ?parent= as an alias for ?parent_id= (deep-link / PSIS-twin parity).
+        $parentId = $request->get('parent_id') ?: $request->get('parent');
+
+        // #1425: optional deep-link preselection of the description standard, so
+        // a "Create RiC description" link / context action / PSIS-twin URL opens
+        // the form already on that standard (the swap then fires on load). Prefer
+        // a PORTABLE natural-key code (?standard=ric) over a per-DB term id
+        // (?standardId=NNN or ?display_standard_id=NNN, kept for cross-system
+        // link compatibility - term ids differ per database).
+        $preselectStandardId = null;
+        $stdCode = $request->get('standard');
+        $stdId = $request->get('standardId') ?: $request->get('display_standard_id');
+        if ($stdCode || $stdId) {
+            $q = DB::table('term')->where('taxonomy_id', 70);
+            $stdCode ? $q->where('code', $stdCode) : $q->where('id', (int) $stdId);
+            $preselectStandardId = $q->value('id');
+        }
+
+        // Clear any leftover _old_input from a previous duplicate attempt so
+        // the regular Add New form opens blank. Earlier code put source-record
+        // data into _old_input via session()->put() (a sticky write, not a
+        // flash), and that data persisted across requests - pre-filling
+        // unrelated Add New pages with the previous duplicate's values.
+        // forget() + put([]) belt-and-braces in case the session driver caches
+        // the key separately; save() forces an immediate write-back to storage.
+        session()->forget('_old_input');
+        session()->put('_old_input', []);
+        session()->save();
+
+        // #1537: pre-fill the form from the default values of the form template
+        // that would apply here (assignment for the parent's repository, else
+        // the global default). now() keeps them to this request only, so they
+        // cannot stick to later forms the way the old put() did.
+        if ($defaults = $this->templateDefaults($parentId ? (int) $parentId : null)) {
+            session()->now('_old_input', $defaults);
+        }
+
+        // If parent_id provided, resolve parent title for display
+        $parentTitle = null;
+        if ($parentId) {
+            $parentTitle = DB::table('information_object_i18n')
+                ->where('id', $parentId)
+                ->where('culture', $culture)
+                ->value('title');
+        }
+
+        // Duplicate (copy_from): instead of trying to pre-fill the create
+        // form's many fields (which only handles scalars), clone the source
+        // record straight into a draft IO and redirect the user to its edit
+        // page. The edit form already renders every multi-row section, so
+        // the cataloguer sees everything (events, alt-IDs, notes, languages,
+        // access points, related descriptions, watermark, security) populated
+        // and can revise/save normally. Matches the AtoM "clone" convention.
+        $copyFromId = (int) $request->get('copy_from');
+        if ($copyFromId > 0) {
+            $source = DB::table('information_object')
+                ->leftJoin('information_object_i18n', function ($j) use ($culture) {
+                    $j->on('information_object.id', '=', 'information_object_i18n.id')
+                      ->where('information_object_i18n.culture', $culture);
+                })
+                ->where('information_object.id', $copyFromId)
+                ->first();
+            if ($source) {
+                // Choose the parent: explicit ?parent_id wins; else copy from source's parent.
+                $newParent = $parentId ? (int) $parentId : (int) ($source->parent_id ?: 1);
+                $parentRow = DB::table('information_object')
+                    ->where('id', $newParent)
+                    ->select('lft', 'rgt')->first();
+                if (!$parentRow) {
+                    $newParent = 1;
+                    $parentRow = DB::table('information_object')->where('id', 1)->select('lft', 'rgt')->first();
+                }
+                $newLft = $parentRow->rgt;
+                $newRgt = $parentRow->rgt + 1;
+                DB::table('information_object')->where('rgt', '>=', $parentRow->rgt)->increment('rgt', 2);
+                DB::table('information_object')->where('lft', '>',  $parentRow->rgt)->increment('lft', 2);
+
+                // CTI: object row + information_object row.
+                $newObjId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitInformationObject',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('information_object')->insert([
+                    'id'                      => $newObjId,
+                    'identifier'              => null, // user mints a new one
+                    'level_of_description_id' => $source->level_of_description_id,
+                    'collection_type_id'      => $source->collection_type_id,
+                    'repository_id'           => $source->repository_id,
+                    'parent_id'               => $newParent,
+                    'description_status_id'   => $source->description_status_id,
+                    'description_detail_id'   => $source->description_detail_id,
+                    'description_identifier'  => $source->description_identifier,
+                    'source_standard'         => $source->source_standard,
+                    'display_standard_id'     => $source->display_standard_id,
+                    'icip_sensitivity'        => $source->icip_sensitivity,
+                    'lft'                     => $newLft,
+                    'rgt'                     => $newRgt,
+                    'source_culture'          => $culture,
+                ]);
+
+                // #1333 dual-write: maintain the closure tree alongside lft/rgt.
+                app(\AhgCore\Services\ClosureMaintenanceService::class)
+                    ->addNode('information_object', (int) $newObjId, (int) $newParent);
+
+                // Copy all i18n fields verbatim - title gets " (copy)" appended
+                // so the cataloguer can spot the duplicate at a glance.
+                $i18nFields = [
+                    'title', 'alternate_title', 'edition', 'extent_and_medium',
+                    'archival_history', 'acquisition', 'scope_and_content',
+                    'appraisal', 'accruals', 'arrangement', 'access_conditions',
+                    'reproduction_conditions', 'physical_characteristics',
+                    'finding_aids', 'location_of_originals', 'location_of_copies',
+                    'related_units_of_description', 'institution_responsible_identifier',
+                    'rules', 'sources', 'revision_history',
+                ];
+                $i18nInsert = ['id' => $newObjId, 'culture' => $culture];
+                foreach ($i18nFields as $f) {
+                    $i18nInsert[$f] = $source->$f ?? null;
+                }
+                $i18nInsert['title'] = trim(($source->title ?? '(untitled)') . ' (copy)');
+                DB::table('information_object_i18n')->insert($i18nInsert);
+
+                // Slug - uniquify based on the new title.
+                $base = \Illuminate\Support\Str::slug($i18nInsert['title']) ?: ('record-' . $newObjId);
+                $slug = $base; $n = 1;
+                while (DB::table('slug')->where('slug', $slug)->exists()) {
+                    $slug = $base . '-' . $n++;
+                }
+                DB::table('slug')->insert(['object_id' => $newObjId, 'slug' => $slug]);
+
+                // Mark the duplicate as Draft so it's hidden from the public
+                // browse until the cataloguer reviews and publishes.
+                $statusObjId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitStatus',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('status')->insert([
+                    'id'        => $statusObjId,
+                    'object_id' => $newObjId,
+                    'type_id'   => 158,
+                    'status_id' => 159, // Draft
+                ]);
+
+                // All the multi-row sections (events, altIds, notes, languages,
+                // scripts, lang/script of description, languageNote, access
+                // points 35/42/78, name access points type-161, related
+                // descriptions type-176, watermark, security) come along here.
+                self::duplicateMultiRowFromSource($copyFromId, $newObjId, $culture);
+
+                return redirect()
+                    ->route('informationobject.edit', $slug)
+                    ->with('success', 'Draft duplicate created - review and save to publish.');
+            }
+        }
+
+        // New record: honour an explicit ?sector= (e.g. coming from a museum/library
+        // browse) so the level dropdown matches; otherwise defaults to archive.
+        $dropdowns = $this->getFormDropdowns($culture, request()->query('sector'));
+
+        // Watermark Settings - only the global pool of custom watermarks
+        // is meaningful on a brand-new IO (no per-object rows yet).
+        $customWatermarks = collect();
+        try {
+            $customWatermarks = DB::table('custom_watermark')
+                ->where('active', 1)
+                ->whereNull('object_id')
+                ->orderBy('name')
+                ->get();
+        } catch (\Throwable $e) { /* table may be missing in some installs */ }
+
+        return view('ahg-io-manage::create', array_merge(
+            [
+                'parentId' => $parentId,
+                'parentTitle' => $parentTitle,
+                'customWatermarks' => $customWatermarks,
+                'preselectStandardId' => $preselectStandardId,
+            ],
+            $dropdowns
+        ));
+    }
+
+    /**
+     * Update an existing information object.
+     */
+    public function update(Request $request, string $slug)
+    {
+        $culture = app()->getLocale();
+
+        $request->validate([
+            'title' => 'required|string|max:65535',
+        ]);
+        \AhgCustomFields\Services\CustomFieldService::validateRequest($request); // heratio#1530
+
+        // Resolve the IO id from slug
+        $io = DB::table('slug')
+            ->join('information_object', 'slug.object_id', '=', 'information_object.id')
+            ->where('slug.slug', $slug)
+            ->select('information_object.id')
+            ->first();
+
+        if (!$io) {
+            abort(404);
+        }
+
+        $ioId = $io->id;
+
+        // #51 ACL enforcement: object-aware write gate, mirroring the read-side
+        // gate in show(). CheckAcl only evaluates the GLOBAL (object-blind)
+        // update grant, so an object-level DENY was bypassed on edit and a
+        // global-update Contributor could edit records they cannot even read.
+        // hasPermission falls back to the global grant when no object rule
+        // exists, so a global-grant user with no override still passes.
+        if (!\AhgCore\Services\AclService::hasPermission(\Illuminate\Support\Facades\Auth::id(), 'update', (int) $ioId)) {
+            abort(403, 'You do not have permission to edit this record.');
+        }
+
+        // Snapshot before - this controller writes the IO directly rather
+        // than calling InformationObjectService::update, so the v1.52.23
+        // service-level wrap doesn't fire for the main archival edit form.
+        // Capture before/after explicitly so /admin/acl/audit-log surfaces
+        // a field-level diff for archival edits as it does for sector edits.
+        $auditBefore = \AhgInformationObjectManage\Services\InformationObjectService::auditSnapshot((int) $ioId, $culture);
+        // #1536: "last modified" moves only if this save changes the content.
+        $fingerprintBefore = \AhgInformationObjectManage\Services\InformationObjectService::contentFingerprint((int) $ioId);
+
+        // Update information_object table
+        $ioUpdate = [
+            'identifier' => $request->input('identifier'),
+            'level_of_description_id' => $request->input('level_of_description_id') ?: null,
+            'collection_type_id' => $request->input('collection_type_id') ?: null,
+            'repository_id' => $request->input('repository_id') ?: null,
+            'description_status_id' => $request->input('description_status_id') ?: null,
+            'description_detail_id' => $request->input('description_detail_id') ?: null,
+            'description_identifier' => $request->input('description_identifier'),
+        ];
+
+        // Only update source_standard and display_standard_id when explicitly submitted
+        // (AtoM only sets these conditionally - writing them unconditionally causes DB delta mismatches)
+        if ($request->has('source_standard')) {
+            $ioUpdate['source_standard'] = $request->input('source_standard');
+        }
+        if ($request->has('display_standard_id')) {
+            $ioUpdate['display_standard_id'] = $request->input('display_standard_id') ?: null;
+        }
+
+        // ICIP cultural-sensitivity URI (issue #36 Phase 2b) - canonical column on information_object.
+        if ($request->has('icip_sensitivity')) {
+            $icip = $request->input('icip_sensitivity');
+            $ioUpdate['icip_sensitivity'] = ($icip === '' ? null : $icip);
+        }
+
+        DB::table('information_object')
+            ->where('id', $ioId)
+            ->update($ioUpdate);
+
+        // Issue #61 Phase 3c: snapshot the existing i18n field values so
+        // OverrideService can detect AI-overridden fields after the save.
+        // Cheap (one row, narrow column set); the cost is justified by the
+        // provenance discipline payoff (see ADR-0002 sec 2).
+        $i18nFieldKeys = [
+            'title', 'alternate_title', 'edition', 'extent_and_medium',
+            'archival_history', 'acquisition', 'scope_and_content',
+            'appraisal', 'accruals', 'arrangement', 'access_conditions',
+            'reproduction_conditions', 'physical_characteristics',
+            'finding_aids', 'location_of_originals', 'location_of_copies',
+            'related_units_of_description', 'institution_responsible_identifier',
+            'rules', 'sources', 'revision_history',
+        ];
+        $beforeSnapshot = (array) (DB::table('information_object_i18n')
+            ->where('id', $ioId)
+            ->where('culture', $culture)
+            ->first($i18nFieldKeys) ?? []);
+
+        // Update information_object_i18n table
+        $i18nUpdate = [];
+        foreach ($i18nFieldKeys as $k) {
+            $i18nUpdate[$k] = $request->input($k);
+        }
+        DB::table('information_object_i18n')
+            ->where('id', $ioId)
+            ->where('culture', $culture)
+            ->update($i18nUpdate);
+
+        // Detect AI-inference overrides on whichever of the i18n fields just
+        // changed. No-op when no field has a prior inference recorded.
+        try {
+            app(\AhgProvenanceAi\Services\OverrideService::class)
+                ->detectOverridesFromForm('information_object', (int) $ioId, $beforeSnapshot, $i18nUpdate, (int) (auth()->id() ?? 0));
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('IO update: override detection failed: ' . $e->getMessage());
+        }
+
+        // Save museum_metadata if this IO has CCO fields submitted
+        try {
+            $museumFields = $request->only([
+                'work_type', 'object_type', 'classification', 'materials', 'techniques',
+                'measurements', 'dimensions', 'creation_date_earliest', 'creation_date_latest',
+                'inscription', 'inscriptions', 'condition_notes', 'provenance', 'style_period',
+                'cultural_context', 'current_location', 'edition_description', 'state_description',
+                'state_identification', 'facture_description', 'technique_cco', 'technique_qualifier',
+                'orientation', 'physical_appearance', 'color', 'shape', 'condition_term',
+                'condition_date', 'condition_description', 'condition_agent', 'treatment_type',
+                'treatment_date', 'treatment_agent', 'treatment_description',
+                'inscription_transcription', 'inscription_type', 'inscription_location',
+                'inscription_language', 'inscription_translation', 'mark_type', 'mark_description',
+                'mark_location', 'related_work_type', 'related_work_relationship',
+                'related_work_label', 'related_work_id', 'current_location_repository',
+                'current_location_geography', 'current_location_coordinates',
+                'current_location_ref_number', 'creation_place', 'creation_place_type',
+                'discovery_place', 'discovery_place_type', 'provenance_text', 'ownership_history',
+                'legal_status', 'rights_type', 'rights_holder', 'rights_date', 'rights_remarks',
+                'cataloger_name', 'cataloging_date', 'cataloging_institution', 'cataloging_remarks',
+                'record_type', 'record_level', 'creator_identity', 'creator_role', 'creator_extent',
+                'creator_qualifier', 'creator_attribution', 'creation_date_display',
+                'creation_date_qualifier', 'style', 'period', 'cultural_group', 'movement',
+                'school', 'dynasty', 'subject_indexing_type', 'subject_display', 'subject_extent',
+                'historical_context', 'architectural_context', 'archaeological_context',
+                'object_class', 'object_category', 'object_sub_category', 'edition_number',
+                'edition_size',
+            ]);
+            if (!empty($museumFields)) {
+                $museumService = new \AhgMuseum\Services\MuseumService($culture);
+                $museumService->saveMuseumMetadata($ioId, $museumFields);
+            }
+        } catch (\Exception $e) {
+            // museum_metadata table may not exist in all installs
+        }
+
+        // ---- Events / Date(s) + Creators (ISAD 3.1.3 / 3.2.1) ----
+        // Unified writer. Two form sources feed this:
+        //   creatorIds[]   - the "Name of creator(s)" autocomplete; each id => a
+        //                    type-111 (Creation) event with actor_id and no dates.
+        //   events[]       - the multi-row Date(s) table; each row carries typeId,
+        //                    optional actorId, start/end dates, and free-text date
+        //                    display. Type 111 is allowed and bundles actor+dates.
+        // When both forms reference the same actor under type 111, events[] wins
+        // (because it has the richer data). Old controller had separate blocks
+        // that competed and the creator block always stomped any dates.
+        if ($request->has('_creatorsIncluded') || $request->has('events')) {
+            // Wipe all existing events for this IO; we re-insert the merged set.
+            $oldEventIds = DB::table('event')->where('object_id', $ioId)->pluck('id')->toArray();
+            if (!empty($oldEventIds)) {
+                DB::table('event_i18n')->whereIn('id', $oldEventIds)->delete();
+                DB::table('event')->whereIn('id', $oldEventIds)->delete();
+                DB::table('object')->whereIn('id', $oldEventIds)->delete();
+            }
+
+            // Rows to write, indexed so we can dedupe creator events by actor.
+            $toWrite = [];
+
+            // Pass 1: events[] (full typeId + actor + dates)
+            foreach ((array) $request->input('events', []) as $row) {
+                $typeId = (int) ($row['typeId'] ?? 0);
+                if ($typeId === 0) continue;
+                $dateDisplay = trim((string) ($row['date'] ?? ''));
+                $startDate   = trim((string) ($row['startDate'] ?? ''));
+                $endDate     = trim((string) ($row['endDate'] ?? ''));
+                $actorId     = (int) ($row['actorId'] ?? 0);
+                if ($dateDisplay === '' && $startDate === '' && $endDate === '' && $actorId <= 0) continue;
+
+                $toWrite[] = [
+                    'type_id'      => $typeId,
+                    'actor_id'     => $actorId > 0 ? $actorId : null,
+                    'start_date'   => $startDate !== '' ? $startDate : null,
+                    'end_date'     => $endDate !== '' ? $endDate : null,
+                    'date_display' => $dateDisplay !== '' ? $dateDisplay : null,
+                ];
+            }
+
+            // Pass 2: creatorIds[] - only add a bare creator event for actors not
+            // already covered by an events[] type-111 row.
+            $coveredActors = collect($toWrite)
+                ->where('type_id', 111)
+                ->pluck('actor_id')
+                ->filter()
+                ->all();
+            foreach (array_filter((array) $request->input('creatorIds', [])) as $actorId) {
+                $actorId = (int) $actorId;
+                if ($actorId <= 0 || in_array($actorId, $coveredActors, true)) continue;
+                $toWrite[] = [
+                    'type_id'      => 111,
+                    'actor_id'     => $actorId,
+                    'start_date'   => null,
+                    'end_date'     => null,
+                    'date_display' => null,
+                ];
+            }
+
+            foreach ($toWrite as $w) {
+                $eventObjectId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitEvent',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('event')->insert([
+                    'id'             => $eventObjectId,
+                    'object_id'      => $ioId,
+                    'type_id'        => $w['type_id'],
+                    'actor_id'       => $w['actor_id'],
+                    'start_date'     => $w['start_date'],
+                    'end_date'       => $w['end_date'],
+                    'source_culture' => $culture,
+                ]);
+                DB::table('event_i18n')->insert([
+                    'id'      => $eventObjectId,
+                    'culture' => $culture,
+                    'date'    => $w['date_display'],
+                ]);
+            }
+        }
+
+        // ---- Notes (general / publication / archivist) ----
+        // Form posts three arrays: notes[] (typed via dropdown - General 125 or
+        // Language 174), publicationNotes[] (textarea-only, type 120), and
+        // archivistNotes[] (textarea-only, type 124).
+        if ($request->has('notes') || $request->has('publicationNotes') || $request->has('archivistNotes')) {
+            $managedTypeIds = [125, 174, 120, 124];
+            $oldNoteIds = DB::table('note')
+                ->where('object_id', $ioId)
+                ->whereIn('type_id', $managedTypeIds)
+                ->pluck('id')->toArray();
+            if (!empty($oldNoteIds)) {
+                DB::table('note_i18n')->whereIn('id', $oldNoteIds)->delete();
+                DB::table('note')->whereIn('id', $oldNoteIds)->delete();
+                DB::table('object')->whereIn('id', $oldNoteIds)->delete();
+            }
+
+            $insertNote = function (int $typeId, string $content) use ($ioId, $culture) {
+                $content = trim($content);
+                if ($content === '') return;
+                $noteId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitNote',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('note')->insert([
+                    'id'             => $noteId,
+                    'object_id'      => $ioId,
+                    'type_id'        => $typeId,
+                    'source_culture' => $culture,
+                ]);
+                DB::table('note_i18n')->insert([
+                    'id'      => $noteId,
+                    'culture' => $culture,
+                    'content' => $content,
+                ]);
+            };
+
+            foreach ((array) $request->input('notes', []) as $row) {
+                $typeId = (int) ($row['typeId'] ?? 0);
+                if (!in_array($typeId, [125, 174], true)) continue;
+                $insertNote($typeId, (string) ($row['content'] ?? ''));
+            }
+            foreach ((array) $request->input('publicationNotes', []) as $row) {
+                $insertNote(120, (string) ($row['content'] ?? ''));
+            }
+            foreach ((array) $request->input('archivistNotes', []) as $row) {
+                $insertNote(124, (string) ($row['content'] ?? ''));
+            }
+        }
+
+        // ---- Subject / Place / Genre access points (term-based) ----
+        // Each section reads two arrays: <name>Ids[] for picks from the
+        // autocomplete dropdown, and <name>Names[] for free-text entries that
+        // should be created as new terms in the right taxonomy. Find-or-create
+        // dedupes on (taxonomy_id, lower(name)) so re-typing an existing label
+        // doesn't spawn a duplicate.
+        $taxonomyAP = [
+            35 => ['idsKey' => 'subjectAccessPointIds', 'namesKey' => 'subjectAccessPointNames'],
+            42 => ['idsKey' => 'placeAccessPointIds',   'namesKey' => 'placeAccessPointNames'],
+            78 => ['idsKey' => 'genreAccessPointIds',   'namesKey' => 'genreAccessPointNames'],
+        ];
+        foreach ($taxonomyAP as $taxonomyId => $cfg) {
+            if (!$request->has($cfg['idsKey']) && !$request->has($cfg['namesKey'])) continue;
+
+            // Wipe existing object_term_relation rows for this IO in this taxonomy.
+            $oldRelIds = DB::table('object_term_relation')
+                ->where('object_id', $ioId)
+                ->whereIn('term_id', function ($q) use ($taxonomyId) {
+                    $q->select('id')->from('term')->where('taxonomy_id', $taxonomyId);
+                })
+                ->pluck('id')->toArray();
+            if (!empty($oldRelIds)) {
+                DB::table('object_term_relation')->whereIn('id', $oldRelIds)->delete();
+                DB::table('object')->whereIn('id', $oldRelIds)->delete();
+            }
+
+            // Build the unified set of term IDs to link (existing picks +
+            // find-or-create on free-text names).
+            $termIds = [];
+            foreach (array_filter((array) $request->input($cfg['idsKey'], [])) as $tid) {
+                $termIds[(int) $tid] = true;
+            }
+            foreach ((array) $request->input($cfg['namesKey'], []) as $name) {
+                $resolved = self::findOrCreateTerm((string) $name, $taxonomyId, $culture);
+                if ($resolved > 0) $termIds[$resolved] = true;
+            }
+
+            foreach (array_keys($termIds) as $tid) {
+                $relId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitObjectTermRelation',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('object_term_relation')->insert([
+                    'id'        => $relId,
+                    'object_id' => $ioId,
+                    'term_id'   => $tid,
+                ]);
+            }
+        }
+
+        // ---- Alternative identifiers (property name = alternativeIdentifiers) ----
+        if ($request->has('altIds')) {
+            $oldPropertyIds = DB::table('property')
+                ->where('object_id', $ioId)
+                ->where('name', 'alternativeIdentifiers')
+                ->pluck('id')->toArray();
+            if (!empty($oldPropertyIds)) {
+                DB::table('property_i18n')->whereIn('id', $oldPropertyIds)->delete();
+                DB::table('property')->whereIn('id', $oldPropertyIds)->delete();
+                DB::table('object')->whereIn('id', $oldPropertyIds)->delete();
+            }
+
+            foreach ((array) $request->input('altIds', []) as $row) {
+                $value = trim((string) ($row['value'] ?? ''));
+                $label = trim((string) ($row['label'] ?? ''));
+                if ($value === '' && $label === '') continue;
+
+                $propId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitProperty',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('property')->insert([
+                    'id'             => $propId,
+                    'object_id'      => $ioId,
+                    'scope'          => $label !== '' ? $label : null,
+                    'name'           => 'alternativeIdentifiers',
+                    'source_culture' => $culture,
+                ]);
+                DB::table('property_i18n')->insert([
+                    'id'      => $propId,
+                    'culture' => $culture,
+                    'value'   => $value,
+                ]);
+            }
+        }
+
+        // ---- Name access points (relation type 161) ----
+        // nameAccessPointIds[] = actor IDs picked from the dropdown.
+        // nameAccessPointNames[] = free-text names; each becomes an actor
+        // via find-or-create, then linked.
+        if ($request->has('nameAccessPointIds') || $request->has('nameAccessPointNames')) {
+            // Drop existing outbound name access-point relations for this IO.
+            $oldRelIds = DB::table('relation')
+                ->where('subject_id', $ioId)
+                ->where('type_id', 161)
+                ->pluck('id')->toArray();
+            if (!empty($oldRelIds)) {
+                DB::table('relation')->whereIn('id', $oldRelIds)->delete();
+                DB::table('object')->whereIn('id', $oldRelIds)->delete();
+            }
+
+            $actorIds = [];
+            foreach (array_filter((array) $request->input('nameAccessPointIds', [])) as $aid) {
+                $actorIds[(int) $aid] = true;
+            }
+            foreach ((array) $request->input('nameAccessPointNames', []) as $name) {
+                $resolved = self::findOrCreateActor((string) $name, $culture);
+                if ($resolved > 0) $actorIds[$resolved] = true;
+            }
+
+            foreach (array_keys($actorIds) as $aid) {
+                $relObjectId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitRelation',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('relation')->insert([
+                    'id'             => $relObjectId,
+                    'subject_id'     => $ioId,
+                    'object_id'      => $aid,
+                    'type_id'        => 161,
+                    'source_culture' => $culture,
+                ]);
+            }
+        }
+
+        // ---- Publication status (status table, type_id = 158) ----
+        // Per CLAUDE.md: publication status lives in `status`, not on
+        // information_object. type 158 is the publication-status discriminator.
+        if ($request->has('publication_status_id')) {
+            $statusId = (int) $request->input('publication_status_id');
+            DB::table('status')
+                ->where('object_id', $ioId)
+                ->where('type_id', 158)
+                ->delete();
+            if ($statusId > 0) {
+                $statusObjectId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitStatus',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('status')->insert([
+                    'id'        => $statusObjectId,
+                    'object_id' => $ioId,
+                    'type_id'   => 158,
+                    'status_id' => $statusId,
+                ]);
+            }
+        }
+
+        // ---- Languages / scripts (PHP-serialized arrays in property table) ----
+        // AtoM stores ISO codes for language(s) of material, script(s) of material,
+        // language(s) of description, script(s) of description as a single property
+        // row per type, with value = serialize([codes]). We mirror that exactly so
+        // existing AtoM-imported records keep the same shape.
+        $serialisedProps = [
+            'language'             => 'languages',
+            'script'               => 'scripts',
+            'languageOfDescription'=> 'languagesOfDescription',
+            'scriptOfDescription'  => 'scriptsOfDescription',
+        ];
+        foreach ($serialisedProps as $propName => $formField) {
+            if (!$request->has($formField)) continue;
+            $values = array_values(array_filter(
+                array_map('strval', (array) $request->input($formField, [])),
+                fn ($v) => $v !== ''
+            ));
+
+            $oldIds = DB::table('property')
+                ->where('object_id', $ioId)
+                ->where('name', $propName)
+                ->pluck('id')->toArray();
+            if (!empty($oldIds)) {
+                DB::table('property_i18n')->whereIn('id', $oldIds)->delete();
+                DB::table('property')->whereIn('id', $oldIds)->delete();
+                DB::table('object')->whereIn('id', $oldIds)->delete();
+            }
+
+            if (!empty($values)) {
+                $propId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitProperty',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('property')->insert([
+                    'id'             => $propId,
+                    'object_id'      => $ioId,
+                    'name'           => $propName,
+                    'source_culture' => $culture,
+                ]);
+                DB::table('property_i18n')->insert([
+                    'id'      => $propId,
+                    'culture' => $culture,
+                    'value'   => serialize($values),
+                ]);
+            }
+        }
+
+        // ---- Language note (free-text, stored as property name=languageNote) ----
+        if ($request->has('language_notes')) {
+            $note = trim((string) $request->input('language_notes', ''));
+            $oldIds = DB::table('property')
+                ->where('object_id', $ioId)
+                ->where('name', 'languageNote')
+                ->pluck('id')->toArray();
+            if (!empty($oldIds)) {
+                DB::table('property_i18n')->whereIn('id', $oldIds)->delete();
+                DB::table('property')->whereIn('id', $oldIds)->delete();
+                DB::table('object')->whereIn('id', $oldIds)->delete();
+            }
+            if ($note !== '') {
+                $propId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitProperty',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('property')->insert([
+                    'id'             => $propId,
+                    'object_id'      => $ioId,
+                    'name'           => 'languageNote',
+                    'source_culture' => $culture,
+                ]);
+                DB::table('property_i18n')->insert([
+                    'id'      => $propId,
+                    'culture' => $culture,
+                    'value'   => $note,
+                ]);
+            }
+        }
+
+        // ---- Security panel (ahg_io_security sidecar) ----
+        // Form posts the full set whenever the panel renders, so we always have
+        // an authoritative snapshot. Upsert and (optionally) propagate to all
+        // descendants in this IO's lft/rgt subtree.
+        $secKeys = [
+            'security_classification_id',
+            'security_reason',
+            'security_review_date',
+            'security_declassify_date',
+            'security_handling_instructions',
+            'security_inherit_to_children',
+            'updateDescendants',
+        ];
+        $hasSecurityFields = false;
+        foreach ($secKeys as $k) {
+            if ($request->has($k)) { $hasSecurityFields = true; break; }
+        }
+        if ($hasSecurityFields) {
+            $secPayload = [
+                'security_classification_id'     => $request->filled('security_classification_id') ? (int) $request->input('security_classification_id') : null,
+                'security_reason'                => $request->input('security_reason') ?: null,
+                'security_review_date'           => $request->input('security_review_date') ?: null,
+                'security_declassify_date'       => $request->input('security_declassify_date') ?: null,
+                'security_handling_instructions' => $request->input('security_handling_instructions') ?: null,
+                'security_inherit_to_children'   => (int) $request->boolean('security_inherit_to_children'),
+                'update_descendants_default'     => (int) $request->boolean('updateDescendants'),
+                'updated_at'                     => now(),
+            ];
+
+            DB::table('ahg_io_security')->updateOrInsert(
+                ['object_id' => $ioId],
+                $secPayload + ['created_at' => now()]
+            );
+
+            // Propagate to descendants when explicitly requested. Uses the IO's
+            // lft/rgt subtree (not parent_id) so nested-set descendants in any
+            // hierarchy depth are covered.
+            if ($request->boolean('updateDescendants')) {
+                $node = DB::table('information_object')->where('id', $ioId)->select('lft', 'rgt')->first();
+                if ($node && $node->lft !== null && $node->rgt !== null) {
+                    $descendantIds = DB::table('information_object')
+                        ->where('id', '!=', $ioId)
+                        ->where('lft', '>', $node->lft)
+                        ->where('rgt', '<', $node->rgt)
+                        ->pluck('id')->all();
+
+                    foreach (array_chunk($descendantIds, 500) as $chunk) {
+                        // Upsert one row per descendant. Same payload but inherit
+                        // is forced ON, so any further descendants down the line
+                        // pick up this value too.
+                        $rows = array_map(fn ($id) => [
+                            'object_id'                      => (int) $id,
+                            'security_classification_id'     => $secPayload['security_classification_id'],
+                            'security_reason'                => $secPayload['security_reason'],
+                            'security_review_date'           => $secPayload['security_review_date'],
+                            'security_declassify_date'       => $secPayload['security_declassify_date'],
+                            'security_handling_instructions' => $secPayload['security_handling_instructions'],
+                            'security_inherit_to_children'   => 1,
+                            'update_descendants_default'     => $secPayload['update_descendants_default'],
+                            'created_at'                     => now(),
+                            'updated_at'                     => now(),
+                        ], $chunk);
+
+                        // upsert lets MySQL handle existing rows
+                        DB::table('ahg_io_security')->upsert(
+                            $rows,
+                            ['object_id'],
+                            ['security_classification_id', 'security_reason', 'security_review_date',
+                             'security_declassify_date', 'security_handling_instructions',
+                             'security_inherit_to_children', 'update_descendants_default', 'updated_at']
+                        );
+                    }
+                }
+            }
+        }
+
+        // ---- Watermark Settings (object_watermark_setting + custom_watermark) ----
+        // Mirrors the PSIS / ahgMuseumPlugin saveWatermarkSettings() flow so the
+        // canonical tables stay in sync with the AtoM-side toolchain.
+        if ($request->has('watermark_enabled') || $request->hasFile('new_watermark_file')
+            || $request->has('watermark_type_id') || $request->has('custom_watermark_id')) {
+
+            $watermarkEnabled  = $request->boolean('watermark_enabled') ? 1 : 0;
+            $watermarkTypeId   = $request->filled('watermark_type_id')   ? (int) $request->input('watermark_type_id')   : null;
+            $customWatermarkId = $request->filled('custom_watermark_id') ? (int) $request->input('custom_watermark_id') : null;
+            $position          = (string) $request->input('new_watermark_position', 'center');
+            $opacity           = ((int) $request->input('new_watermark_opacity', 40)) / 100;
+
+            // Optional: upload a new custom watermark file.
+            if ($request->hasFile('new_watermark_file') && $request->file('new_watermark_file')->isValid()) {
+                $uploaded = $request->file('new_watermark_file');
+                $mime = $uploaded->getMimeType();
+                if (in_array($mime, ['image/png', 'image/gif'], true)) {
+                    $ext      = $mime === 'image/gif' ? 'gif' : 'png';
+                    $filename = 'watermark_' . uniqid() . '.' . $ext;
+                    $destDir  = rtrim(config('heratio.uploads_path'), '/') . '/watermarks';
+                    if (!is_dir($destDir)) { @mkdir($destDir, 0755, true); }
+                    $destPath = $destDir . '/' . $filename;
+                    if ($uploaded->move($destDir, $filename)) {
+                        @chmod($destPath, 0644);
+                        $isGlobal = $request->boolean('new_watermark_global');
+                        $newCustomId = DB::table('custom_watermark')->insertGetId([
+                            'object_id'  => $isGlobal ? null : $ioId,
+                            'name'       => $request->input('new_watermark_name') ?: 'Custom Watermark',
+                            'filename'   => $filename,
+                            'file_path'  => $destPath,
+                            'position'   => $position,
+                            'opacity'    => $opacity,
+                            'created_by' => (int) (auth()->id() ?? 0),
+                            'active'     => 1,
+                            'created_at' => now(),
+                        ]);
+                        // Newly uploaded custom takes precedence over a system pick.
+                        $customWatermarkId = $newCustomId;
+                        $watermarkTypeId   = null;
+                    }
+                }
+            }
+
+            DB::table('object_watermark_setting')->updateOrInsert(
+                ['object_id' => $ioId],
+                [
+                    'watermark_enabled'   => $watermarkEnabled,
+                    'watermark_type_id'   => $watermarkTypeId,
+                    'custom_watermark_id' => $customWatermarkId,
+                    'position'            => $position,
+                    'opacity'             => $opacity,
+                    'updated_at'          => now(),
+                ]
+            );
+
+            // The "regenerate derivatives" flag is a heavy job that needs the
+            // queue worker; record the intent for now via Log so a follow-up
+            // command/job can pick it up. Don't block save on this.
+            if ($request->boolean('regenerate_watermark')) {
+                \Illuminate\Support\Facades\Log::info('[ahg-io-manage] regenerate_watermark requested', [
+                    'object_id' => $ioId,
+                ]);
+            }
+        }
+
+        // ---- Related descriptions (relation type 176) ----
+        // Form posts relatedDescriptions[idx][id] = id of another IO. We model
+        // this as a directed relation with this IO as subject; the read path
+        // already merges subject+object directions.
+        if ($request->has('relatedDescriptions')) {
+            // Drop existing outbound relations of this type from this IO so the
+            // form is the source of truth. Inbound (where this IO is object)
+            // are managed from the other record's edit page - leave them alone.
+            $oldRelIds = DB::table('relation')
+                ->where('subject_id', $ioId)
+                ->where('type_id', 176)
+                ->pluck('id')->toArray();
+            if (!empty($oldRelIds)) {
+                DB::table('relation')->whereIn('id', $oldRelIds)->delete();
+                DB::table('object')->whereIn('id', $oldRelIds)->delete();
+            }
+
+            $seen = [];
+            foreach ((array) $request->input('relatedDescriptions', []) as $row) {
+                $otherId = (int) ($row['id'] ?? 0);
+                if ($otherId <= 0 || $otherId === $ioId || isset($seen[$otherId])) continue;
+                $seen[$otherId] = true;
+
+                $relObjectId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitRelation',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('relation')->insert([
+                    'id'             => $relObjectId,
+                    'subject_id'     => $ioId,
+                    'object_id'      => $otherId,
+                    'type_id'        => 176,
+                    'source_culture' => $culture,
+                ]);
+            }
+        }
+
+        // ---- Add new child levels (create-on-save) ----
+        // Each childLevels[idx] row spawns a brand-new IO record under this one.
+        // Mirrors store() but parents to $ioId and inserts inside the parent's
+        // nested-set range, shifting siblings to make room.
+        if ($request->has('childLevels')) {
+            foreach ((array) $request->input('childLevels', []) as $row) {
+                $title       = trim((string) ($row['title'] ?? ''));
+                $identifier  = trim((string) ($row['identifier'] ?? ''));
+                $levelId     = (int) ($row['levelId'] ?? 0);
+                if ($title === '' && $identifier === '' && $levelId === 0) continue;
+                if ($title === '') continue; // title is required by store() validation
+
+                // Place as last child of $ioId. Re-read parent each iteration
+                // because the previous insert shifted the tree.
+                $parent = DB::table('information_object')
+                    ->where('id', $ioId)
+                    ->select('lft', 'rgt')
+                    ->first();
+                if (!$parent) break;
+
+                $newLft = $parent->rgt;
+                $newRgt = $parent->rgt + 1;
+
+                DB::table('information_object')->where('rgt', '>=', $parent->rgt)->increment('rgt', 2);
+                DB::table('information_object')->where('lft', '>',  $parent->rgt)->increment('lft', 2);
+
+                $childId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitInformationObject',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('information_object')->insert([
+                    'id'                      => $childId,
+                    'identifier'              => $identifier !== '' ? $identifier : null,
+                    'level_of_description_id' => $levelId > 0 ? $levelId : null,
+                    'repository_id'           => $request->input('repository_id') ?: null,
+                    'parent_id'               => $ioId,
+                    'lft'                     => $newLft,
+                    'rgt'                     => $newRgt,
+                    'source_culture'          => $culture,
+                ]);
+
+                // #1333 dual-write: maintain the closure tree alongside lft/rgt.
+                app(\AhgCore\Services\ClosureMaintenanceService::class)
+                    ->addNode('information_object', (int) $childId, (int) $ioId);
+
+                // #1461 - the add-child path wrote no publication status, so
+                // children created here were invisible to guests and matched by
+                // no publication-status filter.
+                \AhgCore\Services\RecordCreationService::ensurePublicationStatus(
+                    (int) $childId,
+                    $request->filled('publication_status_id') ? (int) $request->input('publication_status_id') : null
+                );
+
+                DB::table('information_object_i18n')->insert([
+                    'id'      => $childId,
+                    'culture' => $culture,
+                    'title'   => $title,
+                ]);
+
+                // Generate a unique slug for the new child.
+                $base = \Illuminate\Support\Str::slug($title) ?: ('record-' . $childId);
+                $slugCandidate = $base; $n = 1;
+                while (DB::table('slug')->where('slug', $slugCandidate)->exists()) {
+                    $slugCandidate = $base . '-' . $n++;
+                }
+                DB::table('slug')->insert([
+                    'object_id' => $childId,
+                    'slug'      => $slugCandidate,
+                ]);
+            }
+        }
+
+        \AhgCustomFields\Services\CustomFieldService::saveFromRequest((int) $ioId, $request); // heratio#1530
+
+        // Update object.updated_at - only on a real change (#1536)
+        \AhgInformationObjectManage\Services\InformationObjectService::touchIfChanged((int) $ioId, $fingerprintBefore);
+
+        $auditAfter = \AhgInformationObjectManage\Services\InformationObjectService::auditSnapshot((int) $ioId, $culture);
+        \AhgCore\Support\AuditLog::captureEdit((int) $ioId, 'information_object', $auditBefore, $auditAfter);
+
+        // #1425: overlay the chosen standard's specific fields (no-op for ISAD).
+        $this->dispatchStandardPersist((int) $ioId, $request);
+
+        return redirect()
+            ->route('informationobject.show', $slug)
+            ->with('success', 'Archival description updated successfully.');
+    }
+
+    /**
+     * Description-standard code -> its *-manage controller. A controller only
+     * participates in the dynamic-field swap once it has both fieldsPartial()
+     * and persist() (the #1425 dynamic-standard-form pattern); until then that
+     * standard falls back to the built-in ISAD field set. Guarded everywhere by
+     * class_exists + method_exists so a minimal install without a given package
+     * simply degrades to ISAD.
+     */
+    private const STANDARD_CONTROLLERS = [
+        'ric'  => \AhgRicManage\Controllers\RicManageController::class,
+        'dacs' => \AhgDacsManage\Controllers\DacsManageController::class,
+        'rad'  => \AhgRadManage\Controllers\RadManageController::class,
+        'mods' => \AhgModsManage\Controllers\ModsManageController::class,
+        'dc'   => \AhgDcManage\Controllers\DcManageController::class,
+    ];
+
+    private function standardController(?string $code, string $method): ?string
+    {
+        $code = strtolower(trim((string) $code));
+        $class = self::STANDARD_CONTROLLERS[$code] ?? null;
+        if ($class && class_exists($class) && method_exists($class, $method)) {
+            return $class;
+        }
+
+        return null;
+    }
+
+    /**
+     * AJAX endpoint (#1425 dynamic-standard form): return the field accordion
+     * for the chosen description standard so the create / generic-edit form can
+     * swap it in on dropdown change. ?code=<taxonomy-70 code>&slug=<slug?>.
+     * Falls back to the built-in ISAD partial for isad / unknown / not-yet-
+     * wired standards.
+     */
+    public function standardFields(Request $request)
+    {
+        $code = strtolower(trim((string) $request->query('code', 'isad')));
+        $slug = $request->query('slug') ?: null;
+
+        $class = $this->standardController($code, 'fieldsPartial');
+        if ($class) {
+            try {
+                return app($class)->fieldsPartial($request, $slug);
+            } catch (\Throwable $e) {
+                // fall through to ISAD
+            }
+        }
+
+        return view('ahg-io-manage::partials._isad-fields', [
+            'io' => $slug ? $this->loadIoForFields($slug) : null,
+        ]);
+    }
+
+    /**
+     * Minimal record load for the ISAD field partial (edit context). Kept
+     * light - the partial only reads scalar i18n/IO columns via null-safe access.
+     */
+    private function loadIoForFields(string $slug): ?object
+    {
+        $culture = app()->getLocale();
+
+        return DB::table('information_object')
+            ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->where('information_object_i18n.culture', $culture)
+            ->select('information_object.*', 'information_object_i18n.*', 'slug.slug')
+            ->first();
+    }
+
+    /**
+     * Dispatch the standard-specific save to the owning *-manage controller's
+     * persist() when the submitted _display_standard_code maps to a wired
+     * controller. Returns true when it handled the save, false when the caller
+     * (store()/update()) should run the ordinary ISAD path.
+     */
+    private function dispatchStandardPersist(int $ioId, Request $request): bool
+    {
+        $code = $request->input('_display_standard_code');
+        $class = $this->standardController($code, 'persist');
+        if (! $class) {
+            return false;
+        }
+        try {
+            app($class)->persist($ioId, $request);
+
+            return true;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Store a new information object.
+     */
+    public function store(Request $request)
+    {
+        $culture = app()->getLocale();
+
+        $request->validate([
+            'title' => 'required|string|max:65535',
+        ]);
+        \AhgCustomFields\Services\CustomFieldService::validateRequest($request); // heratio#1530
+
+        $parentId = $request->input('parent_id', 1); // Default to root (id=1)
+
+        // Determine lft/rgt position: place as last child of parent
+        $parent = DB::table('information_object')
+            ->where('id', $parentId)
+            ->select('lft', 'rgt')
+            ->first();
+
+        if (!$parent) {
+            abort(422, 'Invalid parent information object.');
+        }
+
+        $newLft = $parent->rgt;
+        $newRgt = $parent->rgt + 1;
+
+        // Everything from here to dispatchStandardPersist() is one unit of work.
+        //
+        // It was not. The nested-set shift below rewrites lft/rgt across EVERY
+        // node to the right of the parent, and the object, information_object,
+        // i18n and slug rows were then inserted unguarded - so a failure at any
+        // later step committed a tree shifted by two for a record that might not
+        // exist, and left whatever rows had already landed. heratio.org hit
+        // exactly that on 8 Sep 2026: a 1062 on slug.slug_U_1 (unique on
+        // object_id) aborted a create at the slug insert, four statements in.
+        //
+        // Nothing was orphaned that time - no information_object or actor on
+        // prod lacks a slug - but that was luck, not design. A partially applied
+        // create here is silent: the damage is in lft/rgt, which nothing
+        // validates on read, and a corrupt nested set makes ancestor and
+        // descendant queries wrong for records that have nothing to do with the
+        // one that failed.
+        DB::beginTransaction();
+
+        try {
+
+        // Shift existing nested set values to make room
+        DB::table('information_object')
+            ->where('rgt', '>=', $parent->rgt)
+            ->increment('rgt', 2);
+
+        DB::table('information_object')
+            ->where('lft', '>', $parent->rgt)
+            ->increment('lft', 2);
+
+        // Insert into object table
+        $objectId = DB::table('object')->insertGetId([
+            'class_name' => 'QubitInformationObject',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Insert into information_object table
+        DB::table('information_object')->insert([
+            'id' => $objectId,
+            'identifier' => $request->input('identifier'),
+            'level_of_description_id' => $request->input('level_of_description_id') ?: null,
+            'collection_type_id' => null,
+            'repository_id' => $request->input('repository_id') ?: null,
+            'parent_id' => $parentId,
+            'description_status_id' => $request->input('description_status_id') ?: null,
+            'description_detail_id' => $request->input('description_detail_id') ?: null,
+            'description_identifier' => $request->input('description_identifier'),
+            'source_standard' => $request->input('source_standard'),
+            'display_standard_id' => $request->input('display_standard_id') ?: null,
+            'lft' => $newLft,
+            'rgt' => $newRgt,
+            'source_culture' => $culture,
+        ]);
+
+        // Insert into information_object_i18n table
+        DB::table('information_object_i18n')->insert([
+            'id' => $objectId,
+            'culture' => $culture,
+            'title' => $request->input('title'),
+            'alternate_title' => $request->input('alternate_title'),
+            'edition' => $request->input('edition'),
+            'extent_and_medium' => $request->input('extent_and_medium'),
+            'archival_history' => $request->input('archival_history'),
+            'acquisition' => $request->input('acquisition'),
+            'scope_and_content' => $request->input('scope_and_content'),
+            'appraisal' => $request->input('appraisal'),
+            'accruals' => $request->input('accruals'),
+            'arrangement' => $request->input('arrangement'),
+            'access_conditions' => $request->input('access_conditions'),
+            'reproduction_conditions' => $request->input('reproduction_conditions'),
+            'physical_characteristics' => $request->input('physical_characteristics'),
+            'finding_aids' => $request->input('finding_aids'),
+            'location_of_originals' => $request->input('location_of_originals'),
+            'location_of_copies' => $request->input('location_of_copies'),
+            'related_units_of_description' => $request->input('related_units_of_description'),
+            'institution_responsible_identifier' => $request->input('institution_responsible_identifier'),
+            'rules' => $request->input('rules'),
+            'sources' => $request->input('sources'),
+            'revision_history' => $request->input('revision_history'),
+        ]);
+
+        // Generate slug.
+        //
+        // The loop below is check-then-insert, so two creates with the same
+        // title can both find a slug free and both take it - the check proves
+        // nothing by the time the insert runs. The unique index is what actually
+        // decides, so let it, and try the next suffix when it says no rather
+        // than failing the whole create on a name collision.
+        $baseSlug = Str::slug($request->input('title') ?: 'untitled');
+        $slug = $baseSlug;
+        $counter = 1;
+        while (DB::table('slug')->where('slug', $slug)->exists()) {
+            $slug = $baseSlug . '-' . $counter;
+            $counter++;
+        }
+
+        for ($attempt = 0; ; $attempt++) {
+            try {
+                DB::table('slug')->insert([
+                    'object_id' => $objectId,
+                    'slug' => $slug,
+                ]);
+                break;
+            } catch (\Illuminate\Database\UniqueConstraintViolationException $e) {
+                // slug_U_1 is unique on object_id and slug_U_2 on slug. Only the
+                // second is a name race we can resolve by trying again; a
+                // duplicate object_id means this object already HAS a slug, and
+                // retrying with a different name would give it a second one.
+                if ($attempt >= 5 || DB::table('slug')->where('object_id', $objectId)->exists()) {
+                    throw $e;
+                }
+                $slug = $baseSlug . '-' . $counter;
+                $counter++;
+            }
+        }
+
+        // Publication status + closure node (#1461, #1462). This path wrote
+        // neither: records created from the form landed in a state no operator
+        // chose - no status row at all, so invisible to guests and matched by
+        // no publication-status filter - and absent from the closure tree, so
+        // closure-backed descendant walks silently skipped them. The form's
+        // Draft/Published select was being discarded outright.
+        \AhgInformationObjectManage\Services\InformationObjectService::finalizeCreation(
+            (int) $objectId,
+            (int) $parentId,
+            $request->filled('publication_status_id') ? (int) $request->input('publication_status_id') : null
+        );
+
+        // Watermark Settings - same canonical write path as update(). Triggers
+        // when any watermark field is present so a brand-new IO can be saved
+        // with watermark wiring already in place.
+        if ($request->has('watermark_enabled') || $request->hasFile('new_watermark_file')
+            || $request->has('watermark_type_id') || $request->has('custom_watermark_id')) {
+
+            $watermarkEnabled  = $request->boolean('watermark_enabled') ? 1 : 0;
+            $watermarkTypeId   = $request->filled('watermark_type_id')   ? (int) $request->input('watermark_type_id')   : null;
+            $customWatermarkId = $request->filled('custom_watermark_id') ? (int) $request->input('custom_watermark_id') : null;
+            $position          = (string) $request->input('new_watermark_position', 'center');
+            $opacity           = ((int) $request->input('new_watermark_opacity', 40)) / 100;
+
+            if ($request->hasFile('new_watermark_file') && $request->file('new_watermark_file')->isValid()) {
+                $uploaded = $request->file('new_watermark_file');
+                $mime = $uploaded->getMimeType();
+                if (in_array($mime, ['image/png', 'image/gif'], true)) {
+                    $ext      = $mime === 'image/gif' ? 'gif' : 'png';
+                    $filename = 'watermark_' . uniqid() . '.' . $ext;
+                    $destDir  = rtrim(config('heratio.uploads_path'), '/') . '/watermarks';
+                    if (!is_dir($destDir)) { @mkdir($destDir, 0755, true); }
+                    $destPath = $destDir . '/' . $filename;
+                    if ($uploaded->move($destDir, $filename)) {
+                        @chmod($destPath, 0644);
+                        $isGlobal = $request->boolean('new_watermark_global');
+                        $newCustomId = DB::table('custom_watermark')->insertGetId([
+                            'object_id'  => $isGlobal ? null : $objectId,
+                            'name'       => $request->input('new_watermark_name') ?: 'Custom Watermark',
+                            'filename'   => $filename,
+                            'file_path'  => $destPath,
+                            'position'   => $position,
+                            'opacity'    => $opacity,
+                            'created_by' => (int) (auth()->id() ?? 0),
+                            'active'     => 1,
+                            'created_at' => now(),
+                        ]);
+                        $customWatermarkId = $newCustomId;
+                        $watermarkTypeId   = null;
+                    }
+                }
+            }
+
+            DB::table('object_watermark_setting')->updateOrInsert(
+                ['object_id' => $objectId],
+                [
+                    'watermark_enabled'   => $watermarkEnabled,
+                    'watermark_type_id'   => $watermarkTypeId,
+                    'custom_watermark_id' => $customWatermarkId,
+                    'position'            => $position,
+                    'opacity'             => $opacity,
+                    'updated_at'          => now(),
+                ]
+            );
+        }
+
+        // ---- Duplicate (copy_from): clone multi-row tables from source IO ----
+        $copyFromId = (int) $request->input('copy_from', 0);
+        if ($copyFromId > 0 && $copyFromId !== $objectId) {
+            self::duplicateMultiRowFromSource($copyFromId, $objectId, $culture);
+        }
+
+        \AhgCore\Support\AuditLog::captureCreate((int) $objectId, 'information_object', \AhgInformationObjectManage\Services\InformationObjectService::auditSnapshot((int) $objectId, $culture));
+
+        // #1425: if the operator picked a non-ISAD standard on the dynamic form,
+        // overlay its standard-specific fields via that standard's persist().
+        // No-op (returns false) for ISAD or an unwired standard.
+        $this->dispatchStandardPersist((int) $objectId, $request);
+
+        \AhgCustomFields\Services\CustomFieldService::saveFromRequest((int) $objectId, $request); // heratio#1530
+
+        DB::commit();
+        } catch (\Throwable $e) {
+            // Rolled back rather than swallowed: the caller still sees the
+            // failure, and the tree is left as it was found.
+            DB::rollBack();
+            throw $e;
+        }
+
+        return redirect()
+            ->route('informationobject.show', $slug)
+            ->with('success', 'Archival description created successfully.');
+    }
+
+    /**
+     * Clone all multi-row sections from a source IO onto a freshly-created
+     * target IO. Called by store() when the form was submitted with a hidden
+     * copy_from input. Covers:
+     *   - alternativeIdentifiers (property)
+     *   - events (event + event_i18n) - all event types incl. type-111 creators
+     *   - notes (note + note_i18n) - all 4 note types managed in the form
+     *   - language / script / languageOfDescription / scriptOfDescription
+     *     (PHP-serialized property arrays)
+     *   - languageNote (free-text property)
+     *   - access points: subjects (35), places (42), genres (78), names (relation 161)
+     *   - related descriptions (relation 176)
+     *   - watermark settings (object_watermark_setting; custom_watermark left
+     *     pointing at the source's row - global custom watermarks are shared
+     *     anyway, and per-object customs would need re-uploading to be useful).
+     *   - security panel (ahg_io_security row).
+     * The source is read culture-by-culture for i18n rows; we replicate the
+     * current culture only (matches the rest of the form's behaviour).
+     */
+    private static function duplicateMultiRowFromSource(int $srcId, int $dstId, string $culture): void
+    {
+        // ---- Alternative identifiers (property name=alternativeIdentifiers) ----
+        $altRows = DB::table('property')
+            ->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+            ->where('property.object_id', $srcId)
+            ->where('property.name', 'alternativeIdentifiers')
+            ->where('property_i18n.culture', $culture)
+            ->select('property.scope', 'property_i18n.value')
+            ->get();
+        foreach ($altRows as $row) {
+            $pid = DB::table('object')->insertGetId([
+                'class_name' => 'QubitProperty',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            DB::table('property')->insert([
+                'id'             => $pid,
+                'object_id'      => $dstId,
+                'scope'          => $row->scope,
+                'name'           => 'alternativeIdentifiers',
+                'source_culture' => $culture,
+            ]);
+            DB::table('property_i18n')->insert([
+                'id'      => $pid,
+                'culture' => $culture,
+                'value'   => $row->value,
+            ]);
+        }
+
+        // ---- Events (event + event_i18n; all types incl. creators) ----
+        $events = DB::table('event')
+            ->leftJoin('event_i18n', function ($j) use ($culture) {
+                $j->on('event.id', '=', 'event_i18n.id')->where('event_i18n.culture', $culture);
+            })
+            ->where('event.object_id', $srcId)
+            ->select('event.type_id', 'event.actor_id', 'event.start_date', 'event.end_date',
+                     'event_i18n.date', 'event_i18n.name')
+            ->get();
+        foreach ($events as $evt) {
+            $eid = DB::table('object')->insertGetId([
+                'class_name' => 'QubitEvent',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            DB::table('event')->insert([
+                'id'             => $eid,
+                'object_id'      => $dstId,
+                'type_id'        => $evt->type_id,
+                'actor_id'       => $evt->actor_id,
+                'start_date'     => $evt->start_date,
+                'end_date'       => $evt->end_date,
+                'source_culture' => $culture,
+            ]);
+            DB::table('event_i18n')->insert([
+                'id'      => $eid,
+                'culture' => $culture,
+                'date'    => $evt->date,
+                'name'    => $evt->name,
+            ]);
+        }
+
+        // ---- Notes (note + note_i18n; all four managed types) ----
+        $notes = DB::table('note')
+            ->leftJoin('note_i18n', function ($j) use ($culture) {
+                $j->on('note.id', '=', 'note_i18n.id')->where('note_i18n.culture', $culture);
+            })
+            ->where('note.object_id', $srcId)
+            ->whereIn('note.type_id', [125, 174, 120, 124])
+            ->select('note.type_id', 'note_i18n.content')
+            ->get();
+        foreach ($notes as $note) {
+            if (trim((string) $note->content) === '') continue;
+            $nid = DB::table('object')->insertGetId([
+                'class_name' => 'QubitNote',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            DB::table('note')->insert([
+                'id'             => $nid,
+                'object_id'      => $dstId,
+                'type_id'        => $note->type_id,
+                'source_culture' => $culture,
+            ]);
+            DB::table('note_i18n')->insert([
+                'id'      => $nid,
+                'culture' => $culture,
+                'content' => $note->content,
+            ]);
+        }
+
+        // ---- Language / script / langOfDescription / scriptOfDescription
+        //      / languageNote - copy the property row verbatim.
+        foreach (['language', 'script', 'languageOfDescription', 'scriptOfDescription', 'languageNote'] as $propName) {
+            $val = DB::table('property')
+                ->join('property_i18n', 'property.id', '=', 'property_i18n.id')
+                ->where('property.object_id', $srcId)
+                ->where('property.name', $propName)
+                ->where('property_i18n.culture', $culture)
+                ->value('property_i18n.value');
+            if ($val === null) continue;
+            $pid = DB::table('object')->insertGetId([
+                'class_name' => 'QubitProperty',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            DB::table('property')->insert([
+                'id'             => $pid,
+                'object_id'      => $dstId,
+                'name'           => $propName,
+                'source_culture' => $culture,
+            ]);
+            DB::table('property_i18n')->insert([
+                'id'      => $pid,
+                'culture' => $culture,
+                'value'   => $val,
+            ]);
+        }
+
+        // ---- Access points (taxonomy 35 / 42 / 78) ----
+        foreach ([35, 42, 78] as $taxonomyId) {
+            $termIds = DB::table('object_term_relation as otr')
+                ->join('term as t', 'otr.term_id', '=', 't.id')
+                ->where('otr.object_id', $srcId)
+                ->where('t.taxonomy_id', $taxonomyId)
+                ->pluck('otr.term_id')->all();
+            foreach ($termIds as $tid) {
+                $relId = DB::table('object')->insertGetId([
+                    'class_name' => 'QubitObjectTermRelation',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                DB::table('object_term_relation')->insert([
+                    'id'        => $relId,
+                    'object_id' => $dstId,
+                    'term_id'   => (int) $tid,
+                ]);
+            }
+        }
+
+        // ---- Name access points (relation type 161) ----
+        $actorIds = DB::table('relation')
+            ->where('subject_id', $srcId)->where('type_id', 161)
+            ->pluck('object_id')->all();
+        foreach ($actorIds as $aid) {
+            $rid = DB::table('object')->insertGetId([
+                'class_name' => 'QubitRelation',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            DB::table('relation')->insert([
+                'id'             => $rid,
+                'subject_id'     => $dstId,
+                'object_id'      => (int) $aid,
+                'type_id'        => 161,
+                'source_culture' => $culture,
+            ]);
+        }
+
+        // ---- Related descriptions (relation type 176) - outbound from source ----
+        $relIoIds = DB::table('relation')
+            ->where('subject_id', $srcId)->where('type_id', 176)
+            ->pluck('object_id')->all();
+        foreach ($relIoIds as $oid) {
+            $rid = DB::table('object')->insertGetId([
+                'class_name' => 'QubitRelation',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            DB::table('relation')->insert([
+                'id'             => $rid,
+                'subject_id'     => $dstId,
+                'object_id'      => (int) $oid,
+                'type_id'        => 176,
+                'source_culture' => $culture,
+            ]);
+        }
+
+        // ---- Watermark settings (object_watermark_setting) ----
+        $wm = DB::table('object_watermark_setting')->where('object_id', $srcId)->first();
+        if ($wm) {
+            DB::table('object_watermark_setting')->updateOrInsert(
+                ['object_id' => $dstId],
+                [
+                    'watermark_enabled'   => $wm->watermark_enabled,
+                    'watermark_type_id'   => $wm->watermark_type_id,
+                    'custom_watermark_id' => $wm->custom_watermark_id,
+                    'position'            => $wm->position,
+                    'opacity'             => $wm->opacity,
+                    'created_at'          => now(),
+                    'updated_at'          => now(),
+                ]
+            );
+        }
+
+        // ---- Security panel (ahg_io_security sidecar) ----
+        try {
+            $sec = DB::table('ahg_io_security')->where('object_id', $srcId)->first();
+            if ($sec) {
+                DB::table('ahg_io_security')->updateOrInsert(
+                    ['object_id' => $dstId],
+                    [
+                        'security_classification_id'     => $sec->security_classification_id,
+                        'security_reason'                => $sec->security_reason,
+                        'security_review_date'           => $sec->security_review_date,
+                        'security_declassify_date'       => $sec->security_declassify_date,
+                        'security_handling_instructions' => $sec->security_handling_instructions,
+                        'security_inherit_to_children'   => $sec->security_inherit_to_children,
+                        'update_descendants_default'     => $sec->update_descendants_default ?? 0,
+                        'watermark_type_id'              => $sec->watermark_type_id ?? null,
+                        'created_at'                     => now(),
+                        'updated_at'                     => now(),
+                    ]
+                );
+            }
+        } catch (\Throwable $e) { /* sidecar may not exist on first deploy */ }
+    }
+
+    /**
+     * Generate a missing slug for an information object.
+     */
+    public function fixMissingSlug(Request $request)
+    {
+        $objectId = (int) $request->input('object_id');
+        if (!$objectId) {
+            return redirect()->back()->with('error', 'No object ID provided.');
+        }
+
+        // Check if slug already exists
+        $existing = DB::table('slug')->where('object_id', $objectId)->value('slug');
+        if ($existing) {
+            return redirect('/' . $existing)->with('info', 'Slug already exists.');
+        }
+
+        // Get the title for slug generation
+        $title = DB::table('information_object_i18n')
+            ->where('id', $objectId)
+            ->where('culture', app()->getLocale())
+            ->value('title');
+
+        if (!$title) {
+            $title = 'untitled-' . $objectId;
+        }
+
+        // Generate slug from title
+        $baseSlug = \Illuminate\Support\Str::slug($title);
+        if (!$baseSlug) {
+            $baseSlug = 'record-' . $objectId;
+        }
+
+        // Ensure uniqueness
+        $slug = $baseSlug;
+        $counter = 1;
+        while (DB::table('slug')->where('slug', $slug)->exists()) {
+            $slug = $baseSlug . '-' . $counter;
+            $counter++;
+        }
+
+        DB::table('slug')->insert([
+            'object_id' => $objectId,
+            'slug' => $slug,
+            'serial_number' => 0,
+        ]);
+
+        return redirect('/' . $slug)->with('success', "Slug '{$slug}' generated for object #{$objectId}.");
+    }
+
+    /**
+     * Confirm deletion of an information object.
+     */
+    public function confirmDelete(string $slug)
+    {
+        $culture = app()->getLocale();
+
+        $io = DB::table('information_object')
+            ->join('information_object_i18n', function ($j) use ($culture) {
+                $j->on('information_object.id', '=', 'information_object_i18n.id')
+                  ->where('information_object_i18n.culture', '=', $culture);
+            })
+            ->join('slug', 'slug.object_id', '=', 'information_object.id')
+            ->where('slug.slug', $slug)
+            ->select('information_object.id', 'information_object_i18n.title', 'slug.slug')
+            ->first();
+
+        if (!$io) {
+            abort(404);
+        }
+
+        return view('ahg-io-manage::delete', [
+            'io' => $io,
+        ]);
+    }
+
+    /**
+     * Delete an information object.
+     */
+    /**
+     * Show the "Update publication status" form page.
+     * Mirrors AtoM's informationobject/updatePublicationStatus action.
+     */
+    public function showUpdateStatus(string $slug)
+    {
+        $culture = app()->getLocale();
+
+        $resource = DB::table('information_object')
+            ->join('information_object_i18n', function ($j) use ($culture) {
+                $j->on('information_object.id', '=', 'information_object_i18n.id')
+                  ->where('information_object_i18n.culture', '=', $culture);
+            })
+            ->join('slug', 'slug.object_id', '=', 'information_object.id')
+            ->where('slug.slug', $slug)
+            ->select('information_object.id', 'information_object.lft', 'information_object.rgt',
+                     'information_object_i18n.title', 'slug.slug')
+            ->first();
+
+        if (!$resource) {
+            abort(404);
+        }
+
+        // Current publication status
+        $currentStatus = DB::table('status')
+            ->where('object_id', $resource->id)
+            ->where('type_id', 158)
+            ->value('status_id');
+
+        // Publication status options from taxonomy 175 (Publication status)
+        $publicationStatuses = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', 175)
+            ->where('term_i18n.culture', $culture)
+            ->pluck('term_i18n.name', 'term.id')
+            ->toArray();
+
+        // Fallback if taxonomy lookup is empty
+        if (empty($publicationStatuses)) {
+            $publicationStatuses = [160 => 'Published', 159 => 'Draft'];
+        }
+
+        return view('ahg-io-manage::update-publication-status', [
+            'resource' => $resource,
+            'currentStatus' => $currentStatus,
+            'publicationStatuses' => $publicationStatuses,
+        ]);
+    }
+
+    /**
+     * Update publication status for an information object.
+     * Status is stored in the `status` table with type_id=158.
+     * 160 = Published, 159 = Draft.
+     * Supports updating descendants when the "updateDescendants" checkbox is ticked.
+     */
+    public function updateStatus(Request $request, string $slug)
+    {
+        // Accept both field names: "publicationStatus" (from dedicated page) and "publication_status" (legacy inline)
+        $statusId = (int) ($request->input('publicationStatus') ?: $request->input('publication_status'));
+        if (!in_array($statusId, [159, 160], true)) {
+            return redirect()->back()->with('error', 'Invalid publication status.');
+        }
+
+        $io = DB::table('slug')
+            ->join('information_object', 'slug.object_id', '=', 'information_object.id')
+            ->where('slug.slug', $slug)
+            ->select('information_object.id', 'information_object.lft', 'information_object.rgt')
+            ->first();
+
+        if (!$io) {
+            abort(404);
+        }
+
+        // Block publish if workflow approval is required but not completed
+        if ($statusId === 160) {
+            try {
+                $workflowService = app(\AhgWorkflow\Services\WorkflowService::class);
+                if ($workflowService->isWorkflowRequiredForPublish()
+                    && !$workflowService->isWorkflowApprovedForPublish($io->id)) {
+                    return redirect()->back()->withErrors([
+                        'workflow' => 'This item requires workflow approval before publishing. Please start or complete a workflow first.',
+                    ])->with('error', 'Workflow approval required before publishing.')
+                      ->with('workflow_start_url', route('workflow.dashboard'));
+                }
+            } catch (\Exception $e) {
+                // Workflow package not available - allow publish
+            }
+        }
+
+        // type_id 158 = publicationStatus
+        $exists = DB::table('status')
+            ->where('object_id', $io->id)
+            ->where('type_id', 158)
+            ->first();
+
+        $previousStatusId = $exists ? (int) $exists->status_id : null;
+        if ($exists) {
+            DB::table('status')
+                ->where('object_id', $io->id)
+                ->where('type_id', 158)
+                ->update(['status_id' => $statusId]);
+        } else {
+            DB::table('status')->insert([
+                // #1470: status.id must be an object id, not one from status's
+                // own AUTO_INCREMENT counter.
+                'id' => \AhgCore\Support\StatusRow::allocateId(),
+                'object_id' => $io->id,
+                'type_id' => 158,
+                'status_id' => $statusId,
+            ]);
+        }
+
+        $label = $statusId === 160 ? 'Published' : 'Draft';
+
+        \AhgCore\Support\AuditLog::captureMutation((int) $io->id, 'information_object', 'publication_status_change', [
+            'data' => [
+                'before_status_id' => $previousStatusId,
+                'after_status_id' => $statusId,
+                'after_label' => $label,
+                'cascade_descendants' => (bool) $request->boolean('updateDescendants'),
+            ],
+        ]);
+
+        // Update descendants if requested
+        if ($request->boolean('updateDescendants')) {
+            $descendantIds = DB::table('information_object')
+                ->where('lft', '>', $io->lft)
+                ->where('rgt', '<', $io->rgt)
+                ->pluck('id');
+
+            $updatedCount = 0;
+            foreach ($descendantIds as $descId) {
+                $descExists = DB::table('status')
+                    ->where('object_id', $descId)
+                    ->where('type_id', 158)
+                    ->first();
+
+                if ($descExists) {
+                    DB::table('status')
+                        ->where('object_id', $descId)
+                        ->where('type_id', 158)
+                        ->update(['status_id' => $statusId]);
+                } else {
+                    DB::table('status')->insert([
+                        // #1470: status.id must be an object id, not one from status's
+                        // own AUTO_INCREMENT counter.
+                        'id' => \AhgCore\Support\StatusRow::allocateId(),
+                        'object_id' => $descId,
+                        'type_id' => 158,
+                        'status_id' => $statusId,
+                    ]);
+                }
+                $updatedCount++;
+            }
+
+            return redirect()
+                ->route('informationobject.show', $slug)
+                ->with('success', "Publication status updated to {$label}. {$updatedCount} descendant(s) also updated.");
+        }
+
+        return redirect()
+            ->route('informationobject.show', $slug)
+            ->with('success', "Publication status updated to {$label}.");
+    }
+
+    public function destroy(Request $request, string $slug)
+    {
+        // Resolve the IO id from slug
+        $record = DB::table('slug')
+            ->join('information_object', 'slug.object_id', '=', 'information_object.id')
+            ->where('slug.slug', $slug)
+            ->select('information_object.id', 'information_object.lft', 'information_object.rgt')
+            ->first();
+
+        if (!$record) {
+            abort(404);
+        }
+
+        $ioId = $record->id;
+        $width = $record->rgt - $record->lft + 1;
+
+        // Snapshot before delete - controller-direct delete bypasses
+        // InformationObjectService::delete (which v1.52.24 wrapped).
+        \AhgCore\Support\AuditLog::captureDelete((int) $ioId, 'information_object', \AhgInformationObjectManage\Services\InformationObjectService::auditSnapshot((int) $ioId, app()->getLocale()));
+
+        // Collect all descendant IDs (incl. self). Closure when built (also
+        // catches null-lft orphans the nested-set range misses), else lft/rgt.
+        // heratio#1333 read-swap; the gap-close below stays nested-set.
+        $descendantIds = app(\AhgCore\Services\HierarchyQueryService::class)
+            ->descendantIds('information_object', (int) $ioId, true);
+
+        // Delete i18n rows for all descendants
+        DB::table('information_object_i18n')
+            ->whereIn('id', $descendantIds)
+            ->delete();
+
+        // Delete information_object rows for all descendants
+        DB::table('information_object')
+            ->whereIn('id', $descendantIds)
+            ->delete();
+
+        // Delete slug rows for all descendants
+        DB::table('slug')
+            ->whereIn('object_id', $descendantIds)
+            ->delete();
+
+        // Delete object rows for all descendants
+        DB::table('object')
+            ->whereIn('id', $descendantIds)
+            ->delete();
+
+        // Close the gap in the nested set
+        DB::table('information_object')
+            ->where('lft', '>', $record->rgt)
+            ->decrement('lft', $width);
+
+        DB::table('information_object')
+            ->where('rgt', '>', $record->rgt)
+            ->decrement('rgt', $width);
+
+        return redirect()
+            ->to('/glam/browse')
+            ->with('success', 'Archival description deleted successfully.');
+    }
+
+    /**
+     * Reports page for an information object.
+     *
+     * Shows per-record report options (box labels, file lists, item lists, storage locations).
+     * Migrated from AtoM informationobject/reportsSuccess.php.
+     */
+    public function reports(Request $request, string $slug)
+    {
+        $culture = app()->getLocale();
+
+        $io = DB::table('information_object')
+            ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->where('information_object_i18n.culture', $culture)
+            ->select('information_object.id', 'information_object_i18n.title', 'slug.slug')
+            ->first();
+
+        if (!$io) {
+            abort(404);
+        }
+
+        // Determine which report types are available (mirroring AtoM logic)
+        $reportTypes = [];
+
+        // Check for File-level children
+        $hasFiles = DB::table('information_object as child')
+            ->join('term_i18n as ti', function ($j) use ($culture) {
+                $j->on('ti.id', '=', 'child.level_of_description_id')->where('ti.culture', $culture);
+            })
+            ->where('child.parent_id', $io->id)
+            ->where('ti.name', 'File')
+            ->exists();
+        if ($hasFiles) {
+            $reportTypes['fileList'] = 'File list';
+        }
+
+        // Check for Item-level children
+        $hasItems = DB::table('information_object as child')
+            ->join('term_i18n as ti', function ($j) use ($culture) {
+                $j->on('ti.id', '=', 'child.level_of_description_id')->where('ti.culture', $culture);
+            })
+            ->where('child.parent_id', $io->id)
+            ->where('ti.name', 'Item')
+            ->exists();
+        if ($hasItems) {
+            $reportTypes['itemList'] = 'Item list';
+        }
+
+        // Storage locations and box labels (auth required, must have physical objects)
+        if (auth()->check()) {
+            $hasPhysical = DB::table('relation')
+                ->where('subject_id', $io->id)
+                ->where('type_id', 167) // HAS_PHYSICAL_OBJECT
+                ->exists();
+            if ($hasPhysical) {
+                $reportTypes['storageLocations'] = 'Physical storage locations';
+                $reportTypes['boxLabel'] = 'Box label';
+            }
+        }
+
+        // Handle POST - redirect to report generation
+        if ($request->isMethod('post')) {
+            $reportKey = $request->input('report');
+            if ($reportKey && array_key_exists($reportKey, $reportTypes)) {
+                return redirect()->route('informationobject.generateReport', [
+                    'slug' => $slug,
+                    'type' => $reportKey,
+                ]);
+            }
+            return redirect()->route('informationobject.reports', $slug)->with('error', 'Please select a report type.');
+        }
+
+        // Check for existing reports (job-generated report files)
+        $existingReports = [];
+        $reportsDir = storage_path('app/reports/' . $io->id);
+        if (is_dir($reportsDir)) {
+            foreach (glob($reportsDir . '/*') as $file) {
+                $basename = basename($file);
+                $parts = explode('.', $basename);
+                $format = end($parts);
+                $type = str_replace('_', ' ', pathinfo($basename, PATHINFO_FILENAME));
+                $existingReports[] = [
+                    'type' => ucfirst($type),
+                    'format' => strtoupper($format),
+                    'path' => route('informationobject.reports', $slug) . '/download/' . $basename,
+                ];
+            }
+        }
+
+        return view('ahg-io-manage::reports', [
+            'io' => $io,
+            'existingReports' => $existingReports,
+            'reportTypes' => $reportTypes,
+            'reportsAvailable' => !empty($reportTypes),
+        ]);
+    }
+
+    /**
+     * Generate a next available identifier (JSON response for the IO create/edit forms).
+     * Returns `{"identifier": "..."}` based on the active numbering_scheme for the
+     * repository and level_of_description_id the form supplies as query args.
+     */
+    public function generateIdentifier(\Illuminate\Http\Request $request): \Illuminate\Http\JsonResponse
+    {
+        $repositoryId = (int) $request->query('repository_id', 0);
+        $levelId      = (int) $request->query('level_of_description_id', 0);
+
+        // Pick a scheme: per-repository preferred, else any default+active, else
+        // any active, else fall back to a generic REC-{seq} pattern so the
+        // button is never silent.
+        $scheme = null;
+        if (\Schema::hasTable('numbering_scheme_repository') && $repositoryId > 0) {
+            $scheme = DB::table('numbering_scheme_repository as nsr')
+                ->join('numbering_scheme as ns', 'ns.id', '=', 'nsr.scheme_id')
+                ->where('nsr.repository_id', $repositoryId)
+                ->where('nsr.is_active', 1)
+                ->select('ns.*')
+                ->first();
+        }
+        if (!$scheme && \Schema::hasTable('numbering_scheme')) {
+            $scheme = DB::table('numbering_scheme')
+                ->where('is_active', 1)
+                ->orderByDesc('is_default')
+                ->orderBy('id')
+                ->first();
+        }
+
+        $pattern = $scheme->pattern ?? 'REC-{SEQ:5}';
+
+        // Next sequence number: prefer scheme.current_sequence (the cataloguer
+        // dashboard increments this on save). Fall back to numbering_sequence_used.
+        $nextNumber = 1;
+        if ($scheme) {
+            $nextNumber = (int) ($scheme->current_sequence ?? 0) + 1;
+            if ($nextNumber <= 1 && \Schema::hasTable('numbering_sequence_used')) {
+                $nextNumber = ((int) DB::table('numbering_sequence_used')
+                    ->where('scheme_id', $scheme->id)
+                    ->max('sequence_number')) + 1;
+            }
+            if ($nextNumber < 1) $nextNumber = 1;
+        }
+
+        // Repo / fonds / context substitutions. Only fill them if we know the
+        // value; leave the placeholder so the cataloguer notices and edits.
+        $repoCode  = '';
+        $fondsCode = '';
+        if ($repositoryId > 0) {
+            // Try the repository's institution identifier (i18n desc field) first,
+            // then the actor row's corporate_body_identifiers code, else blank.
+            $repoCode = (string) (DB::table('repository_i18n')
+                ->where('id', $repositoryId)
+                ->where('culture', app()->getLocale())
+                ->value('desc_institution_identifier') ?? '');
+            if ($repoCode === '') {
+                $repoCode = (string) (DB::table('actor')
+                    ->where('id', $repositoryId)
+                    ->value('corporate_body_identifiers') ?? '');
+            }
+        }
+
+        $year   = date('Y');
+        $year2  = date('y');
+
+        $replacements = [
+            '{next}'   => (string) $nextNumber,
+            '{year}'   => $year,
+            '{YEAR}'   => $year,
+            '{YY}'     => $year2,
+            '{REPO}'   => $repoCode,
+            '{FONDS}'  => $fondsCode,
+            // Optional context tokens: leave placeholder when empty so the
+            // human catalouger sees what they need to fill in.
+            '{DEPT}'    => '{DEPT}',
+            '{TYPE}'    => '{TYPE}',
+            '{PROJECT}' => '{PROJECT}',
+            '{ITEM}'    => '{ITEM}',
+            '{PREFIX}'  => '{PREFIX}',
+        ];
+
+        $identifier = strtr($pattern, $replacements);
+
+        // {SEQ:N} -> next sequence padded to N digits.
+        $identifier = preg_replace_callback('/\{SEQ(?::(\d+))?\}/', function ($m) use ($nextNumber) {
+            $width = isset($m[1]) ? (int) $m[1] : 0;
+            return $width > 0 ? str_pad((string) $nextNumber, $width, '0', STR_PAD_LEFT) : (string) $nextNumber;
+        }, $identifier);
+
+        return response()->json(['identifier' => $identifier]);
+    }
+
+    /**
+     * Generate a report (file list, item list, storage locations, box label).
+     * Migrated from AtoM informationobject/itemOrFileList, storageLocations, boxLabel actions.
+     */
+    public function generateReport(string $slug, string $type)
+    {
+        $culture = app()->getLocale();
+
+        $io = DB::table('information_object')
+            ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->where('information_object_i18n.culture', $culture)
+            ->select('information_object.id', 'information_object_i18n.title', 'slug.slug')
+            ->first();
+
+        if (!$io) {
+            abort(404);
+        }
+
+        $validTypes = ['fileList', 'itemList', 'storageLocations', 'boxLabel'];
+        if (!in_array($type, $validTypes)) {
+            abort(404);
+        }
+
+        // Build report data based on type
+        $reportTitle = match($type) {
+            'fileList' => 'File list',
+            'itemList' => 'Item list',
+            'storageLocations' => 'Physical storage locations',
+            'boxLabel' => 'Box label',
+        };
+
+        $levelName = match($type) {
+            'fileList' => 'File',
+            'itemList' => 'Item',
+            default => null,
+        };
+
+        $items = [];
+
+        if ($type === 'fileList' || $type === 'itemList') {
+            $query = DB::table('information_object as child')
+                ->join('information_object_i18n as ci', function ($j) use ($culture) {
+                    $j->on('ci.id', '=', 'child.id')->where('ci.culture', $culture);
+                })
+                ->join('term_i18n as ti', function ($j) use ($culture) {
+                    $j->on('ti.id', '=', 'child.level_of_description_id')->where('ti.culture', $culture);
+                })
+                ->leftJoin('slug as cs', 'cs.object_id', '=', 'child.id')
+                ->where('child.parent_id', $io->id)
+                ->where('ti.name', $levelName)
+                ->select('child.id', 'child.identifier', 'ci.title', 'cs.slug', 'ci.scope_and_content')
+                ->orderBy('child.lft');
+
+            $items = $query->get()->toArray();
+        } elseif ($type === 'storageLocations') {
+            $items = DB::table('relation as rel')
+                ->join('physical_object as po', 'po.id', '=', 'rel.object_id')
+                ->join('physical_object_i18n as poi', function ($j) use ($culture) {
+                    $j->on('poi.id', '=', 'po.id')->where('poi.culture', $culture);
+                })
+                ->where('rel.subject_id', $io->id)
+                ->where('rel.type_id', 167)
+                ->select('po.id', 'poi.name', 'poi.location', 'poi.type')
+                ->get()->toArray();
+        } elseif ($type === 'boxLabel') {
+            $items = DB::table('relation as rel')
+                ->join('physical_object as po', 'po.id', '=', 'rel.object_id')
+                ->join('physical_object_i18n as poi', function ($j) use ($culture) {
+                    $j->on('poi.id', '=', 'po.id')->where('poi.culture', $culture);
+                })
+                ->where('rel.subject_id', $io->id)
+                ->where('rel.type_id', 167)
+                ->select('po.id', 'poi.name', 'poi.location', 'poi.type')
+                ->get()->toArray();
+        }
+
+        return view('ahg-io-manage::report-detail', [
+            'io' => $io,
+            'reportTitle' => $reportTitle,
+            'type' => $type,
+            'items' => $items,
+        ]);
+    }
+
+    /**
+     * Rename form for an information object.
+     *
+     * Shows fields to update title, slug, and optionally digital object filename.
+     * Migrated from AtoM informationobject/renameSuccess.php.
+     */
+    public function rename(string $slug)
+    {
+        $culture = app()->getLocale();
+
+        $io = DB::table('information_object')
+            ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->where('information_object_i18n.culture', $culture)
+            ->select('information_object.id', 'information_object_i18n.title', 'slug.slug')
+            ->first();
+
+        if (!$io) {
+            abort(404);
+        }
+
+        // Check for digital object
+        $digitalObject = DB::table('digital_object')
+            ->where('object_id', $io->id)
+            ->select('id', 'name')
+            ->first();
+
+        return view('ahg-io-manage::rename', [
+            'io' => $io,
+            'digitalObject' => $digitalObject,
+        ]);
+    }
+
+    /**
+     * Process the rename form submission.
+     */
+    public function renameUpdate(Request $request, string $slug)
+    {
+        $culture = app()->getLocale();
+
+        $ioRow = DB::table('slug')
+            ->join('information_object', 'slug.object_id', '=', 'information_object.id')
+            ->where('slug.slug', $slug)
+            ->select('information_object.id', 'slug.slug')
+            ->first();
+
+        if (!$ioRow) {
+            abort(404);
+        }
+
+        // #51 ACL enforcement: object-aware write gate (mirrors show() read gate).
+        // Falls back to the global update grant when no object rule exists.
+        if (!\AhgCore\Services\AclService::hasPermission(\Illuminate\Support\Facades\Auth::id(), 'update', (int) $ioRow->id)) {
+            abort(403, 'You do not have permission to rename this record.');
+        }
+
+        $newTitle = $request->input('title');
+        $newSlug = $request->input('slug');
+
+        $fingerprintBefore = \AhgInformationObjectManage\Services\InformationObjectService::contentFingerprint((int) $ioRow->id);
+
+        DB::transaction(function () use ($ioRow, $newTitle, $newSlug, $culture, $fingerprintBefore) {
+            // Update title
+            if ($newTitle !== null) {
+                DB::table('information_object_i18n')
+                    ->where('id', $ioRow->id)
+                    ->where('culture', $culture)
+                    ->update(['title' => $newTitle]);
+            }
+
+            // Update slug
+            if ($newSlug !== null && $newSlug !== $ioRow->slug) {
+                $cleanSlug = \Illuminate\Support\Str::slug($newSlug);
+                if (empty($cleanSlug)) {
+                    $cleanSlug = 'untitled';
+                }
+                // Ensure uniqueness
+                $baseSlug = $cleanSlug;
+                $counter = 1;
+                while (DB::table('slug')->where('slug', $cleanSlug)->where('object_id', '!=', $ioRow->id)->exists()) {
+                    $cleanSlug = $baseSlug . '-' . $counter;
+                    $counter++;
+                }
+                DB::table('slug')
+                    ->where('object_id', $ioRow->id)
+                    ->update(['slug' => $cleanSlug]);
+
+                $newSlug = $cleanSlug;
+            } else {
+                $newSlug = $ioRow->slug;
+            }
+
+            // Touch the object, only if the title or slug really changed (#1536)
+            \AhgInformationObjectManage\Services\InformationObjectService::touchIfChanged((int) $ioRow->id, $fingerprintBefore);
+        });
+
+        return redirect()
+            ->route('informationobject.show', $newSlug ?? $slug)
+            ->with('success', 'Record renamed successfully.');
+    }
+
+    /**
+     * Inventory list for an information object.
+     *
+     * Lists children of the IO at specific levels of description.
+     * Migrated from AtoM informationobject/inventorySuccess.php.
+     */
+    public function inventory(string $slug)
+    {
+        $culture = app()->getLocale();
+
+        $io = DB::table('information_object')
+            ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->where('information_object_i18n.culture', $culture)
+            ->select('information_object.id', 'information_object.lft', 'information_object.rgt', 'information_object.parent_id', 'information_object_i18n.title', 'slug.slug')
+            ->first();
+
+        if (!$io) {
+            abort(404);
+        }
+
+        // Get inventory levels from settings (default: Item level = term_id for "Item")
+        $inventoryLevelIds = DB::table('setting')
+            ->join('setting_i18n', 'setting.id', '=', 'setting_i18n.id')
+            ->where('setting.name', 'inventory_levels')
+            ->where('setting_i18n.culture', $culture)
+            ->value('setting_i18n.value');
+
+        $levelIds = [];
+        if ($inventoryLevelIds) {
+            $decoded = @unserialize($inventoryLevelIds, ['allowed_classes' => false]);
+            if (is_array($decoded)) {
+                $levelIds = $decoded;
+            }
+        }
+
+        // Build inventory query: descendants at specified levels
+        $query = DB::table('information_object')
+            ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('information_object.lft', '>', $io->lft)
+            ->where('information_object.rgt', '<', $io->rgt)
+            ->where('information_object_i18n.culture', $culture);
+
+        if (!empty($levelIds)) {
+            $query->whereIn('information_object.level_of_description_id', $levelIds);
+        }
+
+        $perPage = 30;
+        $page = max(1, (int) request('page', 1));
+        $total = (clone $query)->count();
+
+        $sortField = request('sort', 'identifier');
+        $sortMap = [
+            'identifier' => 'information_object.identifier',
+            'title' => 'information_object_i18n.title',
+            'level' => 'information_object.level_of_description_id',
+            'lft' => 'information_object.lft',
+        ];
+        $orderBy = $sortMap[$sortField] ?? 'information_object.lft';
+
+        $items = $query->orderBy($orderBy)
+            ->select(
+                'information_object.id',
+                'information_object.identifier',
+                'information_object.level_of_description_id',
+                'information_object_i18n.title',
+                'slug.slug'
+            )
+            ->offset(($page - 1) * $perPage)
+            ->limit($perPage)
+            ->get();
+
+        // Resolve level names
+        $levelIds = $items->pluck('level_of_description_id')->filter()->unique()->values()->toArray();
+        $levelNames = [];
+        if (!empty($levelIds)) {
+            $levelNames = DB::table('term_i18n')
+                ->whereIn('id', $levelIds)
+                ->where('culture', $culture)
+                ->pluck('name', 'id')
+                ->toArray();
+        }
+
+        // Check for digital objects
+        $itemIds = $items->pluck('id')->toArray();
+        $hasDigitalObject = [];
+        if (!empty($itemIds)) {
+            $hasDigitalObject = DB::table('digital_object')
+                ->whereIn('object_id', $itemIds)
+                ->pluck('object_id')
+                ->flip()
+                ->toArray();
+        }
+
+        // Get dates for items
+        $itemDates = [];
+        if (!empty($itemIds)) {
+            $dates = DB::table('event')
+                ->join('event_i18n', 'event.id', '=', 'event_i18n.id')
+                ->whereIn('event.object_id', $itemIds)
+                ->where('event_i18n.culture', $culture)
+                ->select('event.object_id', 'event_i18n.date as date_display', 'event.start_date', 'event.end_date')
+                ->get();
+            foreach ($dates as $d) {
+                $itemDates[$d->object_id] = $d->date_display ?: trim(($d->start_date ?? '') . ' - ' . ($d->end_date ?? ''), ' -');
+            }
+        }
+
+        // Build breadcrumbs
+        $breadcrumbs = [];
+        $parentId = $io->parent_id;
+        while ($parentId && $parentId != 1) {
+            $parent = DB::table('information_object')
+                ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+                ->join('slug', 'information_object.id', '=', 'slug.object_id')
+                ->where('information_object.id', $parentId)
+                ->where('information_object_i18n.culture', $culture)
+                ->select('information_object.id', 'information_object.parent_id', 'information_object_i18n.title', 'slug.slug')
+                ->first();
+            if (!$parent) {
+                break;
+            }
+            array_unshift($breadcrumbs, $parent);
+            $parentId = $parent->parent_id;
+        }
+
+        return view('ahg-io-manage::inventory', [
+            'io' => $io,
+            'items' => $items,
+            'levelNames' => $levelNames,
+            'hasDigitalObject' => $hasDigitalObject,
+            'itemDates' => $itemDates,
+            'breadcrumbs' => $breadcrumbs,
+            'total' => $total,
+            'perPage' => $perPage,
+            'page' => $page,
+        ]);
+    }
+
+    /**
+     * Calculate dates for an information object.
+     *
+     * Walks descendant records to find the earliest start_date and latest end_date,
+     * then updates the parent creation event.
+     * Migrated from AtoM informationobject/calculateDatesAction.
+     */
+    public function calculateDates(string $slug)
+    {
+        $culture = app()->getLocale();
+
+        $io = DB::table('information_object')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->select('information_object.id', 'information_object.lft', 'information_object.rgt', 'slug.slug')
+            ->first();
+
+        if (!$io) {
+            abort(404);
+        }
+        $fingerprintBefore = \AhgInformationObjectManage\Services\InformationObjectService::contentFingerprint((int) $io->id);
+
+        // Get all descendant IDs
+        $descendantIds = DB::table('information_object')
+            ->where('lft', '>', $io->lft)
+            ->where('rgt', '<', $io->rgt)
+            ->pluck('id')
+            ->toArray();
+
+        if (empty($descendantIds)) {
+            return redirect()
+                ->route('informationobject.show', $slug)
+                ->with('info', 'No child descriptions found to calculate dates from.');
+        }
+
+        // Find earliest start_date and latest end_date across all descendants
+        $dateRange = DB::table('event')
+            ->whereIn('object_id', $descendantIds)
+            ->selectRaw('MIN(start_date) as earliest_start, MAX(end_date) as latest_end')
+            ->first();
+
+        if (!$dateRange || (!$dateRange->earliest_start && !$dateRange->latest_end)) {
+            return redirect()
+                ->route('informationobject.show', $slug)
+                ->with('info', 'No date information found in child descriptions.');
+        }
+
+        // Update or create the creation event for this IO
+        $event = DB::table('event')
+            ->where('object_id', $io->id)
+            ->where('type_id', 111) // Creation event
+            ->first();
+
+        if ($event) {
+            DB::table('event')
+                ->where('id', $event->id)
+                ->update([
+                    'start_date' => $dateRange->earliest_start,
+                    'end_date' => $dateRange->latest_end,
+                ]);
+
+            // Update the event_i18n date display
+            $displayDate = trim(($dateRange->earliest_start ?? '') . ' - ' . ($dateRange->latest_end ?? ''), ' -');
+            DB::table('event_i18n')
+                ->where('id', $event->id)
+                ->where('culture', $culture)
+                ->update(['date' => $displayDate]);
+        }
+
+        // Touch the object, only if the calculated dates differ (#1536)
+        \AhgInformationObjectManage\Services\InformationObjectService::touchIfChanged((int) $io->id, $fingerprintBefore);
+
+        return redirect()
+            ->route('informationobject.show', $slug)
+            ->with('success', 'Dates calculated successfully from child descriptions.');
+    }
+
+    /**
+     * Show the move form for an information object.
+     */
+    public function move(string $slug, Request $request = null)
+    {
+        $request = $request ?? request();
+        $culture = app()->getLocale();
+
+        $io = DB::table('information_object')
+            ->leftJoin('information_object_i18n', function ($j) use ($culture) {
+                $j->on('information_object.id', '=', 'information_object_i18n.id')
+                  ->where('information_object_i18n.culture', $culture);
+            })
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->select(
+                'information_object.id',
+                'information_object.parent_id',
+                'information_object.level_of_description_id',
+                'information_object.lft',
+                'information_object.rgt',
+                'information_object_i18n.title',
+                'slug.slug'
+            )
+            ->first();
+        if (!$io) abort(404);
+
+        // #51 ACL enforcement: object-aware write gate (mirrors show() read gate).
+        // Falls back to the global update grant when no object rule exists.
+        if (!\AhgCore\Services\AclService::hasPermission(\Illuminate\Support\Facades\Auth::id(), 'update', (int) $io->id)) {
+            abort(403, 'You do not have permission to move this record.');
+        }
+
+        // PSIS-style "browsed parent": defaults to the IO's current parent so
+        // the user starts looking at where the record lives now. Override with
+        // ?parent=<slug> when the user clicks a child / breadcrumb / search hit.
+        $browsedParent = null;
+        $browsedParentSlug = $request->query('parent');
+        if ($browsedParentSlug) {
+            $browsedParent = DB::table('information_object')
+                ->leftJoin('information_object_i18n', function ($j) use ($culture) {
+                    $j->on('information_object.id', '=', 'information_object_i18n.id')
+                      ->where('information_object_i18n.culture', $culture);
+                })
+                ->join('slug', 'information_object.id', '=', 'slug.object_id')
+                ->where('slug.slug', $browsedParentSlug)
+                ->select(
+                    'information_object.id', 'information_object.parent_id',
+                    'information_object.lft', 'information_object.rgt',
+                    'information_object_i18n.title', 'slug.slug'
+                )
+                ->first();
+        }
+        if (!$browsedParent) {
+            // Default to the IO's current parent. Fall back to root (id=1) if
+            // the IO is top-level already.
+            $defaultParentId = $io->parent_id ?: 1;
+            $browsedParent = DB::table('information_object')
+                ->leftJoin('information_object_i18n', function ($j) use ($culture) {
+                    $j->on('information_object.id', '=', 'information_object_i18n.id')
+                      ->where('information_object_i18n.culture', $culture);
+                })
+                ->leftJoin('slug', 'information_object.id', '=', 'slug.object_id')
+                ->where('information_object.id', $defaultParentId)
+                ->select(
+                    'information_object.id', 'information_object.parent_id',
+                    'information_object.lft', 'information_object.rgt',
+                    'information_object_i18n.title', 'slug.slug'
+                )
+                ->first();
+        }
+        if (!$browsedParent) abort(404);
+
+        // Breadcrumb: ancestors of the BROWSED parent (PSIS pattern - lets the
+        // cataloguer walk back up from where they're currently looking).
+        $breadcrumb = [];
+        $cursorParentId = $browsedParent->parent_id;
+        while ($cursorParentId) {
+            $row = DB::table('information_object')
+                ->leftJoin('information_object_i18n', function ($j) use ($culture) {
+                    $j->on('information_object.id', '=', 'information_object_i18n.id')
+                      ->where('information_object_i18n.culture', $culture);
+                })
+                ->leftJoin('slug', 'information_object.id', '=', 'slug.object_id')
+                ->where('information_object.id', $cursorParentId)
+                ->select('information_object.id', 'information_object.parent_id',
+                         'information_object_i18n.title', 'slug.slug')
+                ->first();
+            if (!$row) break;
+            array_unshift($breadcrumb, $row);
+            $cursorParentId = $row->parent_id;
+        }
+
+        // Children-of-browsed-parent OR search hits. Search first if the user
+        // typed a query; otherwise list direct children.
+        $query = trim((string) $request->query('query', ''));
+        $resultsQuery = DB::table('information_object as io')
+            ->leftJoin('information_object_i18n as i', function ($j) use ($culture) {
+                $j->on('io.id', '=', 'i.id')->where('i.culture', $culture);
+            })
+            ->leftJoin('slug as s', 'io.id', '=', 's.object_id')
+            ->where('io.id', '!=', $io->id) // Can't move under self
+            ->select('io.id', 'io.identifier', 'io.lft', 'io.rgt',
+                     'i.title', 's.slug');
+
+        if ($query !== '') {
+            $resultsQuery = $resultsQuery
+                ->where(function ($q) use ($query) {
+                    $q->where('io.identifier', 'LIKE', '%' . $query . '%')
+                      ->orWhere('i.title', 'LIKE', '%' . $query . '%');
+                });
+        } else {
+            $resultsQuery = $resultsQuery->where('io.parent_id', $browsedParent->id);
+        }
+        $results = $resultsQuery->orderBy('i.title')->limit(50)->get();
+
+        // Tag rows that would be invalid Move-here destinations (descendants
+        // of the moving record) so the view can disable click-through.
+        foreach ($results as $r) {
+            $r->is_descendant_of_moving = ($io->lft !== null && $io->rgt !== null
+                && $r->lft !== null && $r->rgt !== null
+                && $r->lft >= $io->lft && $r->rgt <= $io->rgt);
+        }
+
+        return view('ahg-io-manage::move', [
+            'io' => $io,
+            'breadcrumb' => $breadcrumb,
+            'browsedParent' => $browsedParent,
+            'results' => $results,
+            'query' => $query,
+        ]);
+    }
+
+    /**
+     * Process the move form: update parent_id AND nested-set lft/rgt so the
+     * MPTT tree stays consistent. Accepts either parent_slug (PSIS form) or
+     * the legacy new_parent_id field.
+     */
+    public function moveStore(Request $request, string $slug)
+    {
+        $culture = app()->getLocale();
+
+        $ioRow = DB::table('slug')
+            ->join('information_object', 'slug.object_id', '=', 'information_object.id')
+            ->where('slug.slug', $slug)
+            ->select('information_object.id', 'information_object.level_of_description_id',
+                     'information_object.lft', 'information_object.rgt', 'slug.slug')
+            ->first();
+        if (!$ioRow) abort(404);
+
+        // #51 ACL enforcement: object-aware write gate (mirrors show() read gate).
+        // Falls back to the global update grant when no object rule exists.
+        if (!\AhgCore\Services\AclService::hasPermission(\Illuminate\Support\Facades\Auth::id(), 'update', (int) $ioRow->id)) {
+            abort(403, 'You do not have permission to move this record.');
+        }
+
+        // PSIS posts parent (slug); the older form posts new_parent_id (int).
+        $newParentId = null;
+        if ($request->filled('parent')) {
+            $newParentId = (int) DB::table('slug')->where('slug', $request->input('parent'))->value('object_id');
+        } elseif ($request->filled('new_parent_id')) {
+            $newParentId = (int) $request->input('new_parent_id');
+        }
+        if (!$newParentId) {
+            return back()->withErrors(['parent' => 'Pick a destination parent first.']);
+        }
+
+        // Self-move guard.
+        if ($newParentId === $ioRow->id) {
+            return back()->withErrors(['parent' => 'Cannot move a record to itself.']);
+        }
+
+        $newParent = DB::table('information_object')->where('id', $newParentId)
+            ->select('id', 'lft', 'rgt', 'parent_id')->first();
+        if (!$newParent) {
+            return back()->withErrors(['parent' => 'New parent not found.']);
+        }
+
+        // Descendant guard via lft/rgt - covers any nesting depth.
+        if ($ioRow->lft !== null && $ioRow->rgt !== null
+            && $newParent->lft !== null && $newParent->rgt !== null
+            && $newParent->lft >= $ioRow->lft && $newParent->rgt <= $ioRow->rgt) {
+            return back()->withErrors(['parent' => 'Cannot move a record to one of its own descendants.']);
+        }
+        // Already there?
+        if (DB::table('information_object')->where('id', $ioRow->id)->value('parent_id') == $newParentId) {
+            return back()->withErrors(['parent' => 'Record is already under that parent.']);
+        }
+
+        // #1533: the shared move also keeps the closure tree, sibling order and
+        // ES ancestors right (this page used to update the nested set only).
+        \AhgInformationObjectManage\Services\InformationObjectService::moveUnder((int) $ioRow->id, (int) $newParentId);
+
+        // Determine sector-aware redirect
+        $redirectRoute = 'informationobject.show';
+        if ($ioRow->level_of_description_id || Schema::hasTable('display_object_config')) {
+            $sectorRoutes = [
+                'library' => 'library.show',
+                'museum'  => 'museum.show',
+                'gallery' => 'gallery.show',
+                'dam'     => 'dam.show',
+            ];
+
+            // Prefer the object's own GLAM type over the level's sector (see show()).
+            $glamType = Schema::hasTable('display_object_config')
+                ? DB::table('display_object_config')->where('object_id', $ioRow->id)->value('object_type')
+                : null;
+
+            if ($glamType !== null && $glamType !== '') {
+                $sector = isset($sectorRoutes[$glamType]) ? $glamType : null;
+            } elseif ($ioRow->level_of_description_id && Schema::hasTable('level_of_description_sector')) {
+                $sector = DB::table('level_of_description_sector')
+                    ->where('term_id', $ioRow->level_of_description_id)
+                    ->whereNotIn('sector', ['archive'])
+                    ->orderBy('display_order')
+                    ->value('sector');
+            } else {
+                $sector = null;
+            }
+
+            if ($sector && isset($sectorRoutes[$sector])) {
+                try {
+                    if (\Illuminate\Support\Facades\Route::has($sectorRoutes[$sector])) {
+                        $redirectRoute = $sectorRoutes[$sector];
+                    }
+                } catch (\Exception $e) {
+                    // fall through to default
+                }
+            }
+        }
+
+        return redirect()
+            ->route($redirectRoute, $slug)
+            ->with('success', 'Record moved successfully.');
+    }
+
+    public function autocomplete(Request $request)
+    {
+        $query = $request->get('query', '');
+        $culture = app()->getLocale();
+        $limit = (int) $request->get('limit', 10);
+
+        $builder = DB::table('information_object')
+            ->join('information_object_i18n', function ($j) use ($culture) {
+                $j->on('information_object.id', '=', 'information_object_i18n.id')
+                  ->where('information_object_i18n.culture', '=', $culture);
+            })
+            ->join('slug', 'slug.object_id', '=', 'information_object.id')
+            ->where('information_object_i18n.title', 'LIKE', '%' . $query . '%');
+
+        // Guests must not see draft (unpublished) descriptions.
+        \AhgCore\Services\AclService::addFilterDraftsCriteria($builder, 'information_object.id');
+
+        $results = $builder
+            ->select(
+                'information_object.id',
+                'information_object_i18n.title as name',
+                'slug.slug'
+            )
+            ->limit($limit)
+            ->get();
+
+        return response()->json($results);
+    }
+}

@@ -1,0 +1,546 @@
+@extends('theme::layouts.2col')
+
+@section('sidebar')
+    @include('research::research._sidebar', ['sidebarActive' => 'odrlPolicies'])
+@endsection
+
+@section('title', 'ODRL Policies')
+
+@section('content')
+<nav aria-label="{{ __('breadcrumb') }}">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="{{ route('research.dashboard') }}">{{ __('Research') }}</a></li>
+        <li class="breadcrumb-item active">{{ __('ODRL Policies') }}</li>
+    </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="h2">{{ __('ODRL Policies') }}</h1>
+    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createPolicyModal"><i class="fas fa-plus me-1"></i>{{ __('Create Policy') }}</button>
+</div>
+
+<!-- Filter bar -->
+<div class="card mb-4">
+    <div class="card-body py-2">
+        <form method="get" class="row g-2 align-items-end">
+            <div class="col-auto">
+                <label class="form-label form-label-sm mb-0">{{ __('Target Type') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <select name="filter_target_type" class="form-select form-select-sm">
+                    <option value="">{{ __('All') }}</option>
+                    @foreach(['archival_description', 'collection', 'project', 'snapshot', 'annotation', 'assertion'] as $tt)
+                    <option value="{{ $tt }}" {{ request('filter_target_type') === $tt ? 'selected' : '' }}>{{ ucfirst($tt) }}</option>
+                    @endforeach
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label form-label-sm mb-0">{{ __('Policy Type') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <select name="filter_policy_type" class="form-select form-select-sm">
+                    <option value="">{{ __('All') }}</option>
+                    <option value="permission" {{ request('filter_policy_type') === 'permission' ? 'selected' : '' }}>{{ __('Permission') }}</option>
+                    <option value="prohibition" {{ request('filter_policy_type') === 'prohibition' ? 'selected' : '' }}>{{ __('Prohibition') }}</option>
+                    <option value="obligation" {{ request('filter_policy_type') === 'obligation' ? 'selected' : '' }}>{{ __('Obligation') }}</option>
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label form-label-sm mb-0">{{ __('Action Type') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+                <select name="filter_action_type" class="form-select form-select-sm">
+                    <option value="">{{ __('All') }}</option>
+                    @foreach(['use', 'reproduce', 'distribute', 'modify', 'archive', 'display'] as $at)
+                    <option value="{{ $at }}" {{ request('filter_action_type') === $at ? 'selected' : '' }}>{{ ucfirst($at) }}</option>
+                    @endforeach
+                </select>
+            </div>
+            <div class="col-auto"><button type="submit" class="btn btn-outline-secondary btn-sm">{{ __('Filter') }}</button></div>
+        </form>
+    </div>
+</div>
+
+@if(empty($policies['items'] ?? []))
+    <div class="alert alert-info">{{ __('No ODRL policies found. Create one to get started.') }}</div>
+@else
+<div class="table-responsive">
+    <table class="table table-bordered table-hover align-middle">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>{{ __('Target') }}</th>
+                <th>{{ __('Policy Type') }}</th>
+                <th>{{ __('Action') }}</th>
+                <th>{{ __('Constraints') }}</th>
+                <th>{{ __('Created') }}</th>
+                <th>{{ __('Actions') }}</th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach($policies['items'] as $p)
+            <tr>
+                <td>{{ (int) $p->id }}</td>
+                <td>
+                    <span class="badge bg-secondary">{{ ucfirst(str_replace('_', ' ', $p->target_type)) }}</span>
+                    <br>{{ $p->target_name ?? '#' . $p->target_id }}
+                </td>
+                <td>
+                    @php
+                    $badgeClass = 'bg-info';
+                    if ($p->policy_type === 'permission') { $badgeClass = 'bg-success'; }
+                    elseif ($p->policy_type === 'prohibition') { $badgeClass = 'bg-danger'; }
+                    elseif ($p->policy_type === 'obligation') { $badgeClass = 'bg-warning text-dark'; }
+                    @endphp
+                    <span class="badge {{ $badgeClass }}">{{ $p->policy_type }}</span>
+                </td>
+                <td><code>{{ $p->action_type }}</code></td>
+                <td>
+                    @if(!empty($p->resolved_constraints))
+                        @foreach($p->resolved_constraints as $label => $val)
+                            <small class="d-block text-muted"><strong>{{ $label }}:</strong> {{ $val }}</small>
+                        @endforeach
+                    @else
+                        <small class="text-muted">{{ __('None') }}</small>
+                    @endif
+                </td>
+                <td><small>{{ $p->created_at ?? '' }}</small></td>
+                <td>
+                    @php
+                        $editData = [
+                            'id' => (int) $p->id,
+                            'target_type' => $p->target_type,
+                            'target_id' => (int) $p->target_id,
+                            'target_name' => $p->target_name ?? '',
+                            'policy_type' => $p->policy_type,
+                            'action_type' => $p->action_type,
+                            'constraints' => json_decode($p->constraints_json ?? '{}', true) ?: [],
+                            'resolved' => $p->resolved_constraints ?? [],
+                        ];
+                    @endphp
+                    <button class="btn btn-sm btn-outline-secondary edit-policy-btn d-inline" title="{{ __('Edit') }}"
+                        data-policy='{!! json_encode($editData, JSON_HEX_APOS | JSON_HEX_QUOT) !!}'>
+                        <i class="fas fa-edit"></i>
+                    </button>
+                    <form method="post" action="{{ url('/research/odrlPolicies') }}" class="d-inline" onsubmit="return confirm('Delete this policy? This cannot be undone.')">
+                        @csrf
+                        <input type="hidden" name="form_action" value="delete">
+                        <input type="hidden" name="policy_id" value="{{ (int) $p->id }}">
+                        <button type="submit" class="btn btn-sm btn-outline-danger" title="{{ __('Delete') }}"><i class="fas fa-trash"></i></button>
+                    </form>
+                </td>
+            </tr>
+        @endforeach
+        </tbody>
+    </table>
+</div>
+
+@if(($policies['total'] ?? 0) > 25)
+@php $totalPages = ceil($policies['total'] / 25); $currentPage = (int) request('page', 1); @endphp
+<nav>
+    <ul class="pagination justify-content-center">
+        @for($i = 1; $i <= $totalPages; $i++)
+        <li class="page-item {{ $i === $currentPage ? 'active' : '' }}">
+            <a class="page-link" href="?page={{ $i }}{{ request('filter_target_type') ? '&filter_target_type=' . urlencode(request('filter_target_type')) : '' }}{{ request('filter_policy_type') ? '&filter_policy_type=' . urlencode(request('filter_policy_type')) : '' }}{{ request('filter_action_type') ? '&filter_action_type=' . urlencode(request('filter_action_type')) : '' }}">{{ $i }}</a>
+        </li>
+        @endfor
+    </ul>
+</nav>
+@endif
+@endif
+
+<!-- Create Policy Modal -->
+<div class="modal fade" id="createPolicyModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="post" action="{{ url('/research/odrlPolicies') }}">
+        @csrf
+        <input type="hidden" name="form_action" value="create">
+        <div class="modal-header">
+          <h5 class="modal-title">{{ __('Create ODRL Policy') }}</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">{{ __('Target Type *') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+            <select name="target_type" id="policy-target-type" class="form-select" required>
+              <option value="">{{ __('Select...') }}</option>
+              <option value="archival_description">{{ __('Archival Description') }}</option>
+              <option value="collection">{{ __('Collection') }}</option>
+              <option value="project">{{ __('Project') }}</option>
+              <option value="snapshot">{{ __('Snapshot') }}</option>
+              <option value="annotation">{{ __('Annotation') }}</option>
+              <option value="assertion">{{ __('Assertion') }}</option>
+            </select>
+          </div>
+          <input type="hidden" name="target_id" id="target-id-hidden" required>
+          <div class="mb-3" id="target-id-wrapper" style="display:none;">
+            <label class="form-label" id="target-id-label">{{ __('Target *') }} <span class="badge bg-danger ms-1">{{ __('Required') }}</span></label>
+            <select id="target-id-tomselect" placeholder="{{ __('Select a target type first...') }}"></select>
+            <small class="text-muted" id="target-id-hint">{{ __('Select a target type above to search') }}</small>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">{{ __('Policy Type *') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+            <select name="policy_type" class="form-select">
+              <option value="permission">{{ __('Permission') }}</option>
+              <option value="prohibition">{{ __('Prohibition') }}</option>
+              <option value="obligation">{{ __('Obligation') }}</option>
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">{{ __('Action Type *') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+            <select name="action_type" class="form-select">
+              <option value="use">{{ __('Use') }}</option>
+              <option value="reproduce">{{ __('Reproduce') }}</option>
+              <option value="distribute">{{ __('Distribute') }}</option>
+              <option value="modify">{{ __('Modify') }}</option>
+              <option value="archive">{{ __('Archive') }}</option>
+              <option value="display">{{ __('Display') }}</option>
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">{{ __('Constraints') }} <span class="badge bg-secondary ms-1">{{ __('Optional') }}</span></label>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small">{{ __('Restrict to Researchers') }}</label>
+            <select id="constraint-researchers" multiple placeholder="{{ __('Search researchers...') }}"></select>
+            <small class="text-muted">{{ __('Leave empty to apply to all researchers') }}</small>
+          </div>
+          <div class="row mb-3">
+            <div class="col-md-6">
+              <label class="form-label small">{{ __('Date From') }}</label>
+              <input type="date" id="constraint-date-from" class="form-control form-control-sm">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small">{{ __('Date To') }}</label>
+              <input type="date" id="constraint-date-to" class="form-control form-control-sm">
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small">{{ __('Max Uses') }}</label>
+            <input type="number" id="constraint-max-uses" class="form-control form-control-sm" min="1" placeholder="{{ __('Unlimited') }}">
+          </div>
+          <input type="hidden" name="constraints_json" id="constraints-json-hidden">
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{ __('Cancel') }}</button>
+          <button type="submit" class="btn btn-primary">{{ __('Create Policy') }}</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Policy Modal -->
+<div class="modal fade" id="editPolicyModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="post" action="{{ url('/research/odrlPolicies') }}">
+        @csrf
+        <input type="hidden" name="form_action" value="update">
+        <input type="hidden" name="policy_id" id="edit-policy-id">
+        <div class="modal-header">
+          <h5 class="modal-title">{{ __('Edit ODRL Policy') }}</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">{{ __('Target Type *') }}</label>
+            <select name="target_type" id="edit-target-type" class="form-select" required>
+              <option value="archival_description">{{ __('Archival Description') }}</option>
+              <option value="collection">{{ __('Collection') }}</option>
+              <option value="project">{{ __('Project') }}</option>
+              <option value="snapshot">{{ __('Snapshot') }}</option>
+              <option value="annotation">{{ __('Annotation') }}</option>
+              <option value="assertion">{{ __('Assertion') }}</option>
+            </select>
+          </div>
+          <input type="hidden" name="target_id" id="edit-target-id-hidden">
+          <div class="mb-3">
+            <label class="form-label" id="edit-target-label">{{ __('Target *') }}</label>
+            <select id="edit-target-tomselect" placeholder="{{ __('Search...') }}"></select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">{{ __('Policy Type *') }}</label>
+            <select name="policy_type" id="edit-policy-type" class="form-select">
+              <option value="permission">{{ __('Permission') }}</option>
+              <option value="prohibition">{{ __('Prohibition') }}</option>
+              <option value="obligation">{{ __('Obligation') }}</option>
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">{{ __('Action Type *') }}</label>
+            <select name="action_type" id="edit-action-type" class="form-select">
+              <option value="use">{{ __('Use') }}</option>
+              <option value="reproduce">{{ __('Reproduce') }}</option>
+              <option value="distribute">{{ __('Distribute') }}</option>
+              <option value="modify">{{ __('Modify') }}</option>
+              <option value="archive">{{ __('Archive') }}</option>
+              <option value="display">{{ __('Display') }}</option>
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small">{{ __('Restrict to Researchers') }}</label>
+            <select id="edit-constraint-researchers" multiple placeholder="{{ __('Search researchers...') }}"></select>
+          </div>
+          <div class="row mb-3">
+            <div class="col-md-6">
+              <label class="form-label small">{{ __('Date From') }}</label>
+              <input type="date" id="edit-constraint-date-from" class="form-control form-control-sm">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small">{{ __('Date To') }}</label>
+              <input type="date" id="edit-constraint-date-to" class="form-control form-control-sm">
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small">{{ __('Max Uses') }}</label>
+            <input type="number" id="edit-constraint-max-uses" class="form-control form-control-sm" min="1" placeholder="{{ __('Unlimited') }}">
+          </div>
+          <input type="hidden" name="constraints_json" id="edit-constraints-json-hidden">
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{{ __('Cancel') }}</button>
+          <button type="submit" class="btn btn-primary">{{ __('Save Changes') }}</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+@push('css')
+<link href="{{ asset('vendor/tom-select/2.2.2/tom-select.bootstrap5.min.css') }}" rel="stylesheet">
+@endpush
+
+@push('js')
+<script src="{{ asset('vendor/tom-select/2.2.2/tom-select.complete.min.js') }}"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    var targetType = document.getElementById('policy-target-type');
+    var wrapper = document.getElementById('target-id-wrapper');
+    var hiddenInput = document.getElementById('target-id-hidden');
+    var label = document.getElementById('target-id-label');
+    var hint = document.getElementById('target-id-hint');
+    var tsInstance = null;
+    var currentType = '';
+
+    var typeLabels = {
+        'archival_description': 'Archival Description',
+        'collection': 'Collection',
+        'project': 'Project',
+        'snapshot': 'Snapshot',
+        'annotation': 'Annotation',
+        'assertion': 'Assertion'
+    };
+
+    function initOrResetTomSelect(type) {
+        if (tsInstance) {
+            tsInstance.destroy();
+            tsInstance = null;
+        }
+        currentType = type;
+
+        tsInstance = new TomSelect('#target-id-tomselect', {
+            valueField: 'id',
+            labelField: 'name',
+            searchField: ['name'],
+            maxOptions: 20,
+            loadThrottle: 300,
+            placeholder: 'Search ' + (typeLabels[type] || type) + '...',
+            load: function(query, callback) {
+                if (query.length < 2) return callback();
+                fetch('/research/target-autocomplete?type=' + encodeURIComponent(currentType) + '&query=' + encodeURIComponent(query))
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) { callback(data); })
+                    .catch(function() { callback(); });
+            },
+            onChange: function(value) {
+                hiddenInput.value = value || '';
+            },
+            render: {
+                option: function(item, escape) {
+                    return '<div><strong>' + escape(item.name || '[Untitled]') + '</strong> <small class="text-muted">#' + escape(item.id) + '</small></div>';
+                },
+                item: function(item, escape) {
+                    return '<div>' + escape(item.name || '[Untitled]') + ' <small>#' + escape(item.id) + '</small></div>';
+                }
+            }
+        });
+    }
+
+    targetType.addEventListener('change', function() {
+        var type = this.value;
+        if (!type) {
+            wrapper.style.display = 'none';
+            hiddenInput.value = '';
+            return;
+        }
+        label.innerHTML = (typeLabels[type] || type) + ' * <span class="badge bg-danger ms-1">Required</span>';
+        hint.textContent = 'Type at least 2 characters to search';
+        wrapper.style.display = '';
+        hiddenInput.value = '';
+        initOrResetTomSelect(type);
+    });
+
+    // Researcher TomSelect (multi)
+    var researcherTs = new TomSelect('#constraint-researchers', {
+        valueField: 'id',
+        labelField: 'name',
+        searchField: ['name', 'email'],
+        maxOptions: 20,
+        loadThrottle: 300,
+        plugins: ['remove_button'],
+        load: function(query, callback) {
+            if (query.length < 2) return callback();
+            fetch('/research/researcher-autocomplete?query=' + encodeURIComponent(query))
+                .then(function(r) { return r.json(); })
+                .then(function(data) { callback(data); })
+                .catch(function() { callback(); });
+        },
+        render: {
+            option: function(item, escape) {
+                return '<div><strong>' + escape(item.name || '') + '</strong> <small class="text-muted">' + escape(item.email || '') + '</small></div>';
+            },
+            item: function(item, escape) {
+                return '<div>' + escape(item.name || '') + '</div>';
+            }
+        }
+    });
+
+    // Build constraints JSON on form submit
+    var policyForm = document.querySelector('#createPolicyModal form');
+    policyForm.addEventListener('submit', function() {
+        var constraints = {};
+        var researcherIds = researcherTs.getValue();
+        if (researcherIds && researcherIds.length > 0) {
+            constraints.researcher_ids = Array.isArray(researcherIds) ? researcherIds.map(Number) : [Number(researcherIds)];
+        }
+        var df = document.getElementById('constraint-date-from').value;
+        if (df) constraints.date_from = df;
+        var dt = document.getElementById('constraint-date-to').value;
+        if (dt) constraints.date_to = dt;
+        var mu = document.getElementById('constraint-max-uses').value;
+        if (mu) constraints.max_uses = parseInt(mu);
+
+        document.getElementById('constraints-json-hidden').value = Object.keys(constraints).length > 0 ? JSON.stringify(constraints) : '';
+    });
+
+    // ── Edit Modal ──
+    var editTargetTs = null;
+    var editCurrentType = '';
+    var editResearcherTs = new TomSelect('#edit-constraint-researchers', {
+        valueField: 'id',
+        labelField: 'name',
+        searchField: ['name', 'email'],
+        maxOptions: 20,
+        loadThrottle: 300,
+        plugins: ['remove_button'],
+        load: function(query, callback) {
+            if (query.length < 2) return callback();
+            fetch('/research/researcher-autocomplete?query=' + encodeURIComponent(query))
+                .then(function(r) { return r.json(); })
+                .then(function(data) { callback(data); })
+                .catch(function() { callback(); });
+        },
+        render: {
+            option: function(item, escape) {
+                return '<div><strong>' + escape(item.name || '') + '</strong> <small class="text-muted">' + escape(item.email || '') + '</small></div>';
+            },
+            item: function(item, escape) {
+                return '<div>' + escape(item.name || '') + '</div>';
+            }
+        }
+    });
+
+    function initEditTargetTs(type, preloadId) {
+        if (editTargetTs) { editTargetTs.destroy(); editTargetTs = null; }
+        editCurrentType = type;
+        editTargetTs = new TomSelect('#edit-target-tomselect', {
+            valueField: 'id',
+            labelField: 'name',
+            searchField: ['name'],
+            maxOptions: 20,
+            loadThrottle: 300,
+            placeholder: 'Search ' + (typeLabels[type] || type) + '...',
+            load: function(query, callback) {
+                if (query.length < 2) return callback();
+                fetch('/research/target-autocomplete?type=' + encodeURIComponent(editCurrentType) + '&query=' + encodeURIComponent(query))
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) { callback(data); })
+                    .catch(function() { callback(); });
+            },
+            onChange: function(value) {
+                document.getElementById('edit-target-id-hidden').value = value || '';
+            },
+            render: {
+                option: function(item, escape) {
+                    return '<div><strong>' + escape(item.name || '[Untitled]') + '</strong> <small class="text-muted">#' + escape(item.id) + '</small></div>';
+                },
+                item: function(item, escape) {
+                    return '<div>' + escape(item.name || '[Untitled]') + ' <small>#' + escape(item.id) + '</small></div>';
+                }
+            }
+        });
+
+        // Preload the current target with resolved name
+        if (preloadId) {
+            var preloadName = arguments[2] || '#' + preloadId;
+            editTargetTs.addOption({ id: preloadId, name: preloadName });
+            editTargetTs.setValue(preloadId, true);
+        }
+    }
+
+    document.getElementById('edit-target-type').addEventListener('change', function() {
+        initEditTargetTs(this.value, null);
+    });
+
+    // Edit button click handlers
+    document.querySelectorAll('.edit-policy-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var p = JSON.parse(this.getAttribute('data-policy'));
+
+            document.getElementById('edit-policy-id').value = p.id;
+            document.getElementById('edit-target-type').value = p.target_type;
+            document.getElementById('edit-target-id-hidden').value = p.target_id;
+            document.getElementById('edit-policy-type').value = p.policy_type;
+            document.getElementById('edit-action-type').value = p.action_type;
+
+            var c = p.constraints || {};
+
+            // Fill dates and max uses
+            document.getElementById('edit-constraint-date-from').value = c.date_from || '';
+            document.getElementById('edit-constraint-date-to').value = c.date_to || '';
+            document.getElementById('edit-constraint-max-uses').value = c.max_uses || '';
+
+            // Fill researchers with resolved names
+            editResearcherTs.clear(true);
+            editResearcherTs.clearOptions();
+            if (c.researcher_ids && c.researcher_ids.length) {
+                var researcherNames = (p.resolved['Researchers'] || '').split(', ');
+                c.researcher_ids.forEach(function(rid, idx) {
+                    var name = researcherNames[idx] || 'Researcher #' + rid;
+                    editResearcherTs.addOption({ id: String(rid), name: name });
+                    editResearcherTs.addItem(String(rid), true);
+                });
+            }
+
+            // Fill target with resolved name
+            initEditTargetTs(p.target_type, p.target_id, p.target_name);
+            new bootstrap.Modal(document.getElementById('editPolicyModal')).show();
+        });
+    });
+
+    // Build constraints JSON on edit form submit
+    document.querySelector('#editPolicyModal form').addEventListener('submit', function() {
+        var constraints = {};
+        var rIds = editResearcherTs.getValue();
+        if (rIds && rIds.length > 0) {
+            constraints.researcher_ids = Array.isArray(rIds) ? rIds.map(Number) : [Number(rIds)];
+        }
+        var df = document.getElementById('edit-constraint-date-from').value;
+        if (df) constraints.date_from = df;
+        var dt = document.getElementById('edit-constraint-date-to').value;
+        if (dt) constraints.date_to = dt;
+        var mu = document.getElementById('edit-constraint-max-uses').value;
+        if (mu) constraints.max_uses = parseInt(mu);
+
+        document.getElementById('edit-constraints-json-hidden').value = Object.keys(constraints).length > 0 ? JSON.stringify(constraints) : '';
+    });
+});
+</script>
+@endpush
+@endsection

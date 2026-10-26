@@ -1,0 +1,160 @@
+{{-- Admin: Manage Researchers - Migrated from AtoM --}}
+@extends('theme::layouts.2col')
+
+@section('sidebar')
+  @include('research::research._sidebar', ['sidebarActive' => 'researchers'])
+@endsection
+
+@section('title')
+  <h1><i class="fas fa-users text-primary me-2"></i>{{ __('Researchers') }}</h1>
+@endsection
+
+@section('content')
+  @if(session('error'))
+    <div class="alert alert-danger alert-dismissible fade show">
+      {{ session('error') }}
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+  @endif
+
+  @if(session('success'))
+    <div class="alert alert-success alert-dismissible fade show">
+      {{ session('success') }}
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+  @endif
+
+  <h1 class="h2 mb-4"><i class="fas fa-users text-primary me-2"></i>{{ __('Manage Researchers') }}</h1>
+
+  {{-- Status Filter Pills --}}
+  @php $cs = $filter ?? 'all'; @endphp
+  <ul class="nav nav-pills mb-4">
+    <li class="nav-item">
+      <a class="nav-link {{ $cs === 'all' ? 'active' : '' }}" href="{{ route('research.researchers') }}">
+        {{ __('All') }} <span class="badge bg-{{ $cs === 'all' ? 'white text-primary' : 'secondary' }} ms-1">{{ (int) ($counts['all'] ?? 0) }}</span>
+      </a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link {{ $cs === 'pending' ? 'active' : '' }}" href="{{ route('research.researchers', ['filter' => 'pending']) }}">
+        {{ __('Pending') }} <span class="badge bg-{{ $cs === 'pending' ? 'white text-primary' : 'warning text-dark' }} ms-1">{{ (int) ($counts['pending'] ?? 0) }}</span>
+      </a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link {{ $cs === 'approved' ? 'active' : '' }}" href="{{ route('research.researchers', ['filter' => 'approved']) }}">
+        {{ __('Approved') }} <span class="badge bg-{{ $cs === 'approved' ? 'white text-primary' : 'success' }} ms-1">{{ (int) ($counts['approved'] ?? 0) }}</span>
+      </a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link {{ $cs === 'suspended' ? 'active' : '' }}" href="{{ route('research.researchers', ['filter' => 'suspended']) }}">
+        {{ __('Suspended') }} <span class="badge bg-{{ $cs === 'suspended' ? 'white text-primary' : 'danger' }} ms-1">{{ (int) ($counts['suspended'] ?? 0) }}</span>
+      </a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link {{ $cs === 'expired' ? 'active' : '' }}" href="{{ route('research.researchers', ['filter' => 'expired']) }}">
+        {{ __('Expired') }} <span class="badge bg-{{ $cs === 'expired' ? 'white text-primary' : 'secondary' }} ms-1">{{ (int) ($counts['expired'] ?? 0) }}</span>
+      </a>
+    </li>
+  </ul>
+
+  {{-- Card with header containing status dropdown + search + count --}}
+  <div class="card">
+    <div class="card-header">
+      <div class="row align-items-center">
+        <div class="col-md-6">
+          <form method="get" action="{{ route('research.researchers') }}" class="d-flex gap-2">
+            <select name="filter" class="form-select form-select-sm" style="width: auto;" data-csp-auto-submit>
+              <option value="all">{{ __('All Status') }}</option>
+              <option value="pending" {{ $cs === 'pending' ? 'selected' : '' }}>{{ __('Pending') }}</option>
+              <option value="approved" {{ $cs === 'approved' ? 'selected' : '' }}>{{ __('Approved') }}</option>
+              <option value="suspended" {{ $cs === 'suspended' ? 'selected' : '' }}>{{ __('Suspended') }}</option>
+              <option value="rejected" {{ $cs === 'rejected' ? 'selected' : '' }}>{{ __('Rejected') }}</option>
+            </select>
+            <input type="text" name="q" class="form-control form-control-sm" placeholder="{{ __('Search...') }}" value="{{ e($query ?? '') }}" style="width: 200px;">
+            <button type="submit" class="btn btn-sm btn-primary"><i class="fas fa-search"></i></button>
+          </form>
+        </div>
+        <div class="col-md-6 text-end">
+          <span class="text-muted">{{ is_countable($researchers) ? count($researchers) : (is_object($researchers) && method_exists($researchers, 'total') ? $researchers->total() : 0) }} researchers</span>
+        </div>
+      </div>
+    </div>
+
+    {{-- Researchers Table --}}
+    <div class="table-responsive">
+      <table class="table table-hover mb-0">
+        <thead>
+          <tr>
+            <th>{{ __('Name') }}</th>
+            <th>{{ __('Email') }}</th>
+            <th>{{ __('Institution') }}</th>
+            <th>{{ __('Status') }}</th>
+            <th>{{ __('Verified') }}</th>
+            <th>{{ __('Registered') }}</th>
+            <th width="130"></th>
+          </tr>
+        </thead>
+        <tbody>
+          @forelse($researchers ?? [] as $r)
+            <tr>
+              <td>
+                <strong>{{ e($r->title ? $r->title . ' ' : '') }}{{ e($r->first_name . ' ' . $r->last_name) }}</strong>
+              </td>
+              <td><a href="mailto:{{ e($r->email) }}">{{ e($r->email) }}</a></td>
+              <td>{{ e($r->institution ?? '-') }}</td>
+              <td>
+                @php
+                  $sc = ['approved' => 'success', 'pending' => 'warning', 'suspended' => 'danger', 'expired' => 'secondary', 'rejected' => 'danger'];
+                @endphp
+                <span class="badge bg-{{ $sc[$r->status] ?? 'secondary' }}">{{ ucfirst(e($r->status ?? 'unknown')) }}</span>
+              </td>
+              <td>
+                @if((int) ($r->id_verified ?? 0) === 1)
+                  <span class="badge bg-success" title="{{ $r->id_verified_at ? __('Verified :when', ['when' => \Illuminate\Support\Carbon::parse($r->id_verified_at)->format('Y-m-d')]) : __('Verified') }}"><i class="fas fa-check-circle me-1"></i>{{ __('Verified') }}</span>
+                @else
+                  <span class="badge bg-light text-dark border">{{ __('Not verified') }}</span>
+                @endif
+              </td>
+              <td><small>{{ $r->created_at ? \Illuminate\Support\Carbon::parse($r->created_at)->format('Y-m-d') : '-' }}</small></td>
+              <td>
+                <a href="{{ route('research.viewResearcher', $r->id) }}" class="btn btn-sm btn-outline-primary">
+                  <i class="fas fa-eye"></i>
+                </a>
+                @if(($r->status ?? '') === 'pending')
+                  <form action="{{ route('research.researchers.approve', $r->id) }}" method="POST" class="d-inline">
+                    @csrf
+                    <button type="submit" class="btn btn-sm btn-outline-success" title="{{ __('Approve') }}">
+                      <i class="fas fa-check"></i>
+                    </button>
+                  </form>
+                @endif
+                <form action="{{ route('research.researchers.verify', $r->id) }}" method="POST" class="d-inline">
+                  @csrf
+                  <input type="hidden" name="verified" value="{{ (int) ($r->id_verified ?? 0) === 1 ? '0' : '1' }}">
+                  @if((int) ($r->id_verified ?? 0) === 1)
+                    <button type="submit" class="btn btn-sm btn-outline-secondary" title="{{ __('Remove verification') }}">
+                      <i class="fas fa-user-slash"></i>
+                    </button>
+                  @else
+                    <button type="submit" class="btn btn-sm btn-outline-success" title="{{ __('Mark verified (e.g. confirmed by phone)') }}">
+                      <i class="fas fa-user-check"></i>
+                    </button>
+                  @endif
+                </form>
+              </td>
+            </tr>
+          @empty
+            <tr>
+              <td colspan="7" class="text-center text-muted py-4">{{ __('No researchers found.') }}</td>
+            </tr>
+          @endforelse
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  @if(is_object($researchers) && method_exists($researchers, 'links'))
+    <div class="d-flex justify-content-center mt-3">
+      {{ $researchers->appends(request()->query())->links() }}
+    </div>
+  @endif
+@endsection

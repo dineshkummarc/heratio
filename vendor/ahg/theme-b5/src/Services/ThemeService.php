@@ -1,0 +1,187 @@
+<?php
+
+/**
+ * ThemeService - Service for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace AhgThemeB5\Services;
+
+use AhgCore\Services\AclService;
+use AhgCore\Services\AhgSettingsService;
+use AhgCore\Services\MenuService;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+
+/**
+ * Theme service - provides all data needed by layout templates.
+ */
+class ThemeService
+{
+    /**
+     * Get all data needed for the master layout.
+     */
+    public function getLayoutData(): array
+    {
+        $user = Auth::user();
+        // Use the request's resolved locale so menus flip per culture. Was
+        // hard-coded to 'en' which kept the BROWSE / mainMenu / quickLinks in
+        // English regardless of the user's language pick.
+        $culture = (string) app()->getLocale();
+        $enabledPlugins = MenuService::getEnabledPlugins();
+
+        return [
+            'user' => $user,
+            'isAuthenticated' => (bool) $user,
+            'isAdmin' => $user ? AclService::isAdministrator($user) : false,
+            'isEditor' => $user ? AclService::isEditor($user) : false,
+            'culture' => $culture,
+            'siteTitle' => $this->getSetting('siteTitle', 'Heratio'),
+            'siteDescription' => $this->getSetting('siteDescription', ''),
+            'toggleLogo' => $this->getSettingBool('toggleLogo', true),
+            'toggleTitle' => $this->getSettingBool('toggleTitle', true),
+            'toggleDescription' => $this->getSettingBool('toggleDescription', false),
+            'toggleLanguageMenu' => $this->getSettingBool('toggleLanguageMenu', false),
+            'customLogo' => $this->getCustomLogo(),
+            'browseMenu' => MenuService::getBrowseMenu($culture),
+            'mainMenu' => MenuService::getMainMenu($culture),
+            'quickLinks' => MenuService::getQuickLinks($culture),
+            'enabledPlugins' => $enabledPlugins,
+            'enabledPluginMap' => array_flip($enabledPlugins),
+            'userGroups' => $user ? AclService::getUserGroups($user->id) : [],
+            'footerText' => AhgSettingsService::getLocalized('ahg_footer_text', ''),
+            'showBranding' => AhgSettingsService::getBool('ahg_show_branding', true),
+            'vendorJsBundle' => $this->findBundle('js', 'vendor.bundle.*.js'),
+            'themeJsBundle' => $this->findBundle('js', 'ahgThemeB5Plugin.bundle.*.js'),
+            'themeCssBundle' => $this->findBundle('css', 'ahgThemeB5Plugin.bundle.*.css'),
+        ];
+    }
+
+    /**
+     * Get an app setting (from setting/setting_i18n tables).
+     */
+    private function getSetting(string $name, $default = null)
+    {
+        try {
+            $setting = DB::table('setting')
+                ->where('name', $name)
+                ->first();
+
+            if (! $setting) {
+                return $default;
+            }
+
+            // Current UI language first (site title/description are translated
+            // per culture in setting_i18n), then the English source.
+            $values = DB::table('setting_i18n')
+                ->where('id', $setting->id)
+                ->whereIn('culture', array_unique([app()->getLocale(), 'en']))
+                ->pluck('value', 'culture');
+            $value = $values[app()->getLocale()] ?? null;
+
+            return ($value !== null && $value !== '') ? $value : ($values['en'] ?? $default);
+        } catch (\Exception $e) {
+            return $default;
+        }
+    }
+
+    /**
+     * Get a boolean app setting.
+     */
+    private function getSettingBool(string $name, bool $default = false): bool
+    {
+        $value = $this->getSetting($name, $default ? '1' : '0');
+
+        return in_array($value, ['1', 'true', true, 1], true);
+    }
+
+    /**
+     * Get custom logo URL from ahg_settings.
+     *
+     * Setting `ahg_logo_path` may be:
+     *   - An absolute URL                       (returned verbatim)
+     *   - A web-relative path under public/     (e.g. "vendor/ahg-theme-b5/images/foo.svg"
+     *                                            or "public/vendor/...svg" - leading "public/"
+     *                                            is stripped because nginx serves from public/)
+     *   - An uploads-relative path              (e.g. "/uploads/r/.../logo.png" - nginx alias
+     *                                            serves /uploads/ from HERATIO_UPLOADS_PATH)
+     *
+     * Previously the existence check hardcoded "/usr/share/nginx/archive" - wrong on every
+     * install except the AtoM PSIS box. Replaced with public_path() / uploads_path() lookup.
+     */
+    private function getCustomLogo(): ?string
+    {
+        $logoPath = AhgSettingsService::get('ahg_logo_path');
+
+        if (! $logoPath) {
+            return null;
+        }
+
+        // Absolute URL - return as-is
+        if (preg_match('#^https?://#', $logoPath)) {
+            return $logoPath;
+        }
+
+        // Strip leading "public/" - DB occasionally stores it but the served URL must not include it
+        $webPath = preg_replace('#^public/#', '', $logoPath);
+        $webPath = '/'.ltrim($webPath, '/');
+
+        // 1. File under this install's public/
+        if (file_exists(public_path(ltrim($webPath, '/')))) {
+            return $webPath;
+        }
+
+        // 2. File under HERATIO_UPLOADS_PATH (served by nginx via /uploads/ alias)
+        if (str_starts_with($webPath, '/uploads/')) {
+            $uploadsBase = rtrim((string) config('heratio.uploads_path', ''), '/');
+            if ($uploadsBase && file_exists($uploadsBase.'/'.substr($webPath, strlen('/uploads/')))) {
+                return $webPath;
+            }
+        }
+
+        // 3. Fall through - return the path so the admin sees a broken logo and can correct it,
+        // rather than silently reverting to the default.
+        return $webPath;
+    }
+
+    /**
+     * Find a webpack bundle by glob pattern in the dist directory.
+     */
+    private function findBundle(string $subdir, string $pattern): ?string
+    {
+        $distPath = public_path('vendor/ahg-theme-b5/dist/'.$subdir);
+        $files = glob($distPath.'/'.$pattern);
+
+        if (! empty($files)) {
+            return '/vendor/ahg-theme-b5/dist/'.$subdir.'/'.basename($files[0]);
+        }
+
+        return null;
+    }
+
+    /**
+     * Check if a plugin is enabled.
+     */
+    public function isPluginEnabled(string $name): bool
+    {
+        return MenuService::isPluginEnabled($name);
+    }
+}

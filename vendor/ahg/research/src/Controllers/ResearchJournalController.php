@@ -1,0 +1,337 @@
+<?php
+
+/**
+ * ResearchJournalController - journal builder UI + CRUD for the research portal (#1105).
+ *
+ * Institutional journal publication (journal -> issues -> articles -> TOC ->
+ * publish) plus a manuscript workspace that formats an article toward an
+ * external target journal (#1107). All routes are under the auth'd /research
+ * group.
+ *
+ * @author    Johan Pieterse
+ * @copyright Plain Sailing Information Systems
+ * @license   AGPL-3.0-or-later
+ */
+
+namespace AhgResearch\Controllers;
+
+use App\Http\Controllers\Controller;
+use AhgResearch\Concerns\LogsResearchActivity;
+use AhgResearch\Services\ResearchJournalService;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+
+class ResearchJournalController extends Controller
+{
+    use LogsResearchActivity;
+
+    public function __construct(private ResearchJournalService $service)
+    {
+    }
+
+    // ── Journals ──────────────────────────────────────────────────────────
+
+    public function index()
+    {
+        // SECURITY: a researcher sees only their own journals; admins see all.
+        $all = \AhgCore\Services\AclService::isAdministrator(Auth::user());
+        $mine = $this->researcherId();
+
+        return view('research::journals.index', [
+            'publications' => $this->service->listJournals(ResearchJournalService::KIND_PUBLICATION, $mine, $all),
+            'manuscripts'  => $this->service->listJournals(ResearchJournalService::KIND_MANUSCRIPT, $mine, $all),
+        ]);
+    }
+
+    public function create(Request $request)
+    {
+        $kind = $request->query('kind') === ResearchJournalService::KIND_MANUSCRIPT
+            ? ResearchJournalService::KIND_MANUSCRIPT : ResearchJournalService::KIND_PUBLICATION;
+
+        return view('research::journals.builder', [
+            'journal'        => null,
+            'kind'           => $kind,
+            'targetJournals' => $this->targetJournalOptions(),
+        ]);
+    }
+
+    public function store(Request $request)
+    {
+        $data = $this->validateJournal($request);
+        $data['researcher_id'] = $this->researcherId();
+        $id = $this->service->createJournal($data);
+
+        $this->logResearchActivity('create', 'journal', (int) $id, $data['title'] ?? null, ['method' => 'ResearchJournalController@store']);
+
+        return redirect()->route('research.journal-builder.show', $id)
+            ->with('success', __('Journal created.'));
+    }
+
+    public function show(int $id)
+    {
+        $journal = $this->service->getJournal($id);
+        abort_if(! $journal, 404);
+        $this->assertOwner($journal);
+
+        return view('research::journals.show', [
+            'journal' => $journal,
+            'toc'     => $this->service->tableOfContents($id),
+        ]);
+    }
+
+    public function edit(int $id)
+    {
+        $journal = $this->service->getJournal($id);
+        abort_if(! $journal, 404);
+        $this->assertOwner($journal);
+
+        return view('research::journals.builder', [
+            'journal'        => $journal,
+            'kind'           => $journal['kind'],
+            'targetJournals' => $this->targetJournalOptions(),
+        ]);
+    }
+
+    public function update(int $id, Request $request)
+    {
+        $journal = $this->service->getJournal($id);
+        abort_if(! $journal, 404);
+        $this->assertOwner($journal);
+        $this->service->updateJournal($id, $this->validateJournal($request));
+
+        $this->logResearchActivity('update', 'journal', (int) $id, $journal['title'] ?? null, ['method' => 'ResearchJournalController@update']);
+
+        return redirect()->route('research.journal-builder.show', $id)
+            ->with('success', __('Journal updated.'));
+    }
+
+    public function destroy(int $id)
+    {
+        $journal = $this->service->getJournal($id);
+        abort_if(! $journal, 404);
+        $this->assertOwner($journal);
+        $this->service->deleteJournal($id);
+
+        $this->logResearchActivity('delete', 'journal', (int) $id, $journal['title'] ?? null, ['method' => 'ResearchJournalController@destroy']);
+
+        return redirect()->route('research.journal-builder.index')
+            ->with('success', __('Journal deleted.'));
+    }
+
+    public function setStatus(int $id, Request $request)
+    {
+        $journal = $this->service->getJournal($id);
+        abort_if(! $journal, 404);
+        $this->assertOwner($journal);
+        $status = (string) $request->input('status', 'draft');
+        abort_unless(in_array($status, ['draft', 'published', 'archived'], true), 422);
+        $this->service->setJournalStatus($id, $status);
+
+        return back()->with('success', __('Journal status updated to :s.', ['s' => $status]));
+    }
+
+    // ── Issues ────────────────────────────────────────────────────────────
+
+    public function storeIssue(int $journalId, Request $request)
+    {
+        $journal = $this->service->getJournal($journalId);
+        abort_if(! $journal, 404);
+        $this->assertOwner($journal);
+        $this->service->createIssue($journalId, $this->validateIssue($request));
+
+        $this->logResearchActivity('create', 'journal', (int) $journalId, $journal['title'] ?? null, ['method' => 'ResearchJournalController@storeIssue', 'entity' => 'issue']);
+
+        return back()->with('success', __('Issue added.'));
+    }
+
+    public function updateIssue(int $id, Request $request)
+    {
+        $issue = $this->service->getIssue($id);
+        abort_if(! $issue, 404);
+        $this->assertOwner($this->service->getJournal((int) $issue['journal_id']));
+        $this->service->updateIssue($id, $this->validateIssue($request));
+
+        $this->logResearchActivity('update', 'journal', (int) $id, $issue['title'] ?? null, ['method' => 'ResearchJournalController@updateIssue', 'entity' => 'issue', 'journal_id' => (int) $issue['journal_id']]);
+
+        return back()->with('success', __('Issue updated.'));
+    }
+
+    public function destroyIssue(int $id)
+    {
+        $issue = $this->service->getIssue($id);
+        abort_if(! $issue, 404);
+        $this->assertOwner($this->service->getJournal((int) $issue['journal_id']));
+        $this->service->deleteIssue($id);
+
+        $this->logResearchActivity('delete', 'journal', (int) $id, $issue['title'] ?? null, ['method' => 'ResearchJournalController@destroyIssue', 'entity' => 'issue', 'journal_id' => (int) $issue['journal_id']]);
+
+        return back()->with('success', __('Issue removed; its articles were unassigned.'));
+    }
+
+    // ── Articles / manuscript builder ───────────────────────────────────────
+
+    public function createArticle(int $journalId)
+    {
+        $journal = $this->service->getJournal($journalId);
+        abort_if(! $journal, 404);
+        $this->assertOwner($journal);
+
+        return view('research::journals.article-builder', [
+            'journal'        => $journal,
+            'article'        => null,
+            'issues'         => $this->service->listIssues($journalId),
+            'styles'         => ResearchJournalService::REFERENCE_STYLES,
+            'targetJournals' => $this->targetJournalOptions(),
+        ]);
+    }
+
+    public function storeArticle(int $journalId, Request $request)
+    {
+        $journal = $this->service->getJournal($journalId);
+        abort_if(! $journal, 404);
+        $this->assertOwner($journal);
+        $id = $this->service->createArticle($journalId, $this->validateArticle($request, $journalId));
+
+        $this->logResearchActivity('create', 'journal', (int) $id, $request->input('title'), ['method' => 'ResearchJournalController@storeArticle', 'entity' => 'article', 'journal_id' => (int) $journalId]);
+
+        return redirect()->route('research.journal-builder.article-edit', $id)
+            ->with('success', __('Article saved.'));
+    }
+
+    public function editArticle(int $id)
+    {
+        $article = $this->service->getArticle($id);
+        abort_if(! $article, 404);
+        $journal = $this->service->getJournal((int) $article['journal_id']);
+        $this->assertOwner($journal);
+
+        return view('research::journals.article-builder', [
+            'journal'        => $journal,
+            'article'        => $article,
+            'issues'         => $this->service->listIssues((int) $article['journal_id']),
+            'styles'         => ResearchJournalService::REFERENCE_STYLES,
+            'targetJournals' => $this->targetJournalOptions(),
+            'validation'     => $this->service->validateManuscript($article),
+        ]);
+    }
+
+    public function updateArticle(int $id, Request $request)
+    {
+        $article = $this->service->getArticle($id);
+        abort_if(! $article, 404);
+        $this->assertOwner($this->service->getJournal((int) $article['journal_id']));
+        $this->service->updateArticle($id, $this->validateArticle($request, (int) $article['journal_id']));
+
+        $this->logResearchActivity('update', 'journal', (int) $id, $article['title'] ?? null, ['method' => 'ResearchJournalController@updateArticle', 'entity' => 'article', 'journal_id' => (int) $article['journal_id']]);
+
+        return redirect()->route('research.journal-builder.article-edit', $id)
+            ->with('success', __('Article saved.'));
+    }
+
+    public function destroyArticle(int $id)
+    {
+        $article = $this->service->getArticle($id);
+        abort_if(! $article, 404);
+        $this->assertOwner($this->service->getJournal((int) $article['journal_id']));
+        $this->service->deleteArticle($id);
+
+        $this->logResearchActivity('delete', 'journal', (int) $id, $article['title'] ?? null, ['method' => 'ResearchJournalController@destroyArticle', 'entity' => 'article', 'journal_id' => (int) $article['journal_id']]);
+
+        return redirect()->route('research.journal-builder.show', (int) $article['journal_id'])
+            ->with('success', __('Article deleted.'));
+    }
+
+    // ── validation + helpers ────────────────────────────────────────────────
+
+    private function validateJournal(Request $request): array
+    {
+        return $request->validate([
+            'kind'              => 'nullable|in:publication,manuscript',
+            'title'             => 'required|string|max:255',
+            'subtitle'          => 'nullable|string|max:255',
+            'issn'              => 'nullable|string|max:20',
+            'eissn'             => 'nullable|string|max:20',
+            'publisher'         => 'nullable|string|max:255',
+            'description'       => 'nullable|string',
+            'aims_scope'        => 'nullable|string',
+            'editor_name'       => 'nullable|string|max:255',
+            'editor_email'      => 'nullable|email|max:255',
+            'target_journal_id' => 'nullable|integer',
+            'doi'               => 'nullable|string|max:128',
+            'status'            => 'nullable|in:draft,published,archived',
+        ]);
+    }
+
+    private function validateIssue(Request $request): array
+    {
+        return $request->validate([
+            'volume'      => 'nullable|string|max:40',
+            'number'      => 'nullable|string|max:40',
+            'title'       => 'nullable|string|max:255',
+            'issue_date'  => 'nullable|date',
+            'description' => 'nullable|string',
+            'status'      => 'nullable|in:draft,published',
+            'sort_order'  => 'nullable|integer',
+        ]);
+    }
+
+    private function validateArticle(Request $request, int $journalId): array
+    {
+        return $request->validate([
+            // SECURITY: the issue must belong to the article's own journal.
+            'issue_id'          => ['nullable', 'integer', \Illuminate\Validation\Rule::exists('research_journal_issue', 'id')->where('journal_id', $journalId)],
+            'title'             => 'required|string|max:500',
+            'authors'           => 'nullable|string',
+            'abstract'          => 'nullable|string',
+            'keywords'          => 'nullable|string|max:500',
+            'body_markdown'     => 'nullable|string',
+            'reference_style'   => 'nullable|string|max:40',
+            'target_journal_id' => 'nullable|integer',
+            'doi'               => 'nullable|string|max:128',
+            'status'            => 'nullable|in:draft,submitted,published',
+            'sort_order'        => 'nullable|integer',
+        ]);
+    }
+
+    /** Options from the #1107 target-journal directory when it exists, else []. */
+    private function targetJournalOptions(): array
+    {
+        if (! Schema::hasTable('research_target_journal')) {
+            return [];
+        }
+
+        return DB::table('research_target_journal')->orderBy('title')
+            ->get(['id', 'title'])->map(fn ($r) => (array) $r)->all();
+    }
+
+    private function researcherId(): ?int
+    {
+        // FIX (#1308): the canonical table is research_researcher; the old
+        // 'researcher' table never existed, so ownership was never recorded.
+        if (! Auth::check() || ! Schema::hasTable('research_researcher')) {
+            return null;
+        }
+        $r = DB::table('research_researcher')->where('user_id', Auth::id())->first();
+
+        return $r ? (int) $r->id : null;
+    }
+
+    /**
+     * SECURITY (#1308): a researcher may only act on their own journal; site
+     * admins may act on any. Fails closed (403) for unowned/foreign rows.
+     */
+    private function assertOwner(?array $row): void
+    {
+        if (\AhgCore\Services\AclService::isAdministrator(Auth::user())) {
+            return;
+        }
+        $mine = $this->researcherId();
+        abort_unless(
+            $row !== null && $mine !== null && (int) ($row['researcher_id'] ?? 0) === $mine,
+            403,
+            'You do not have access to this item.'
+        );
+    }
+}

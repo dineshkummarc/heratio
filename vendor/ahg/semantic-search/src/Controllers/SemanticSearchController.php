@@ -1,0 +1,284 @@
+<?php
+
+/**
+ * SemanticSearchController - Controller for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace AhgSemanticSearch\Controllers;
+
+use AhgSemanticSearch\Services\SemanticSearchService;
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+
+class SemanticSearchController extends Controller
+{
+    protected SemanticSearchService $service;
+
+    /** #1355 - per-request cache for dropdownOptions() taxonomy reads. */
+    private array $dropdownCache = [];
+
+    public function __construct()
+    {
+        $this->service = new SemanticSearchService;
+    }
+
+    // Admin Dashboard
+    public function index()
+    {
+        $stats = $this->service->getDashboardStats();
+        $config = $this->service->getAllConfig();
+
+        return view('ahg-semantic-search::index', compact('stats', 'config'));
+    }
+
+    public function config(Request $request)
+    {
+        if ($request->isMethod('post')) {
+            foreach ($request->except('_token') as $key => $value) {
+                $this->service->setConfig($key, $value);
+            }
+
+            return redirect()->route('semantic-search.config')->with('notice', 'Configuration saved');
+        }
+
+        $config = $this->service->getAllConfig();
+
+        return view('ahg-semantic-search::config', compact('config'));
+    }
+
+    // Terms
+    public function terms(Request $request)
+    {
+        $terms = $this->service->getTerms([
+            'search' => $request->get('q'),
+            'is_active' => $request->has('active') ? (int) $request->get('active') : null,
+        ]);
+
+        return view('ahg-semantic-search::terms', compact('terms'));
+    }
+
+    public function termAdd(Request $request)
+    {
+        if ($request->isMethod('post')) {
+            $this->service->createTerm($request->only([
+                'term', 'synonyms', 'related_terms', 'definition',
+                'source', 'language', 'is_active',
+            ]));
+
+            return redirect()->route('semantic-search.terms')->with('notice', 'Term added');
+        }
+
+        // #1355 - the Domain / Relationship controlled vocabularies live in
+        // ahg_dropdown so site admins manage them via the Dropdown Manager;
+        // fall back to the shipped lists until the taxonomies are seeded.
+        $domains = $this->dropdownOptions('semantic_term_domain', [
+            'general'       => 'General',
+            'archival'      => 'Archival',
+            'museum'        => 'Museum',
+            'library'       => 'Library',
+            'south_african' => 'South African',
+        ]);
+        $relationships = $this->dropdownOptions('semantic_term_relationship', [
+            'exact'    => 'Exact (synonym)',
+            'related'  => 'Related',
+            'broader'  => 'Broader',
+            'narrower' => 'Narrower',
+        ]);
+
+        return view('ahg-semantic-search::term-add', compact('domains', 'relationships'));
+    }
+
+    /**
+     * Generic ahg_dropdown reader [code => label] with a hardcoded fallback,
+     * so site admins manage these vocabularies via the Dropdown Manager
+     * (#1355). Falls back when the table/taxonomy is missing or empty.
+     */
+    private function dropdownOptions(string $taxonomy, array $fallback): array
+    {
+        if (isset($this->dropdownCache[$taxonomy])) {
+            return $this->dropdownCache[$taxonomy];
+        }
+
+        try {
+            if (!\Illuminate\Support\Facades\Schema::hasTable('ahg_dropdown')) {
+                return $fallback;
+            }
+            $rows = \Illuminate\Support\Facades\DB::table('ahg_dropdown')
+                ->where('taxonomy', $taxonomy)
+                ->where('is_active', 1)
+                ->orderBy('sort_order')
+                ->get(['code', 'label']);
+
+            if ($rows->isEmpty()) {
+                return $fallback;
+            }
+
+            $out = [];
+            foreach ($rows as $r) {
+                $out[(string) $r->code] = (string) $r->label;
+            }
+
+            return $this->dropdownCache[$taxonomy] = $out;
+        } catch (\Throwable $e) {
+            return $fallback;
+        }
+    }
+
+    public function termView(int $id)
+    {
+        $term = $this->service->getTerm($id);
+        abort_unless($term, 404, 'Term not found');
+
+        return view('ahg-semantic-search::term-view', compact('term'));
+    }
+
+    // Search Logs
+    public function searchLogs(Request $request)
+    {
+        $logs = $this->service->getSearchLogs([
+            'start_date' => $request->get('start'),
+            'end_date' => $request->get('end'),
+        ]);
+
+        return view('ahg-semantic-search::search-logs', compact('logs'));
+    }
+
+    // Sync Logs
+    public function syncLogs()
+    {
+        $logs = $this->service->getSyncLogs();
+
+        return view('ahg-semantic-search::sync-logs', compact('logs'));
+    }
+
+    // Search Templates
+    public function adminTemplates()
+    {
+        $templates = $this->service->getTemplates();
+
+        return view('ahg-semantic-search::admin-templates', compact('templates'));
+    }
+
+    public function adminTemplateEdit(Request $request, ?int $id = null)
+    {
+        $template = $id ? $this->service->getTemplate($id) : null;
+        $isNew = ! $template;
+
+        if ($request->isMethod('post')) {
+            $data = $request->only(['name', 'slug', 'description', 'template_type', 'config', 'is_active']);
+
+            if ($id) {
+                $this->service->updateTemplate($id, $data);
+            } else {
+                $id = $this->service->createTemplate($data);
+            }
+
+            return redirect()->route('semantic-search.admin.templates')->with('notice', 'Template saved');
+        }
+
+        return view('ahg-semantic-search::admin-template-edit', compact('template', 'isNew'));
+    }
+
+    // Saved Searches
+    public function savedSearches()
+    {
+        $searches = $this->service->getSavedSearches(auth()->id());
+
+        return view('ahg-semantic-search::saved-searches', compact('searches'));
+    }
+
+    // History
+    public function history()
+    {
+        $history = $this->service->getSearchHistory(auth()->id());
+
+        return view('ahg-semantic-search::history', compact('history'));
+    }
+
+    /**
+     * Handle POST actions for semantic search.
+     */
+    public function post(Request $request)
+    {
+        $action = $request->get('action');
+
+        if ($action === 'delete_term') {
+            $id = (int) $request->get('id');
+            $this->service->deleteTerm($id);
+
+            return redirect()->route('semantic-search.terms')->with('notice', 'Term deleted.');
+        }
+
+        if ($action === 'sync') {
+            $this->service->syncTerms();
+
+            return redirect()->route('semantic-search.index')->with('notice', 'Terms synced.');
+        }
+
+        if ($action === 'clear_history') {
+            $this->service->clearSearchHistory(auth()->id());
+
+            return redirect()->route('semantic-search.history')->with('notice', 'Search history cleared.');
+        }
+
+        return redirect()->back()->with('error', 'Invalid action.');
+    }
+
+    /**
+     * AJAX: Run synonym/term sync.
+     */
+    public function runSync()
+    {
+        $result = $this->service->syncTerms();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Sync completed.',
+            'result' => $result,
+        ]);
+    }
+
+    /**
+     * AJAX: Test term expansion for a given query.
+     */
+    public function testExpand(Request $request)
+    {
+        $query = (string) $request->input('query', '');
+
+        try {
+            $expanded = $this->service->expandQuery($query);
+            $expansions = $expanded['expanded_terms'] ?? $expanded;
+
+            return response()->json([
+                'success' => true,
+                'original' => $query,
+                'expansions' => $expansions,
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'expansions' => [],
+            ]);
+        }
+    }
+}

@@ -1,0 +1,21 @@
+{
+    "name": "ahg/translation",
+    "description": "UI-string translation + locale registry for Heratio (DbAwareLoader override layer)",
+    "type": "library",
+    "license": "AGPL-3.0-or-later",
+    "require": {
+        "ahg/core": "@dev"
+    },
+    "autoload": {
+        "psr-4": {
+            "AhgTranslation\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "AhgTranslation\\Providers\\AhgTranslationServiceProvider"
+            ]
+        }
+    }
+}

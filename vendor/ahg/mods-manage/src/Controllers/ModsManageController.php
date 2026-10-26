@@ -1,0 +1,589 @@
+<?php
+
+/**
+ * ModsManageController - Controller for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace AhgModsManage\Controllers;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use AhgCore\Support\Concerns\PersistsObjectProperties;
+use AhgCore\Support\Concerns\LoadsObjectProperties;
+
+class ModsManageController extends Controller
+{
+    use LoadsObjectProperties;
+
+    use PersistsObjectProperties;
+
+    /**
+     * MODS field names from AtoM sfModsPlugin.
+     * Source standard: "MODS version 3.3"
+     *
+     * MODS fields: accessConditions, identifier, language, subjectAccessPoints,
+     * placeAccessPoints, nameAccessPoints, title, type (MODS resource type taxonomy 63),
+     * repository, scopeAndContent.
+     */
+    public function edit(Request $request, string $slug)
+    {
+        $culture = app()->getLocale();
+
+        // ── Load the information object ──
+        $io = DB::table('information_object')
+            ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+            ->join('object', 'information_object.id', '=', 'object.id')
+            ->join('slug', 'information_object.id', '=', 'slug.object_id')
+            ->where('slug.slug', $slug)
+            ->where('information_object_i18n.culture', $culture)
+            ->select([
+                'information_object.id',
+                'information_object.identifier',
+                'information_object.level_of_description_id',
+                'information_object.collection_type_id',
+                'information_object.repository_id',
+                'information_object.parent_id',
+                'information_object.description_status_id',
+                'information_object.description_detail_id',
+                'information_object.description_identifier',
+                'information_object.source_standard',
+                'information_object.display_standard_id',
+                'information_object.source_culture',
+                'information_object_i18n.title',
+                'information_object_i18n.alternate_title',
+                'information_object_i18n.edition',
+                'information_object_i18n.extent_and_medium',
+                'information_object_i18n.archival_history',
+                'information_object_i18n.acquisition',
+                'information_object_i18n.scope_and_content',
+                'information_object_i18n.appraisal',
+                'information_object_i18n.accruals',
+                'information_object_i18n.arrangement',
+                'information_object_i18n.access_conditions',
+                'information_object_i18n.reproduction_conditions',
+                'information_object_i18n.physical_characteristics',
+                'information_object_i18n.finding_aids',
+                'information_object_i18n.location_of_originals',
+                'information_object_i18n.location_of_copies',
+                'information_object_i18n.related_units_of_description',
+                'information_object_i18n.institution_responsible_identifier',
+                'information_object_i18n.rules',
+                'information_object_i18n.sources',
+                'information_object_i18n.revision_history',
+                'object.created_at',
+                'object.updated_at',
+                'slug.slug',
+            ])
+            ->first();
+
+        if (! $io) {
+            abort(404);
+        }
+
+        // ── POST: validate and save ──
+        if ($request->isMethod('post')) {
+            $request->validate(['title' => 'required|string|max:65535']);
+            \AhgCustomFields\Services\CustomFieldService::validateRequest($request);
+            $this->persist($io->id, $request);
+            \AhgCustomFields\Services\CustomFieldService::saveFromRequest((int) $io->id, $request); // heratio#1530
+
+            return redirect()->route('ahgmodsmanage.edit', ['slug' => $slug])
+                ->with('success', 'Description saved (MODS).');
+        }
+
+        // ── GET: load related data for the form ──
+        $dropdowns = $this->getFormDropdowns($culture);
+
+        // Events (dates) - left-join event_i18n so events without an i18n
+        // row (e.g. creation events created from the IO edit form) still
+        // appear in the form.
+        $events = DB::table('event')
+            ->leftJoin('event_i18n', function ($j) use ($culture) {
+                $j->on('event.id', '=', 'event_i18n.id')
+                    ->where('event_i18n.culture', $culture);
+            })
+            ->where('event.object_id', $io->id)
+            ->whereIn('event.type_id', [111, 114])
+            ->select('event.id', 'event.type_id', 'event.actor_id', 'event.start_date', 'event.end_date', 'event_i18n.date as date_display', 'event_i18n.name as event_name')
+            ->get();
+        foreach ($events as $evt) {
+            $evt->actor_name = null;
+            if ($evt->actor_id) {
+                $evt->actor_name = DB::table('actor_i18n')->where('id', $evt->actor_id)->where('culture', $culture)->value('authorized_form_of_name');
+            }
+        }
+        // #662 Phase 2: pre-split events for the originInfo form block
+        $creationEvents = $events->where('type_id', 111)->values();
+        $publicationEvents = $events->where('type_id', 114)->values();
+
+        // First publication event drives the publisher + placeOfPublication
+        // inputs. UI is single-value (one publisher, one place) in Phase 2.
+        $publisherActorId = null;
+        $publisherActorName = '';
+        $publisherFreeText = '';
+        if ($publicationEvents->isNotEmpty()) {
+            $pubEvt = $publicationEvents->first();
+            if ($pubEvt->actor_id) {
+                $publisherActorId = (int) $pubEvt->actor_id;
+                $publisherActorName = (string) ($pubEvt->actor_name ?? '');
+            }
+        }
+        // Free-text publisher (only used when no actor is bound)
+        $publisherFreeTextRaw = $this->loadSerializedProperty($io->id, 'mods:publisher', $culture);
+        if ($publisherFreeTextRaw->isNotEmpty()) {
+            $publisherFreeText = (string) $publisherFreeTextRaw->first();
+        }
+
+        // placeOfPublication: relation rows of type 162 between IO and a
+        // taxonomy-42 (place) term. Phase 2 surfaces a single value.
+        $placeOfPublicationId = null;
+        $placeOfPublicationName = '';
+        $popRow = DB::table('relation')
+            ->join('term_i18n', 'relation.object_id', '=', 'term_i18n.id')
+            ->where('relation.subject_id', $io->id)
+            ->where('relation.type_id', 162)
+            ->where('term_i18n.culture', $culture)
+            ->select('relation.object_id as term_id', 'term_i18n.name')
+            ->first();
+        if ($popRow) {
+            $placeOfPublicationId = (int) $popRow->term_id;
+            $placeOfPublicationName = (string) $popRow->name;
+        }
+
+        // mods:note (general note)
+        $modsNoteValues = $this->loadSerializedProperty($io->id, 'mods:note', $culture);
+        $modsNote = $modsNoteValues->isNotEmpty() ? (string) $modsNoteValues->first() : '';
+
+        // Subject access points (taxonomy 35)
+        $subjects = DB::table('object_term_relation')
+            ->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->where('object_term_relation.object_id', $io->id)
+            ->where('term.taxonomy_id', 35)
+            ->where('term_i18n.culture', $culture)
+            ->select('term.id as term_id', 'term_i18n.name')
+            ->get();
+
+        // Place access points (taxonomy 42)
+        $places = DB::table('object_term_relation')
+            ->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->where('object_term_relation.object_id', $io->id)
+            ->where('term.taxonomy_id', 42)
+            ->where('term_i18n.culture', $culture)
+            ->select('term.id as term_id', 'term_i18n.name')
+            ->get();
+
+        // Name access points (relation type 161)
+        $nameAccessPoints = DB::table('relation')
+            ->join('actor_i18n', 'relation.object_id', '=', 'actor_i18n.id')
+            ->where('relation.subject_id', $io->id)
+            ->where('relation.type_id', 161)
+            ->where('actor_i18n.culture', $culture)
+            ->select('relation.object_id as actor_id', 'actor_i18n.authorized_form_of_name as name')
+            ->get();
+
+        // MODS Resource Type terms (taxonomy 63)
+        $modsTypes = DB::table('object_term_relation')
+            ->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+            ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+            ->where('object_term_relation.object_id', $io->id)
+            ->where('term.taxonomy_id', 63)
+            ->where('term_i18n.culture', $culture)
+            ->select('term.id as term_id', 'term_i18n.name')
+            ->get();
+
+        // Publication status
+        $publicationStatusId = null;
+        $statusRow = DB::table('status')->where('object_id', $io->id)->where('type_id', 158)->first();
+        if ($statusRow && $statusRow->status_id) {
+            $publicationStatusId = (int) $statusRow->status_id;
+        }
+
+        // Languages of material
+        $materialLanguages = $this->loadSerializedProperty($io->id, 'language', $culture);
+
+        // Parent info
+        $parentTitle = null;
+        $parentSlug = null;
+        if ($io->parent_id && $io->parent_id != 1) {
+            $parent = DB::table('information_object')
+                ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+                ->join('slug', 'information_object.id', '=', 'slug.object_id')
+                ->where('information_object.id', $io->parent_id)
+                ->where('information_object_i18n.culture', $culture)
+                ->select('information_object_i18n.title', 'slug.slug')
+                ->first();
+            if ($parent) {
+                $parentTitle = $parent->title;
+                $parentSlug = $parent->slug;
+            }
+        }
+
+        return view('mods-manage::edit', array_merge(
+            [
+                'io' => $io,
+                'events' => $events,
+                'creationEvents' => $creationEvents,
+                'publicationEvents' => $publicationEvents,
+                'publisherActorId' => $publisherActorId,
+                'publisherActorName' => $publisherActorName,
+                'publisherFreeText' => $publisherFreeText,
+                'placeOfPublicationId' => $placeOfPublicationId,
+                'placeOfPublicationName' => $placeOfPublicationName,
+                'modsNote' => $modsNote,
+                'subjects' => $subjects,
+                'places' => $places,
+                'nameAccessPoints' => $nameAccessPoints,
+                'modsTypes' => $modsTypes,
+                'publicationStatusId' => $publicationStatusId,
+                'materialLanguages' => $materialLanguages,
+                'parentTitle' => $parentTitle,
+                'parentSlug' => $parentSlug,
+            ],
+            $dropdowns
+        ));
+    }
+
+    /**
+     * Persist creation + publication events from the originInfo block.
+     *
+     * Form payload (Phase 2):
+     *   - creation_date         (free-text display string)
+     *   - creation_start_date   (ISO 8601, optional)
+     *   - publication_date      (free-text display string)
+     *   - publication_start_date(ISO 8601, optional)
+     *   - publisher_id          (actor ID; takes precedence over publisher_name)
+     *   - publisher_name        (free-text publisher; stored as mods:publisher property)
+     *   - place_of_publication_id (term ID, taxonomy 42)
+     *
+     * Strategy: delete-then-insert for the two managed event types so the
+     * form acts as the source of truth. Other event types are left alone.
+     */
+    private function saveOriginInfo(int $ioId, Request $request, string $culture): void
+    {
+        $managed = [111, 114];
+
+        // Capture existing managed event IDs so we can clean up their i18n
+        // + object rows after deletion (event has FK back to object).
+        $existingIds = DB::table('event')
+            ->where('object_id', $ioId)
+            ->whereIn('type_id', $managed)
+            ->pluck('id')
+            ->all();
+        if (! empty($existingIds)) {
+            DB::table('event_i18n')->whereIn('id', $existingIds)->delete();
+            DB::table('event')->whereIn('id', $existingIds)->delete();
+            DB::table('object')->whereIn('id', $existingIds)->delete();
+        }
+
+        $creationDateDisplay = trim((string) $request->input('creation_date', ''));
+        $creationIso = trim((string) $request->input('creation_start_date', '')) ?: null;
+        $publicationDateDisplay = trim((string) $request->input('publication_date', ''));
+        $publicationIso = trim((string) $request->input('publication_start_date', '')) ?: null;
+        $publisherActorId = (int) $request->input('publisher_id', 0) ?: null;
+        $publisherFreeText = trim((string) $request->input('publisher_name', ''));
+        $placeOfPubId = (int) $request->input('place_of_publication_id', 0) ?: null;
+
+        // Creation event (type 111)
+        if ($creationDateDisplay !== '' || $creationIso !== null) {
+            $eventObjectId = DB::table('object')->insertGetId([
+                'class_name' => 'QubitEvent',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            DB::table('event')->insert([
+                'id' => $eventObjectId,
+                'object_id' => $ioId,
+                'type_id' => 111,
+                'start_date' => $creationIso,
+                'source_culture' => $culture,
+            ]);
+            DB::table('event_i18n')->insert([
+                'id' => $eventObjectId,
+                'culture' => $culture,
+                'date' => $creationDateDisplay !== '' ? $creationDateDisplay : $creationIso,
+            ]);
+        }
+
+        // Publication event (type 114) - also carries the publisher actor
+        $publicationEventId = null;
+        if ($publicationDateDisplay !== '' || $publicationIso !== null || $publisherActorId !== null) {
+            $publicationEventId = DB::table('object')->insertGetId([
+                'class_name' => 'QubitEvent',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            DB::table('event')->insert([
+                'id' => $publicationEventId,
+                'object_id' => $ioId,
+                'type_id' => 114,
+                'actor_id' => $publisherActorId,
+                'start_date' => $publicationIso,
+                'source_culture' => $culture,
+            ]);
+            DB::table('event_i18n')->insert([
+                'id' => $publicationEventId,
+                'culture' => $culture,
+                'date' => $publicationDateDisplay !== '' ? $publicationDateDisplay : $publicationIso,
+            ]);
+        }
+
+        // Free-text publisher persists as a serialised property when no
+        // actor is selected. Clears when both inputs are blank.
+        $this->saveSerializedProperty(
+            $ioId,
+            'mods:publisher',
+            ($publisherActorId === null && $publisherFreeText !== '') ? [$publisherFreeText] : [],
+            $culture
+        );
+
+        // placeOfPublication: relation type 162 (IO subject -> place term object)
+        DB::table('relation')->where('subject_id', $ioId)->where('type_id', 162)->delete();
+        if ($placeOfPubId !== null) {
+            $relObjectId = DB::table('object')->insertGetId([
+                'class_name' => 'QubitRelation',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            DB::table('relation')->insert([
+                'id' => $relObjectId,
+                'subject_id' => $ioId,
+                'object_id' => $placeOfPubId,
+                'type_id' => 162,
+                'source_culture' => $culture,
+            ]);
+        }
+    }
+
+    // ── Helper: form dropdown queries ──
+
+    /** Persist a MODS description onto an existing IO (#1425 dynamic form). */
+    public function persist(int $ioId, Request $request): void
+    {
+        $fingerprintBefore = \AhgInformationObjectManage\Services\InformationObjectService::contentFingerprint((int) $ioId); // #1536
+        // #676: snapshot BEFORE the writes so the audit log can show a
+        // before/after for a MODS edit. Reuses the information-object
+        // service's own snapshot, so every standard diffs the same field set
+        // rather than each carrying its own idea of what counts as a change.
+        $auditBefore = class_exists(\AhgInformationObjectManage\Services\InformationObjectService::class)
+            ? \AhgInformationObjectManage\Services\InformationObjectService::auditSnapshot($ioId, app()->getLocale())
+            : [];
+
+        $culture = app()->getLocale();
+
+
+            // Update information_object table
+            DB::table('information_object')
+                ->where('id', $ioId)
+                ->update([
+                    'identifier' => $request->input('identifier'),
+                    'repository_id' => $request->input('repository_id') ?: null,
+                    'source_standard' => 'MODS version 3.3',
+                ]);
+
+            if ($request->has('display_standard_id')) {
+                DB::table('information_object')
+                    ->where('id', $ioId)
+                    ->update(['display_standard_id' => $request->input('display_standard_id') ?: null]);
+            
+        if ($auditBefore !== []) {
+            \AhgCore\Support\AuditLog::captureEdit(
+                $ioId,
+                'information_object',
+                $auditBefore,
+                \AhgInformationObjectManage\Services\InformationObjectService::auditSnapshot($ioId, app()->getLocale())
+            );
+        }
+}
+
+            // Update information_object_i18n table
+            DB::table('information_object_i18n')
+                ->where('id', $ioId)
+                ->where('culture', $culture)
+                ->update([
+                    'title' => $request->input('title'),
+                    'scope_and_content' => $request->input('scope_and_content'),
+                    'access_conditions' => $request->input('access_conditions'),
+                ]);
+
+            // Languages of material
+            $this->saveSerializedProperty($ioId, 'language', $request->input('materialLanguages', []), $culture);
+
+            // MODS Resource Type (taxonomy 63)
+            if ($request->has('modsTypeIds')) {
+                DB::table('object_term_relation')
+                    ->where('object_id', $ioId)
+                    ->whereIn('term_id', function ($q) {
+                        $q->select('id')->from('term')->where('taxonomy_id', 63);
+                    })
+                    ->delete();
+                foreach (array_filter((array) $request->input('modsTypeIds', [])) as $termId) {
+                    DB::table('object_term_relation')->insert(['object_id' => $ioId, 'term_id' => (int) $termId]);
+                }
+            }
+
+            // Subject access points (taxonomy 35)
+            if ($request->has('subjectAccessPointIds')) {
+                DB::table('object_term_relation')
+                    ->where('object_id', $ioId)
+                    ->whereIn('term_id', function ($q) {
+                        $q->select('id')->from('term')->where('taxonomy_id', 35);
+                    })
+                    ->delete();
+                foreach (array_filter((array) $request->input('subjectAccessPointIds', [])) as $termId) {
+                    DB::table('object_term_relation')->insert(['object_id' => $ioId, 'term_id' => (int) $termId]);
+                }
+            }
+
+            // Place access points (taxonomy 42)
+            if ($request->has('placeAccessPointIds')) {
+                DB::table('object_term_relation')
+                    ->where('object_id', $ioId)
+                    ->whereIn('term_id', function ($q) {
+                        $q->select('id')->from('term')->where('taxonomy_id', 42);
+                    })
+                    ->delete();
+                foreach (array_filter((array) $request->input('placeAccessPointIds', [])) as $termId) {
+                    DB::table('object_term_relation')->insert(['object_id' => $ioId, 'term_id' => (int) $termId]);
+                }
+            }
+
+            // Name access points (relation type 161)
+            if ($request->has('nameAccessPointIds')) {
+                DB::table('relation')->where('subject_id', $ioId)->where('type_id', 161)->delete();
+                foreach (array_filter((array) $request->input('nameAccessPointIds', [])) as $actorId) {
+                    $relObjectId = DB::table('object')->insertGetId([
+                        'class_name' => 'QubitRelation',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                    DB::table('relation')->insert([
+                        'id' => $relObjectId,
+                        'subject_id' => $ioId,
+                        'object_id' => (int) $actorId,
+                        'type_id' => 161,
+                        'source_culture' => $culture,
+                    ]);
+                }
+            }
+
+            // Publication status
+            if ($request->has('publication_status_id')) {
+                \AhgCore\Support\StatusRow::put($ioId, 158, (int) ($request->input('publication_status_id')), ['source_culture' => $culture]);
+            }
+
+            // #662 Phase 2: originInfo - creation + publication events,
+            // publisher (actor or free-text via property), placeOfPublication.
+            $this->saveOriginInfo((int) $ioId, $request, $culture);
+
+            // #662 Phase 2: mods:note (general note)
+            if ($request->has('mods_note')) {
+                $note = trim((string) $request->input('mods_note', ''));
+                $this->saveSerializedProperty((int) $ioId, 'mods:note', $note === '' ? [] : [$note], $culture);
+            }
+
+            // Update object.updated_at
+            \AhgInformationObjectManage\Services\InformationObjectService::touchIfChanged((int) $ioId, $fingerprintBefore); // #1536: only on a real change
+
+    }
+
+    /** Render the MODS field partial for the dynamic-standard swap (#1425). */
+    public function fieldsPartial(Request $request, ?string $slug = null)
+    {
+        $culture = app()->getLocale();
+        $dropdowns = $this->getFormDropdowns($culture);
+        $data = ['io' => null, 'subjects' => collect(), 'places' => collect(), 'nameAccessPoints' => collect(),
+                 'modsTypes' => collect(), 'events' => collect(), 'creationEvents' => collect(),
+                 'publicationEvents' => collect(), 'materialLanguages' => collect(), 'publicationStatusId' => null,
+                 'publisherActorId' => null, 'publisherActorName' => null, 'publisherFreeText' => null,
+                 'placeOfPublicationId' => null, 'placeOfPublicationName' => null, 'modsNote' => ''];
+        if ($slug) {
+            $io = DB::table('information_object')
+                ->join('information_object_i18n', 'information_object.id', '=', 'information_object_i18n.id')
+                ->join('slug', 'information_object.id', '=', 'slug.object_id')
+                ->where('slug.slug', $slug)->where('information_object_i18n.culture', $culture)
+                ->select('information_object.*', 'information_object_i18n.*', 'slug.slug')->first();
+            if ($io) {
+                $data['io'] = $io;
+                foreach ([['subjects', 35], ['places', 42], ['modsTypes', 78]] as [$key, $tax]) {
+                    $data[$key] = DB::table('object_term_relation')
+                        ->join('term_i18n', 'object_term_relation.term_id', '=', 'term_i18n.id')
+                        ->join('term', 'object_term_relation.term_id', '=', 'term.id')
+                        ->where('object_term_relation.object_id', $io->id)->where('term.taxonomy_id', $tax)
+                        ->where('term_i18n.culture', $culture)->select('term.id as term_id', 'term_i18n.name')->get();
+                }
+                $data['nameAccessPoints'] = DB::table('relation')
+                    ->join('actor_i18n', 'relation.object_id', '=', 'actor_i18n.id')
+                    ->where('relation.subject_id', $io->id)->where('relation.type_id', 161)
+                    ->where('actor_i18n.culture', $culture)->select('actor_i18n.authorized_form_of_name as name')->get();
+                $st = DB::table('status')->where('object_id', $io->id)->where('type_id', 158)->value('status_id');
+                $data['publicationStatusId'] = $st ? (int) $st : null;
+                $data['materialLanguages'] = $this->loadSerializedProperty($io->id, 'language', $culture);
+            }
+        }
+
+        return view('mods-manage::_fields', array_merge($data, $dropdowns));
+    }
+
+    private function getFormDropdowns(string $culture): array
+    {
+        $repositories = DB::table('repository')
+            ->join('actor_i18n', 'repository.id', '=', 'actor_i18n.id')
+            ->where('actor_i18n.culture', $culture)
+            ->orderBy('actor_i18n.authorized_form_of_name')
+            ->select('repository.id', 'actor_i18n.authorized_form_of_name as name')
+            ->get();
+
+        $displayStandards = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', 52)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('term_i18n.name')
+            ->select('term.id', 'term_i18n.name')
+            ->get();
+
+        $eventTypes = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', 40)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('term_i18n.name')
+            ->select('term.id', 'term_i18n.name')
+            ->get();
+
+        // MODS Resource Type options (taxonomy 63)
+        $modsTypeOptions = DB::table('term')
+            ->join('term_i18n', 'term.id', '=', 'term_i18n.id')
+            ->where('term.taxonomy_id', 63)
+            ->where('term_i18n.culture', $culture)
+            ->orderBy('term_i18n.name')
+            ->select('term.id', 'term_i18n.name')
+            ->get();
+
+        return compact('repositories', 'displayStandards', 'eventTypes', 'modsTypeOptions');
+    }
+
+    // ── Helper: serialized property load/save ──
+
+
+}

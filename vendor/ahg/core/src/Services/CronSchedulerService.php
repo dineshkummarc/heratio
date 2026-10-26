@@ -1,0 +1,803 @@
+<?php
+
+/**
+ * CronSchedulerService - Service for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+namespace AhgCore\Services;
+
+use Carbon\Carbon;
+use Cron\CronExpression;
+use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
+
+class CronSchedulerService
+{
+    protected string $table = 'cron_schedule';
+
+    public function __construct(protected ?CronRunTrackerService $tracker = null)
+    {
+        $this->tracker = $tracker ?? new CronRunTrackerService;
+    }
+
+    /**
+     * Get all schedules that are due to run now.
+     */
+    public function getDueSchedules(): Collection
+    {
+        return DB::table($this->table)
+            ->where('is_enabled', 1)
+            ->where(function ($q) {
+                $q->whereNull('next_run_at')
+                    ->orWhere('next_run_at', '<=', Carbon::now());
+            })
+            ->where(function ($q) {
+                $q->whereNull('last_run_status')
+                    ->orWhere('last_run_status', '!=', 'running')
+                    // Reclaim a stale lock. 'running' is set before the command
+                    // starts and only cleared when it finishes, so a run that dies
+                    // without writing a terminal status - a crash, an OOM kill, a
+                    // deploy restart mid-run, a timeout - leaves the row marked
+                    // running FOREVER and this query never returns it again. The
+                    // schedule is then silently disabled for good: no error, no
+                    // failure count, just a job that stops happening. On the demo
+                    // that hid qdrant-image-index being dead for 14 days and
+                    // search-update for 12 hours. A row still running past its own
+                    // timeout cannot be a live run, so treat it as abandoned.
+                    ->orWhere(function ($stale) {
+                        $stale->where('last_run_status', 'running')
+                            ->whereNotNull('last_run_at')
+                            ->whereRaw('DATE_ADD(last_run_at, INTERVAL GREATEST(COALESCE(timeout_minutes, 60), 1) MINUTE) < ?', [Carbon::now()]);
+                    });
+            })
+            ->orderBy('sort_order')
+            ->get();
+    }
+
+    /**
+     * Mark schedules abandoned when they are still 'running' past their timeout.
+     *
+     * getDueSchedules() will pick these up regardless; this records WHY the gap
+     * happened rather than letting the next successful run paper over it, so the
+     * run history shows an abandoned run instead of an unexplained silence.
+     *
+     * @return int number of locks reclaimed
+     */
+    public function reclaimStaleLocks(): int
+    {
+        // Compare against the APP clock, not MySQL's. last_run_at is written by
+        // PHP in the app timezone (UTC here) while MySQL NOW() returns the server
+        // timezone (SAST) - two hours apart. Using NOW() made every row look two
+        // hours older than it was, so a 60-minute timeout would have reclaimed
+        // every genuinely running job on its first pass and killed live work.
+        $stale = DB::table($this->table)
+            ->where('last_run_status', 'running')
+            ->whereNotNull('last_run_at')
+            ->whereRaw('DATE_ADD(last_run_at, INTERVAL GREATEST(COALESCE(timeout_minutes, 60), 1) MINUTE) < ?', [Carbon::now()])
+            ->get(['id', 'slug', 'last_run_at', 'timeout_minutes']);
+
+        foreach ($stale as $row) {
+            Log::warning('cron: reclaiming a stale lock on '.$row->slug, [
+                'slug' => $row->slug,
+                'running_since' => $row->last_run_at,
+                'timeout_minutes' => $row->timeout_minutes,
+            ]);
+
+            DB::table($this->table)->where('id', $row->id)->update([
+                'last_run_status' => 'failed',
+                'last_run_output' => '[abandoned] still marked running since '.$row->last_run_at
+                    .', past its '.($row->timeout_minutes ?: 60).'-minute timeout. The process left no terminal status'
+                    .' - it was killed, crashed, or the host restarted mid-run. Lock reclaimed so the schedule resumes.',
+                'total_failures' => DB::raw('total_failures + 1'),
+                'updated_at' => Carbon::now(),
+            ]);
+        }
+
+        return $stale->count();
+    }
+
+    /**
+     * Run all due schedules and return results.
+     */
+    public function runDueSchedules(): array
+    {
+        // Gate: check if background jobs are enabled
+        if (! $this->isJobsEnabled()) {
+            return [['status' => 'skipped', 'reason' => 'jobs_enabled is false']];
+        }
+
+        $results = [];
+
+        // Record any abandoned runs before selecting what is due, so the history
+        // shows an abandoned run rather than an unexplained gap. getDueSchedules()
+        // would return them either way; this is what makes the cause visible.
+        $reclaimed = $this->reclaimStaleLocks();
+        if ($reclaimed > 0) {
+            $results[] = ['status' => 'reclaimed', 'count' => $reclaimed];
+        }
+
+        $due = $this->getDueSchedules();
+        $maxConcurrent = $this->getJobsSetting('jobs_max_concurrent', 2);
+        $running = 0;
+
+        foreach ($due as $schedule) {
+            if ($running >= $maxConcurrent) {
+                $results[] = ['id' => $schedule->id, 'slug' => $schedule->slug, 'status' => 'deferred', 'reason' => 'max_concurrent reached'];
+
+                continue;
+            }
+            $results[] = $this->runSingle($schedule);
+            $running++;
+        }
+
+        return $results;
+    }
+
+    /**
+     * Run a single schedule entry.
+     */
+    public function runSingle(object $schedule): array
+    {
+        // Mark as running
+        DB::table($this->table)->where('id', $schedule->id)->update([
+            'last_run_status' => 'running',
+            'last_run_at' => Carbon::now(),
+            'updated_at' => Carbon::now(),
+        ]);
+
+        // #673 Phase 2: open a tracking row in ahg_cron_run so missed-run
+        // detection + Prometheus counters see DB-driven invocations too,
+        // not just Laravel Schedule-facade ones.
+        $runId = $this->tracker?->markStarted($schedule->artisan_command);
+
+        $start = microtime(true);
+        $status = 'success';
+        $output = '';
+        $exitCode = 0;
+
+        // Pre-flight: confirm the artisan command is actually registered.
+        // Protects against orphan seeds whose backing commands were removed.
+        if (! $this->artisanCommandExists($schedule->artisan_command)) {
+            $status = 'failed';
+            $exitCode = 1;
+            $output = "Command not registered: '{$schedule->artisan_command}'. Remove this schedule or implement the command.";
+        } else {
+            try {
+                $exitCode = Artisan::call($schedule->artisan_command);
+                $output = Artisan::output();
+
+                if ($exitCode !== 0) {
+                    $status = 'failed';
+                }
+            } catch (\Throwable $e) {
+                $status = 'failed';
+                $exitCode = 1;
+                $output = $e->getMessage();
+            }
+        }
+
+        $durationMs = (int) ((microtime(true) - $start) * 1000);
+        $nextRun = $this->computeNextRun($schedule->cron_expression);
+
+        // Close the tracking row + emit Prometheus metric.
+        $this->tracker?->markFinished($runId, $exitCode, $output);
+
+        // Truncate output to the last 5000 CHARACTERS for storage.
+        //
+        // strlen()/substr() count bytes. Cutting at byte -5000 lands inside a
+        // multi-byte character often enough to matter, and the result opens with
+        // a dangling continuation byte - invalid UTF-8, which MySQL rejects with
+        // error 1366 on last_run_output. Progress bars make it near-certain
+        // rather than rare: they emit long runs of identical 3-byte characters
+        // (U+2593 DARK SHADE), so roughly two cuts in three fall mid-character.
+        $output = $this->tidyCommandOutput($output);
+        if (mb_strlen($output, 'UTF-8') > 5000) {
+            $output = '... (truncated) ...'.mb_substr($output, -5000, null, 'UTF-8');
+        }
+
+        $updateData = [
+            'last_run_status' => $status,
+            'last_run_duration_ms' => $durationMs,
+            'last_run_output' => $output ?: null,
+            'next_run_at' => $nextRun,
+            'total_runs' => DB::raw('total_runs + 1'),
+            'updated_at' => Carbon::now(),
+        ];
+
+        if ($status === 'failed') {
+            $updateData['total_failures'] = DB::raw('total_failures + 1');
+
+            // Notify on failure if enabled in jobs settings
+            $this->notifyJobFailure($schedule, $output);
+        }
+
+        // Recording the outcome must never CHANGE the outcome. This update used to
+        // run bare: when it threw, the exception propagated out of the run and
+        // ahg:cron-run exited 1, so a command that had already completed
+        // successfully was reported as a failure. A write that only stores what
+        // happened cannot be allowed to rewrite what happened.
+        try {
+            DB::table($this->table)->where('id', $schedule->id)->update($updateData);
+        } catch (\Throwable $e) {
+            Log::warning('cron: could not record the outcome of '.$schedule->slug.' - the run itself is unaffected', [
+                'slug' => $schedule->slug,
+                'status' => $status,
+                'error' => $e->getMessage(),
+            ]);
+            // Retry without the output, which is the only field big or oddly
+            // encoded enough to be the cause, so the status is still recorded.
+            try {
+                $updateData['last_run_output'] = null;
+                DB::table($this->table)->where('id', $schedule->id)->update($updateData);
+            } catch (\Throwable $inner) {
+                Log::error('cron: outcome for '.$schedule->slug.' could not be recorded at all: '.$inner->getMessage());
+            }
+        }
+
+        return [
+            'id' => $schedule->id,
+            'slug' => $schedule->slug,
+            'status' => $status,
+            'duration_ms' => $durationMs,
+            'next_run' => $nextRun->toDateTimeString(),
+            // $schedule was read before this run marked it 'running', so
+            // last_run_status is still the previous run's outcome.
+            'confirmed' => $this->failureConfirmed($status, $schedule->last_run_status ?? null, $schedule->cron_expression),
+        ];
+    }
+
+    /**
+     * Whether this run's outcome should count against ahg:cron-run. Successes
+     * always do (trivially); a failure does unless it is the first failure of
+     * a frequent job, which waits for the next run to confirm it.
+     */
+    public function failureConfirmed(string $status, ?string $previousStatus, ?string $cronExpression): bool
+    {
+        return $status !== 'failed'
+            || $previousStatus === 'failed'
+            || ! $this->isFrequent($cronExpression);
+    }
+
+    /** A schedule runs often enough for a failure to wait one run for confirmation. */
+    public const CONFIRM_WITHIN_MINUTES = 15;
+
+    /**
+     * Whether a schedule runs at least every CONFIRM_WITHIN_MINUTES.
+     *
+     * A single failure of such a job - usually a health check catching a
+     * momentary gateway blip - is not reported as an ahg:cron-run failure
+     * until the next run fails too, which is minutes away. Infrequent jobs keep
+     * failing on the first failure: their next run can be a day later, and
+     * waiting for it would hide a real fault for that long. Unparseable
+     * expressions count as infrequent, so the strict path is the fallback.
+     */
+    public function isFrequent(?string $cronExpression): bool
+    {
+        try {
+            $cron = new CronExpression((string) $cronExpression);
+            $first = $cron->getNextRunDate();
+            $second = $cron->getNextRunDate($first);
+
+            return ($second->getTimestamp() - $first->getTimestamp()) <= self::CONFIRM_WITHIN_MINUTES * 60;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Collapse console progress output before it is stored.
+     *
+     * A progress bar rewrites one line with carriage returns; captured to a
+     * string it becomes thousands of characters of block glyphs that no operator
+     * will read, and it crowds the tail of the log - which is the part worth
+     * keeping - out of the 5000 we retain. Keep only the final state of each
+     * rewritten line.
+     */
+    protected function tidyCommandOutput(string $output): string
+    {
+        if ($output === '' || ! str_contains($output, "\r")) {
+            return $output;
+        }
+
+        $lines = [];
+        foreach (preg_split("/\n/", $output) as $line) {
+            $parts = explode("\r", $line);
+            $lines[] = rtrim(end($parts));
+        }
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Check whether the base command name in an artisan command string is registered.
+     * Extracts the first token (before any flag/arg) and matches against Artisan::all().
+     */
+    protected function artisanCommandExists(string $command): bool
+    {
+        $base = strtok(trim($command), " \t");
+        if ($base === false || $base === '') {
+            return false;
+        }
+        try {
+            return array_key_exists($base, Artisan::all());
+        } catch (\Throwable $e) {
+            // If the registry can't be read, fall through to the try/catch in runSingle.
+            return true;
+        }
+    }
+
+    /**
+     * Compute next run time from a cron expression.
+     */
+    public function computeNextRun(string $cronExpression): Carbon
+    {
+        $cron = new CronExpression($cronExpression);
+
+        return Carbon::instance($cron->getNextRunDate());
+    }
+
+    /**
+     * Toggle a schedule's enabled state.
+     */
+    public function toggleEnabled(int $id, bool $enabled): void
+    {
+        $data = ['is_enabled' => $enabled, 'updated_at' => Carbon::now()];
+
+        if ($enabled) {
+            $schedule = DB::table($this->table)->where('id', $id)->first();
+            if ($schedule) {
+                $data['next_run_at'] = $this->computeNextRun($schedule->cron_expression);
+            }
+        }
+
+        DB::table($this->table)->where('id', $id)->update($data);
+    }
+
+    /**
+     * Update a schedule's settings.
+     */
+    public function updateSchedule(int $id, array $data): void
+    {
+        $allowed = ['cron_expression', 'timeout_minutes', 'notify_on_failure', 'notify_email'];
+        $update = array_intersect_key($data, array_flip($allowed));
+        $update['updated_at'] = Carbon::now();
+
+        if (isset($update['cron_expression'])) {
+            $update['next_run_at'] = $this->computeNextRun($update['cron_expression']);
+        }
+
+        DB::table($this->table)->where('id', $id)->update($update);
+    }
+
+    /**
+     * Get a single schedule by ID.
+     */
+    public function find(int $id): ?object
+    {
+        return DB::table($this->table)->where('id', $id)->first();
+    }
+
+    /**
+     * Get all schedules grouped by category.
+     */
+    public function getAllGrouped(): Collection
+    {
+        return DB::table($this->table)
+            ->orderBy('category')
+            ->orderBy('sort_order')
+            ->orderBy('name')
+            ->get()
+            ->groupBy('category');
+    }
+
+    /**
+     * Get summary stats.
+     */
+    public function getStats(): object
+    {
+        $now = Carbon::now();
+        $dayAgo = $now->copy()->subDay();
+
+        return (object) [
+            'total' => DB::table($this->table)->count(),
+            'enabled' => DB::table($this->table)->where('is_enabled', 1)->count(),
+            'disabled' => DB::table($this->table)->where('is_enabled', 0)->count(),
+            'failed_24h' => DB::table($this->table)
+                ->where('last_run_status', 'failed')
+                ->where('last_run_at', '>=', $dayAgo)
+                ->count(),
+            'running' => DB::table($this->table)
+                ->where('last_run_status', 'running')
+                ->count(),
+        ];
+    }
+
+    /**
+     * Seed or update all default schedules.
+     */
+    public function seedDefaults(bool $reset = false): int
+    {
+        $defaults = $this->getDefaultSchedules();
+        $count = 0;
+
+        foreach ($defaults as $entry) {
+            if ($reset) {
+                DB::table($this->table)->updateOrInsert(
+                    ['slug' => $entry['slug']],
+                    array_merge($entry, [
+                        'next_run_at' => $this->computeNextRun($entry['cron_expression']),
+                        'updated_at' => Carbon::now(),
+                        'created_at' => Carbon::now(),
+                    ])
+                );
+            } else {
+                $exists = DB::table($this->table)->where('slug', $entry['slug'])->exists();
+                if (! $exists) {
+                    DB::table($this->table)->insert(array_merge($entry, [
+                        'next_run_at' => $this->computeNextRun($entry['cron_expression']),
+                        'created_at' => Carbon::now(),
+                        'updated_at' => Carbon::now(),
+                    ]));
+                }
+            }
+            $count++;
+        }
+
+        return $count;
+    }
+
+    /**
+     * All default schedule entries - the single source of truth for seeding.
+     */
+    public function getDefaultSchedules(): array
+    {
+        $sort = 0;
+        $schedules = [];
+
+        $categories = [
+            'Search & Indexing' => [
+                ['slug' => 'search-update', 'name' => 'Incremental Search Update', 'description' => 'Push recently modified records to the search index.', 'artisan_command' => 'ahg:search-update', 'cron_expression' => '*/5 * * * *', 'duration_hint' => 'short', 'log_file' => 'logs/search-update.log'],
+                ['slug' => 'search-populate', 'name' => 'Full Search Populate', 'description' => 'Rebuild the entire search index from scratch.', 'artisan_command' => 'ahg:search-populate', 'cron_expression' => '0 2 * * 0', 'duration_hint' => 'long', 'log_file' => 'logs/search-populate.log'],
+                ['slug' => 'search-cleanup', 'name' => 'Search Cleanup', 'description' => 'Remove stale search index entries and orphaned records.', 'artisan_command' => 'ahg:search-cleanup', 'cron_expression' => '0 3 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/search-cleanup.log'],
+            ],
+            'Cache Management' => [
+                ['slug' => 'refresh-facet-cache', 'name' => 'Refresh Facet Cache', 'description' => 'Rebuild facet counts for browse sidebars (entity type, repository, place, subject).', 'artisan_command' => 'ahg:refresh-facet-cache', 'cron_expression' => '0 * * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/facet-cache.log'],
+                ['slug' => 'cache-xml-purge', 'name' => 'XML Cache Purge', 'description' => 'Remove stale cached XML exports (EAD, EAC-CPF, DC) older than the configured threshold.', 'artisan_command' => 'ahg:cache-xml-purge', 'cron_expression' => '0 4 * * 0', 'duration_hint' => 'short', 'log_file' => 'logs/xml-purge.log'],
+            ],
+            'Saved Search Notifications' => [
+                ['slug' => 'notify-saved-searches-daily', 'name' => 'Daily Notifications', 'description' => 'Email users who have daily saved search notifications enabled.', 'artisan_command' => 'ahg:notify-saved-searches --frequency=daily', 'cron_expression' => '0 6 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/saved-search-notify.log'],
+                ['slug' => 'notify-saved-searches-weekly', 'name' => 'Weekly Notifications', 'description' => 'Email users who have weekly saved search notifications.', 'artisan_command' => 'ahg:notify-saved-searches --frequency=weekly', 'cron_expression' => '0 7 * * 1', 'duration_hint' => 'medium', 'log_file' => 'logs/saved-search-notify.log'],
+                ['slug' => 'notify-saved-searches-monthly', 'name' => 'Monthly Notifications', 'description' => 'Email users who have monthly saved search notifications.', 'artisan_command' => 'ahg:notify-saved-searches --frequency=monthly', 'cron_expression' => '0 8 1 * *', 'duration_hint' => 'medium', 'log_file' => 'logs/saved-search-notify.log'],
+            ],
+            'Digital Objects' => [
+                ['slug' => 'regen-derivatives', 'name' => 'Regenerate Derivatives', 'description' => 'Backfill missing thumbnail and reference image derivatives from master files (only masters lacking a derivative; add --force to re-encode all).', 'artisan_command' => 'ahg:regen-derivatives --type=all', 'cron_expression' => '0 4 * * 0', 'duration_hint' => 'long', 'log_file' => 'logs/regen-derivatives.log'],
+                ['slug' => '3d-derivatives', 'name' => '3D Derivatives', 'description' => 'Generate thumbnails for 3D model files (GLB, GLTF, OBJ, STL) using Blender.', 'artisan_command' => 'ahg:3d-derivatives', 'cron_expression' => '0 * * * *', 'duration_hint' => 'long', 'log_file' => 'logs/3d-derivatives.log'],
+                ['slug' => '3d-multiangle', 'name' => '3D Multi-Angle Renders', 'description' => 'Generate multi-angle renders of 3D models for preview galleries.', 'artisan_command' => 'ahg:3d-multiangle', 'cron_expression' => '0 3 * * *', 'duration_hint' => 'long', 'is_enabled' => false, 'log_file' => 'logs/3d-multiangle.log'],
+            ],
+            'Finding Aids' => [
+                ['slug' => 'finding-aid-generate', 'name' => 'Generate Finding Aids', 'description' => 'Generate PDF/HTML finding aids for all fonds-level descriptions.', 'artisan_command' => 'ahg:finding-aid-generate --all', 'cron_expression' => '0 1 * * *', 'duration_hint' => 'long', 'log_file' => 'logs/finding-aids.log'],
+                ['slug' => 'finding-aid-delete', 'name' => 'Delete Old Finding Aids', 'description' => 'Remove finding aid files older than the specified number of days.', 'artisan_command' => 'ahg:finding-aid-delete --older-than=90', 'cron_expression' => '0 3 1 * *', 'duration_hint' => 'short', 'log_file' => 'logs/finding-aids.log'],
+            ],
+            'Import & Export' => [
+                ['slug' => 'export-bulk-ead', 'name' => 'Bulk EAD Export', 'description' => 'Export all descriptions in EAD format for backup and interchange.', 'artisan_command' => 'ahg:export-bulk --format=ead --path=/backups/ead', 'cron_expression' => '0 2 * * 0', 'duration_hint' => 'long', 'log_file' => 'logs/export-bulk.log'],
+            ],
+            'OAI-PMH' => [
+                ['slug' => 'oai-harvest', 'name' => 'OAI Harvest', 'description' => 'Harvest records from configured OAI-PMH sources.', 'artisan_command' => 'ahg:oai-harvest', 'cron_expression' => '0 5 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/oai-harvest.log'],
+            ],
+            'Backup & Maintenance' => [
+                ['slug' => 'backup-daily', 'name' => 'Daily Backup', 'description' => 'Run database backup with 30-day retention.', 'artisan_command' => 'ahg:backup --database --gzip', 'cron_expression' => '0 2 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/backup.log'],
+                ['slug' => 'backup-weekly-full', 'name' => 'Weekly Full Backup', 'description' => 'Full backup including uploads with 90-day retention.', 'artisan_command' => 'ahg:backup --database --gzip', 'cron_expression' => '0 3 * * 0', 'duration_hint' => 'long', 'log_file' => 'logs/backup.log'],
+                ['slug' => 'backup-cleanup', 'name' => 'Cleanup Old Backups', 'description' => 'Remove backups that exceed retention policy.', 'artisan_command' => 'ahg:backup-cleanup', 'cron_expression' => '0 4 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/backup.log'],
+                ['slug' => 'cleanup-uploads', 'name' => 'Cleanup Uploads', 'description' => 'Remove orphaned and temporary upload files older than the specified days.', 'artisan_command' => 'ahg:cleanup-uploads --days=7', 'cron_expression' => '30 4 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/cleanup.log'],
+            ],
+            'Audit & Logging' => [
+                ['slug' => 'audit-purge', 'name' => 'Audit Log Purge', 'description' => 'Remove audit log entries older than the specified number of days.', 'artisan_command' => 'ahg:audit-purge --older-than=365', 'cron_expression' => '0 3 1 * *', 'duration_hint' => 'medium', 'log_file' => 'logs/audit.log'],
+                ['slug' => 'audit-retention', 'name' => 'Audit Retention', 'description' => 'Apply retention policies to audit records and archive as needed.', 'artisan_command' => 'ahg:audit-retention', 'cron_expression' => '0 4 * * 0', 'duration_hint' => 'medium', 'log_file' => 'logs/audit.log'],
+                ['slug' => 'cleanup-login-attempts', 'name' => 'Cleanup Login Attempts', 'description' => 'Remove expired login attempt records to free database space.', 'artisan_command' => 'ahg:cleanup-login-attempts', 'cron_expression' => '0 3 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/security.log'],
+            ],
+            'Digital Preservation' => [
+                ['slug' => 'preservation-scheduler', 'name' => 'Preservation Scheduler', 'description' => 'Execute due preservation actions from the scheduler queue.', 'artisan_command' => 'ahg:preservation-scheduler', 'cron_expression' => '*/5 * * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/preservation-scheduler.log'],
+                ['slug' => 'preservation-fixity', 'name' => 'Fixity Check', 'description' => 'Verify file checksums for digital objects not checked within the specified age in days.', 'artisan_command' => 'ahg:preservation-fixity --age=30 --report', 'cron_expression' => '0 2 * * *', 'duration_hint' => 'long', 'log_file' => 'logs/fixity.log'],
+                ['slug' => 'preservation-identify', 'name' => 'Format Identification', 'description' => 'Identify file formats for unidentified digital objects using DROID/Siegfried.', 'artisan_command' => 'ahg:preservation-identify', 'cron_expression' => '0 3 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/format-id.log'],
+                ['slug' => 'preservation-virus-scan', 'name' => 'Virus Scan', 'description' => 'Scan unscanned digital objects for viruses using ClamAV and quarantine threats.', 'artisan_command' => 'ahg:preservation-virus-scan --unscanned', 'cron_expression' => '0 4 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/virus-scan.log'],
+                ['slug' => 'preservation-replicate', 'name' => 'Replication', 'description' => 'Replicate digital objects to secondary storage with verification.', 'artisan_command' => 'ahg:preservation-replicate', 'cron_expression' => '0 1 * * *', 'duration_hint' => 'long', 'log_file' => 'logs/replication.log'],
+                ['slug' => 'preservation-package', 'name' => 'AIP Packaging', 'description' => 'Generate Archival Information Packages (AIPs) in BagIt format.', 'artisan_command' => 'ahg:preservation-package --type=aip --output=/preservation/aips', 'cron_expression' => '0 0 * * 0', 'duration_hint' => 'long', 'log_file' => 'logs/packages.log'],
+                ['slug' => 'preservation-obsolescence', 'name' => 'Obsolescence Check', 'description' => 'Check file formats against obsolescence risk registries.', 'artisan_command' => 'ahg:preservation-obsolescence', 'cron_expression' => '0 6 1 * *', 'duration_hint' => 'medium', 'log_file' => 'logs/obsolescence.log'],
+                ['slug' => 'preservation-stats', 'name' => 'Preservation Stats', 'description' => 'Generate daily preservation statistics in JSON format.', 'artisan_command' => 'ahg:preservation-stats --format=json', 'cron_expression' => '0 7 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/preservation-stats.log'],
+                // #1436: reap stale draft/failed BagIt packages that were never exported.
+                ['slug' => 'preservation-cleanup', 'name' => 'Preservation Package Cleanup', 'description' => 'Prune stale draft/failed preservation packages that were never exported (older than 24h, no export file), plus their linked object/event rows and half-written bag dirs.', 'artisan_command' => 'ahg:preservation-cleanup --hours=24', 'cron_expression' => '0 5 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/preservation-cleanup.log'],
+            ],
+            'Integrity Assurance' => [
+                ['slug' => 'integrity-schedule', 'name' => 'Integrity Scheduler', 'description' => 'Execute due integrity verification schedules (fixity checks).', 'artisan_command' => 'ahg:integrity-schedule --run-due', 'cron_expression' => '*/15 * * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/integrity-scheduler.log'],
+                ['slug' => 'integrity-verify', 'name' => 'Integrity Verify', 'description' => 'Verify integrity of up to 500 records that have not been checked in 14 days.', 'artisan_command' => 'ahg:integrity-verify --limit=500 --stale-days=14', 'cron_expression' => '0 3 * * *', 'duration_hint' => 'long', 'log_file' => 'logs/integrity-verify.log'],
+                ['slug' => 'integrity-report', 'name' => 'Integrity Report', 'description' => 'Generate weekly integrity verification summary report.', 'artisan_command' => 'ahg:integrity-report --summary', 'cron_expression' => '0 8 * * 1', 'duration_hint' => 'short', 'log_file' => 'logs/integrity-report.log'],
+                ['slug' => 'integrity-retention-scan', 'name' => 'Retention Scan', 'description' => 'Identify records eligible for disposal under retention policies.', 'artisan_command' => 'ahg:integrity-retention --scan-eligible', 'cron_expression' => '0 1 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/integrity-retention.log'],
+                ['slug' => 'integrity-retention-process', 'name' => 'Retention Process Queue', 'description' => 'Process the retention disposal queue for approved disposals.', 'artisan_command' => 'ahg:integrity-retention --process-queue', 'cron_expression' => '0 2 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/integrity-retention.log'],
+            ],
+            'Metadata Export (GLAM Standards)' => [
+                ['slug' => 'metadata-export', 'name' => 'Metadata Export', 'description' => 'Export metadata in all supported GLAM standards (DC, EAD, EAC-CPF, MODS, METS).', 'artisan_command' => 'ahg:metadata-export --format=all --output=/exports/weekly', 'cron_expression' => '0 3 * * 0', 'duration_hint' => 'long', 'log_file' => 'logs/metadata-export.log'],
+            ],
+            'DOI Management' => [
+                ['slug' => 'doi-process-queue', 'name' => 'DOI Process Queue', 'description' => 'Process pending DOI minting requests via DataCite API. Requires a REGISTERED DataCite prefix + credentials in ahg_doi_config; disabled by default (see #1466).', 'artisan_command' => 'ahg:doi-process-queue --limit=50', 'cron_expression' => '*/15 * * * *', 'duration_hint' => 'short', 'log_file' => 'logs/doi-queue.log', 'is_enabled' => false],
+                ['slug' => 'doi-mint', 'name' => 'DOI Mint', 'description' => 'Mint new DOIs for records flagged for persistent identification. Requires a REGISTERED DataCite prefix + credentials in ahg_doi_config; disabled by default (see #1466).', 'artisan_command' => 'ahg:doi-mint --limit=50', 'cron_expression' => '0 1 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/doi-mint.log', 'is_enabled' => false],
+                ['slug' => 'doi-update', 'name' => 'DOI Update', 'description' => 'Update DataCite metadata for DOIs whose records were modified. Requires a REGISTERED DataCite prefix + credentials in ahg_doi_config; disabled by default (see #1466).', 'artisan_command' => 'ahg:doi-update --modified-since=yesterday', 'cron_expression' => '0 3 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/doi-update.log', 'is_enabled' => false],
+                ['slug' => 'doi-verify', 'name' => 'DOI Verify', 'description' => 'Verify all registered DOIs resolve correctly. Requires a REGISTERED DataCite prefix + credentials in ahg_doi_config; disabled by default (see #1466).', 'artisan_command' => 'ahg:doi-verify --all', 'cron_expression' => '0 6 * * 0', 'duration_hint' => 'medium', 'log_file' => 'logs/doi-verify.log', 'is_enabled' => false],
+                ['slug' => 'doi-sync', 'name' => 'DOI Sync', 'description' => 'Sync DOI metadata with DataCite for all registered DOIs. Requires a REGISTERED DataCite prefix + credentials in ahg_doi_config; disabled by default (see #1466).', 'artisan_command' => 'ahg:doi-sync --all --limit=500', 'cron_expression' => '0 4 * * 0', 'duration_hint' => 'medium', 'log_file' => 'logs/doi-sync.log', 'is_enabled' => false],
+                ['slug' => 'doi-report', 'name' => 'DOI Report', 'description' => 'Generate monthly DOI registration and resolution summary report.', 'artisan_command' => 'ahg:doi-report --type=summary', 'cron_expression' => '0 7 1 * *', 'duration_hint' => 'short', 'log_file' => 'logs/doi-report.log'],
+            ],
+            'AI & NLP Services' => [
+                ['slug' => 'ai-ner', 'name' => 'AI NER Extraction', 'description' => 'Run Named Entity Recognition on unprocessed descriptions to extract persons, organizations, places, dates.', 'artisan_command' => 'ahg:ai-ner --limit=100 --unprocessed', 'cron_expression' => '0 2 * * *', 'duration_hint' => 'long', 'log_file' => 'logs/ai-ner.log'],
+                ['slug' => 'ai-translate', 'name' => 'AI Translation', 'description' => 'Translate descriptions into configured secondary languages using LLM.', 'artisan_command' => 'ahg:ai-translate --limit=50', 'cron_expression' => '0 3 * * *', 'duration_hint' => 'long', 'is_enabled' => false, 'log_file' => 'logs/ai-translate.log'],
+                ['slug' => 'ai-process-pending', 'name' => 'AI Process Pending', 'description' => 'Process pending AI tasks (summarization, translation, description suggestions).', 'artisan_command' => 'ahg:ai-process-pending --limit=20', 'cron_expression' => '*/5 * * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/ai-pending.log'],
+                ['slug' => 'ai-suggest-description', 'name' => 'AI Suggest Description', 'description' => 'Generate description suggestions for records with empty scope/content using OCR text.', 'artisan_command' => 'ahg:ai-suggest-description --empty-only --with-ocr --limit=100', 'cron_expression' => '0 2 * * *', 'duration_hint' => 'long', 'log_file' => 'logs/ai-suggest.log'],
+                ['slug' => 'ai-htr', 'name' => 'AI Handwritten Text Recognition', 'description' => 'Run HTR on handwritten document images to extract text.', 'artisan_command' => 'ahg:ai-htr --all --limit=100', 'cron_expression' => '0 3 * * *', 'duration_hint' => 'long', 'log_file' => 'logs/ai-htr.log'],
+                ['slug' => 'ai-spellcheck', 'name' => 'AI Spellcheck', 'description' => 'Run AI-powered spellcheck across descriptions and flag corrections.', 'artisan_command' => 'ahg:ai-spellcheck --all --limit=200', 'cron_expression' => '0 4 * * 0', 'duration_hint' => 'medium', 'log_file' => 'logs/ai-spellcheck.log'],
+                ['slug' => 'ai-ner-sync', 'name' => 'AI NER Sync / Retrain', 'description' => 'Sync NER training data and retrain the model with accepted corrections.', 'artisan_command' => 'ahg:ai-ner-sync --retrain', 'cron_expression' => '0 1 1 * *', 'duration_hint' => 'long', 'log_file' => 'logs/ai-ner-sync.log'],
+                ['slug' => 'ai-sync-entity-cache', 'name' => 'AI Entity Cache Sync', 'description' => 'Refresh the AI entity resolution cache from authority records.', 'artisan_command' => 'ahg:ai-sync-entity-cache', 'cron_expression' => '0 5 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/ai-entity-cache.log'],
+                ['slug' => 'ai-condition-scan', 'name' => 'AI Condition Scan', 'description' => 'Run AI-powered condition assessments on queued digital objects.', 'artisan_command' => 'ahg:ai-condition-scan --limit=100', 'cron_expression' => '0 3 * * *', 'duration_hint' => 'long', 'log_file' => 'logs/ai-condition.log'],
+                ['slug' => 'ai-condition-status', 'name' => 'AI Condition Status', 'description' => 'Check status of pending AI condition assessment jobs.', 'artisan_command' => 'ahg:ai-condition-status', 'cron_expression' => '*/5 * * * *', 'duration_hint' => 'short', 'log_file' => 'logs/ai-condition-status.log'],
+                ['slug' => 'ai-summarize', 'name' => 'AI Summarize', 'description' => 'Generate AI summaries for records with empty scope and content fields.', 'artisan_command' => 'ahg:ai-summarize --all-empty --field=scope_and_content', 'cron_expression' => '0 2 * * 0', 'duration_hint' => 'long', 'log_file' => 'logs/ai-summarize.log'],
+                ['slug' => 'llm-health', 'name' => 'LLM Health Check', 'description' => 'Verify LLM provider connectivity and model availability.', 'artisan_command' => 'ahg:llm-health', 'cron_expression' => '*/5 * * * *', 'duration_hint' => 'short', 'log_file' => 'logs/llm-health.log'],
+            ],
+            'Qdrant Vector Search' => [
+                ['slug' => 'qdrant-text-index', 'name' => 'Qdrant Text Index', 'description' => 'Index text embeddings into Qdrant for semantic search across archive records.', 'artisan_command' => 'ahg:qdrant-index --db-name=archive --collection=archive_records', 'cron_expression' => '0 1 * * 0', 'duration_hint' => 'long', 'log_file' => 'logs/qdrant-index.log'],
+                ['slug' => 'qdrant-image-index', 'name' => 'Qdrant Image Index', 'description' => 'Index image embeddings into Qdrant for visual similarity search.', 'artisan_command' => 'ahg:qdrant-image-index --db-name=archive', 'cron_expression' => '0 2 * * 0', 'duration_hint' => 'long', 'log_file' => 'logs/qdrant-image-index.log'],
+            ],
+            '3D Model / TripoSR' => [
+                ['slug' => 'triposr-health', 'name' => 'TripoSR Health Check', 'description' => 'Verify TripoSR service connectivity for 3D model generation.', 'artisan_command' => 'ahg:triposr-health', 'cron_expression' => '*/5 * * * *', 'duration_hint' => 'short', 'log_file' => 'logs/triposr-health.log'],
+            ],
+            'Workflow & Notifications' => [
+                ['slug' => 'workflow-process', 'name' => 'Process Workflows', 'description' => 'Process pending workflow tasks and escalate overdue items.', 'artisan_command' => 'ahg:workflow-process --escalate', 'cron_expression' => '*/15 * * * *', 'duration_hint' => 'short', 'log_file' => 'logs/workflow-process.log'],
+                ['slug' => 'workflow-sla-check', 'name' => 'Workflow SLA Check', 'description' => 'Check workflow tasks against SLA targets and flag breaches.', 'artisan_command' => 'ahg:workflow-sla-check', 'cron_expression' => '*/15 * * * *', 'duration_hint' => 'short', 'log_file' => 'logs/workflow-sla.log'],
+                ['slug' => 'donor-reminders', 'name' => 'Donor Agreement Reminders', 'description' => 'Process and send donor agreement renewal reminders.', 'artisan_command' => 'ahg:donor-reminders', 'cron_expression' => '0 8 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/donor-reminders.log'],
+                ['slug' => 'embargo-process', 'name' => 'Embargo Processing', 'description' => 'Automatically lift expired embargoes and update publication status.', 'artisan_command' => 'ahg:embargo-process', 'cron_expression' => '0 6 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/embargo-process.log'],
+                ['slug' => 'icip-check-expiry', 'name' => 'ICIP Expiry Check', 'description' => 'Check for intellectual property rights expiring within the specified days.', 'artisan_command' => 'ahg:icip-check-expiry --days=90', 'cron_expression' => '0 8 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/icip-expiry.log'],
+                // #673: Spectrum overdue scanner - drops Workbench notifications when a Spectrum-tagged workflow task is past its overdue threshold. Daily 8am.
+                ['slug' => 'spectrum-overdue', 'name' => 'Spectrum Overdue Scan', 'description' => 'Scan Spectrum-tagged workflow tasks past their overdue threshold and drop Workbench notifications for the configured user.', 'artisan_command' => 'spectrum:overdue', 'cron_expression' => '0 8 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/spectrum-overdue.log'],
+                // #650 Phase 2: saved-search alerts - re-run saved searches whose owner has notify_on_new=1 and ping the user via Workbench when new matches appear.
+                ['slug' => 'saved-search-notify-daily',  'name' => 'Saved-search alerts (daily)',  'description' => 'Run saved searches with notification_frequency=daily and notify owners on new matches.',  'artisan_command' => 'ahg:notify-saved-searches --frequency=daily',  'cron_expression' => '0 8 * * *',  'duration_hint' => 'short', 'log_file' => 'logs/saved-search-daily.log'],
+                ['slug' => 'saved-search-notify-weekly', 'name' => 'Saved-search alerts (weekly)', 'description' => 'Run saved searches with notification_frequency=weekly and notify owners on new matches.', 'artisan_command' => 'ahg:notify-saved-searches --frequency=weekly', 'cron_expression' => '0 8 * * 1', 'duration_hint' => 'short', 'log_file' => 'logs/saved-search-weekly.log'],
+            ],
+            // #673: SharePoint Integration - auto-ingest poll + webhook subscription renewal. Without these registered the SharePoint→Heratio ingest pipeline stalls (Graph webhooks expire within 12h).
+            'SharePoint Integration' => [
+                ['slug' => 'sharepoint-auto-ingest', 'name' => 'SharePoint Auto-Ingest', 'description' => 'Cron-driven delta poll of ingest-enabled SharePoint drives + run the SharePoint→Heratio ingest pipeline.', 'artisan_command' => 'sharepoint:auto-ingest', 'cron_expression' => '*/15 * * * *', 'duration_hint' => 'short', 'log_file' => 'logs/sharepoint-auto-ingest.log'],
+                ['slug' => 'sharepoint-renew-subscriptions', 'name' => 'SharePoint Renew Webhook Subscriptions', 'description' => 'Renew Microsoft Graph webhook subscriptions expiring within 12 hours so the SharePoint event stream stays live.', 'artisan_command' => 'sharepoint:renew-subscriptions', 'cron_expression' => '0 */6 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/sharepoint-renew-subscriptions.log'],
+            ],
+            'Statistics & Reporting' => [
+                ['slug' => 'statistics-aggregate', 'name' => 'Aggregate Statistics', 'description' => 'Aggregate daily statistics for reports dashboard (record counts, user activity, storage usage).', 'artisan_command' => 'ahg:statistics-aggregate --all', 'cron_expression' => '0 2 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/stats-aggregate.log'],
+            ],
+            'Accession Management' => [
+                ['slug' => 'accession-intake', 'name' => 'Accession Intake Stats', 'description' => 'Generate daily accession intake statistics and processing summary.', 'artisan_command' => 'ahg:accession-intake --stats', 'cron_expression' => '0 8 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/accession-intake.log'],
+            ],
+            'Authority Records' => [
+                ['slug' => 'authority-completeness-scan', 'name' => 'Authority Completeness Scan', 'description' => 'Scan authority records for completeness against ISAAR(CPF) required fields.', 'artisan_command' => 'ahg:authority-completeness-scan', 'cron_expression' => '0 3 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/authority-completeness.log'],
+                ['slug' => 'authority-ner-pipeline', 'name' => 'Authority NER Pipeline', 'description' => 'Run NER pipeline to suggest new authority records from description text.', 'artisan_command' => 'ahg:authority-ner-pipeline', 'cron_expression' => '0 4 * * *', 'duration_hint' => 'long', 'log_file' => 'logs/authority-ner.log'],
+                ['slug' => 'authority-dedup-scan', 'name' => 'Authority Dedup Scan', 'description' => 'Scan authority records for potential duplicates using fuzzy matching.', 'artisan_command' => 'ahg:authority-dedup-scan', 'cron_expression' => '0 2 * * 0', 'duration_hint' => 'long', 'log_file' => 'logs/authority-dedup.log'],
+                ['slug' => 'authority-function-sync', 'name' => 'Authority-Function Sync', 'description' => 'Synchronise authority-function relationships from ISDF records.', 'artisan_command' => 'ahg:authority-function-sync', 'cron_expression' => '0 5 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/authority-function-sync.log'],
+            ],
+            'Display / GLAM' => [
+                ['slug' => 'display-reindex', 'name' => 'Display Reindex', 'description' => 'Rebuild the display/exhibition index for public-facing GLAM pages.', 'artisan_command' => 'ahg:display-reindex', 'cron_expression' => '0 4 * * 0', 'duration_hint' => 'medium', 'log_file' => 'logs/display-reindex.log'],
+            ],
+            'Duplicate Detection' => [
+                ['slug' => 'dedupe-scan', 'name' => 'Dedupe Scan', 'description' => 'Run duplicate detection scan across information objects using configured rules and similarity threshold.', 'artisan_command' => 'ahg:dedupe-scan --limit=500', 'cron_expression' => '0 3 * * 0', 'duration_hint' => 'long', 'log_file' => 'logs/dedupe-scan.log'],
+            ],
+            'Heritage & Linked Data' => [
+                ['slug' => 'linked-data-sync', 'name' => 'Linked Data Sync', 'description' => 'Synchronise linked data from external authority sources (VIAF, Wikidata, LCNAF).', 'artisan_command' => 'ahg:linked-data-sync --source=all --limit=500', 'cron_expression' => '0 4 * * 0', 'duration_hint' => 'long', 'log_file' => 'logs/linked-data-sync.log'],
+            ],
+            'Library Management' => [
+                ['slug' => 'library-overdue-check', 'name' => 'Overdue Check', 'description' => 'Check for overdue library items and send notification emails.', 'artisan_command' => 'ahg:library-overdue-check --notify', 'cron_expression' => '0 6 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/library-overdue.log'],
+                ['slug' => 'library-process-fines', 'name' => 'Process Fines', 'description' => 'Calculate and apply overdue fines to patron accounts.', 'artisan_command' => 'ahg:library-process-fines', 'cron_expression' => '0 1 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/library-fines.log'],
+                ['slug' => 'library-hold-expiry', 'name' => 'Hold Expiry', 'description' => 'Expire unfulfilled hold requests past their pickup deadline.', 'artisan_command' => 'ahg:library-hold-expiry', 'cron_expression' => '0 2 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/library-holds.log'],
+                ['slug' => 'library-patron-expiry', 'name' => 'Patron Expiry', 'description' => 'Flag patron accounts approaching expiry with a grace period notification.', 'artisan_command' => 'ahg:library-patron-expiry --grace-days=7', 'cron_expression' => '0 3 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/library-patron.log'],
+                ['slug' => 'library-serial-expected', 'name' => 'Serial Expected Issues', 'description' => 'Generate expected serial issue predictions for the next 3 months.', 'artisan_command' => 'ahg:library-serial-expected --months=3', 'cron_expression' => '0 5 * * 1', 'duration_hint' => 'medium', 'log_file' => 'logs/library-serials.log'],
+                ['slug' => 'library-ill-overdue', 'name' => 'ILL Overdue', 'description' => 'Check for overdue inter-library loan items and send reminders.', 'artisan_command' => 'ahg:library-ill-overdue', 'cron_expression' => '0 6 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/library-ill.log'],
+                ['slug' => 'library-process-covers', 'name' => 'Process Covers', 'description' => 'Fetch and generate cover images for library items missing thumbnails.', 'artisan_command' => 'ahg:library-process-covers --missing-only --limit=100', 'cron_expression' => '0 4 * * 0', 'duration_hint' => 'medium', 'log_file' => 'logs/library-covers.log'],
+            ],
+            'Museum Management' => [
+                ['slug' => 'museum-aat-sync', 'name' => 'AAT Sync', 'description' => 'Synchronise museum object classifications with the Getty Art & Architecture Thesaurus.', 'artisan_command' => 'ahg:museum-aat-sync', 'cron_expression' => '0 2 1 * *', 'duration_hint' => 'long', 'log_file' => 'logs/museum-aat-sync.log'],
+                ['slug' => 'museum-exhibition', 'name' => 'Exhibition Processing', 'description' => 'Process exhibition scheduling, loan status updates, and availability changes.', 'artisan_command' => 'ahg:museum-exhibition --process', 'cron_expression' => '0 7 * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/museum-exhibition.log'],
+            ],
+            'Artwork Placement' => [
+                ['slug' => 'artwork-remind', 'name' => 'Artwork Placement Reminders', 'description' => 'Overdue and due-soon reminders for artworks placed in offices and shared spaces (#1459). No-ops cleanly when nothing is out on placement.', 'artisan_command' => 'artwork:remind', 'cron_expression' => '0 8 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/artwork-request.log'],
+            ],
+            'Portable Packages' => [
+                ['slug' => 'portable-cleanup', 'name' => 'Portable Cleanup', 'description' => 'Remove expired portable export packages from the staging area.', 'artisan_command' => 'ahg:portable-cleanup', 'cron_expression' => '0 3 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/portable-cleanup.log'],
+            ],
+            // #1429: Archivematica round-trip drivers. Disabled by default - only an
+            // instance wired to an AM Storage Service (Admin -> Archivematica) should
+            // enable these; on an unconfigured instance both commands no-op cleanly.
+            'Archivematica' => [
+                ['slug' => 'am-poll', 'name' => 'Archivematica Poll', 'description' => 'Advance in-flight Heratio -> Archivematica transfers to completion (am_job). Enable only on an instance wired to an AM dashboard.', 'artisan_command' => 'am:poll', 'cron_expression' => '*/5 * * * *', 'duration_hint' => 'short', 'log_file' => 'logs/archivematica.log', 'is_enabled' => false],
+                ['slug' => 'am-ingest-dips', 'name' => 'Archivematica Ingest DIPs', 'description' => 'Pull finished DIPs from the Archivematica Storage Service back into Heratio. Skips already-seen (linked or unmatched) DIPs. Enable only on an AM-wired instance.', 'artisan_command' => 'am:ingest-dips --limit=100', 'cron_expression' => '*/15 * * * *', 'duration_hint' => 'medium', 'log_file' => 'logs/archivematica.log', 'is_enabled' => false],
+            ],
+            'Compliance' => [
+                ['slug' => 'privacy-scan-pii', 'name' => 'Privacy PII Scan', 'description' => 'Scan records for personally identifiable information under POPIA jurisdiction rules.', 'artisan_command' => 'ahg:privacy-scan-pii --limit=500', 'cron_expression' => '0 2 * * 1', 'duration_hint' => 'long', 'log_file' => 'logs/privacy-scan.log'],
+                ['slug' => 'popia-breach-check', 'name' => 'POPIA Breach Check', 'description' => 'Check for potential data breaches requiring POPIA notification.', 'artisan_command' => 'ahg:popia-breach-check', 'cron_expression' => '0 * * * *', 'duration_hint' => 'short', 'log_file' => 'logs/breach-check.log'],
+                ['slug' => 'cdpa-license-check', 'name' => 'CDPA License Check', 'description' => 'Verify copyright and licensing compliance under the CDPA framework.', 'artisan_command' => 'ahg:cdpa-license-check', 'cron_expression' => '0 6 1 * *', 'duration_hint' => 'medium', 'log_file' => 'logs/cdpa-license.log'],
+                ['slug' => 'naz-closure-check', 'name' => 'NAZ Closure Check', 'description' => 'Check records against National Archives of Zimbabwe closure periods.', 'artisan_command' => 'ahg:naz-closure-check', 'cron_expression' => '0 6 1 * *', 'duration_hint' => 'medium', 'log_file' => 'logs/naz-closure.log'],
+                ['slug' => 'naz-transfer-due', 'name' => 'NAZ Transfer Due', 'description' => 'Identify records due for transfer to the National Archives within the specified days.', 'artisan_command' => 'ahg:naz-transfer-due --days=90', 'cron_expression' => '0 6 1 * *', 'duration_hint' => 'medium', 'log_file' => 'logs/naz-transfer.log'],
+            ],
+            'ICIP / Local Contexts' => [
+                ['slug' => 'icip-hub-sync', 'name' => 'Local Contexts Hub Sync', 'description' => 'Sync the configured Local Contexts Hub project(s) (applied TK/BC Labels + Notices) into Heratio. Enable only after registering a Hub project + API key in ICIP settings; the local label catalog is the offline fallback.', 'artisan_command' => 'ahg:icip-hub-sync', 'cron_expression' => '0 5 * * *', 'duration_hint' => 'short', 'log_file' => 'logs/icip-hub-sync.log', 'is_enabled' => false],
+            ],
+            'Security & Compliance' => [
+                ['slug' => 'services-check', 'name' => 'Services Health Check', 'description' => 'Verify all dependent services (MySQL, Redis, Elasticsearch, Qdrant, TripoSR) are reachable.', 'artisan_command' => 'ahg:services-check', 'cron_expression' => '*/5 * * * *', 'duration_hint' => 'short', 'log_file' => 'logs/services-check.log'],
+            ],
+            'API & Webhooks' => [
+                ['slug' => 'webhook-retry', 'name' => 'Webhook Retry', 'description' => 'Retry failed webhook deliveries up to the configured maximum attempts.', 'artisan_command' => 'ahg:webhook-retry --limit=50', 'cron_expression' => '*/15 * * * *', 'duration_hint' => 'short', 'log_file' => 'logs/webhook-retries.log'],
+            ],
+            'Queue Engine' => [
+                ['slug' => 'queue-flush', 'name' => 'Flush Failed Jobs', 'description' => 'Remove all failed jobs from the failed_jobs table.', 'artisan_command' => 'queue:flush', 'cron_expression' => '0 4 * * 0', 'duration_hint' => 'short', 'log_file' => 'logs/queue-cleanup.log'],
+                ['slug' => 'queue-retry', 'name' => 'Retry All Failed Jobs', 'description' => 'Push all failed jobs back onto the queue for re-processing.', 'artisan_command' => 'queue:retry all', 'cron_expression' => '0 6 * * 1', 'duration_hint' => 'short', 'log_file' => 'logs/queue-retry.log'],
+            ],
+        ];
+
+        foreach ($categories as $category => $jobs) {
+            foreach ($jobs as $job) {
+                $sort++;
+                $schedules[] = array_merge([
+                    'category' => $category,
+                    'is_enabled' => true,
+                    'timeout_minutes' => 60,
+                    'sort_order' => $sort,
+                    'notify_on_failure' => false,
+                ], $job);
+            }
+        }
+
+        return $schedules;
+    }
+
+    // ─── #673 Phase 2 - Laravel Schedule Facade wiring ──────────────
+
+    /**
+     * Register the cron-monitoring schedule that Laravel owns: the missed-run
+     * detector, every five minutes.
+     *
+     * The managed cron_schedule entries are NOT registered here - they are
+     * dispatched by ahg:cron-run, scheduled every minute in routes/console.php.
+     * Registering them in both places ran every job twice (CH-000111).
+     *
+     * Called from AhgCoreServiceProvider::boot() inside an app booted()
+     * callback so the host application doesn't have to wire it by hand.
+     */
+    public function registerWithLaravelSchedule(Schedule $schedule): void
+    {
+        $tracker = $this->tracker;
+
+        // Only the missed-run detector is registered here.
+        //
+        // Every enabled cron_schedule row used to be registered as a native
+        // Schedule event as well, which meant two dispatch paths ran the same
+        // table: this one, and the ahg:cron-run runner that routes/console.php
+        // schedules every minute. Both called Artisan::call and both opened an
+        // ahg_cron_run row, so every managed job ran TWICE - on 2026-09-20 the
+        // */5 entries ran ~150 times against an expected 76, and the weekly
+        // qdrant indexes ran at 01:00 and again at 01:09 (CH-000111). The two
+        // paths are not interchangeable: only ahg:cron-run maintains
+        // cron_schedule.last_run_at / last_run_status / next_run_at, which the
+        // cron admin UI reads and which getDueSchedules() uses to reclaim a
+        // stale lock, so the native registration is the one that goes. Overlap
+        // is still guarded there by the 'running' status plus that reclaim, and
+        // by ->withoutOverlapping() on the ahg:cron-run entry itself.
+        $detector = $schedule->command('cron:check-missed-runs')
+            ->everyFiveMinutes()
+            ->name('ahg-cron:check-missed-runs')
+            ->withoutOverlapping();
+
+        // Single-server execution when several app boxes share the DB.
+        // A store with no atomic locks (null) simply skips the annotation.
+        if ($tracker?->supportsDistributedLocks() ?? false) {
+            $detector->onOneServer();
+        }
+    }
+
+    /**
+     * Convenience accessor for the lazily-constructed tracker (used by
+     * tests + the missed-run detector command).
+     */
+    public function tracker(): CronRunTrackerService
+    {
+        return $this->tracker ??= new CronRunTrackerService;
+    }
+
+    // ─── Jobs Settings Helpers ──────────────────────────────────────
+
+    /**
+     * Check if background jobs are globally enabled.
+     */
+    public function isJobsEnabled(): bool
+    {
+        return $this->getJobsSetting('jobs_enabled', 'true') === 'true';
+    }
+
+    /**
+     * Read a job setting from ahg_settings (jobs group).
+     */
+    public function getJobsSetting(string $key, $default = null)
+    {
+        static $cache = null;
+        if ($cache === null) {
+            try {
+                $cache = DB::table('ahg_settings')
+                    ->where('setting_group', 'jobs')
+                    ->pluck('setting_value', 'setting_key')
+                    ->toArray();
+            } catch (\Throwable $e) {
+                $cache = [];
+            }
+        }
+
+        return $cache[$key] ?? $default;
+    }
+
+    /**
+     * Get configured job timeout in seconds.
+     */
+    public function getJobTimeout(): int
+    {
+        return (int) $this->getJobsSetting('jobs_timeout', 3600);
+    }
+
+    /**
+     * Get configured retry attempts.
+     */
+    public function getRetryAttempts(): int
+    {
+        return (int) $this->getJobsSetting('jobs_retry_attempts', 3);
+    }
+
+    /**
+     * Notify admin when a job fails (if enabled).
+     */
+    private function notifyJobFailure(object $schedule, string $output): void
+    {
+        if ($this->getJobsSetting('jobs_notify_on_failure', 'true') !== 'true') {
+            return;
+        }
+
+        $email = $this->getJobsSetting('jobs_notify_email', '');
+        if (empty($email)) {
+            return;
+        }
+
+        try {
+            \Illuminate\Support\Facades\Mail::raw(
+                "Job failed: {$schedule->name} ({$schedule->slug})\n\n"
+                ."Command: {$schedule->artisan_command}\n"
+                .'Time: '.now()->toDateTimeString()."\n\n"
+                ."Output:\n{$output}",
+                function ($message) use ($email, $schedule) {
+                    $message->to($email)
+                        ->subject("[Heratio] Job Failed: {$schedule->name}");
+                }
+            );
+        } catch (\Throwable $e) {
+            // Don't let notification failure break the scheduler
+            \Log::warning('Failed to send job failure notification: '.$e->getMessage());
+        }
+    }
+}

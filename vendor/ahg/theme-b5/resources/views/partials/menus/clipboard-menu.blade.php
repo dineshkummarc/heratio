@@ -1,0 +1,62 @@
+<li class="nav-item dropdown d-flex flex-column">
+  <a class="nav-link dropdown-toggle d-flex align-items-center p-0"
+     href="#"
+     id="clipboard-menu"
+     role="button"
+     data-bs-toggle="dropdown"
+     aria-expanded="false"
+     data-total-count-label="records added"
+     data-alert-close="Close"
+     data-load-alert-message="There was an error loading the clipboard content."
+     data-export-alert-message="The clipboard is empty for this entity type."
+     data-export-check-url="{{ url('/clipboard/exportCheck') }}"
+     data-delete-alert-message="Note: clipboard items unclipped in this page will be removed from the clipboard when the page is refreshed. You can re-select them now, or reload the page to remove them completely. Using the sort or print preview buttons will also cause a page reload - so anything currently deselected will be lost!"
+     @if(auth()->check() && (auth()->user()->isEditor() || auth()->user()->isAdministrator()))
+       data-show-accessions="1"
+     @else
+       data-show-accessions="0"
+     @endif>
+    <i class="fas fa-2x fa-fw fa-paperclip px-0 px-lg-2 py-2" data-bs-toggle="tooltip" data-bs-placement="bottom" data-bs-custom-class="d-none d-lg-block" title="{{ __('Clipboard') }}" aria-hidden="true"></i>
+    <span class="d-lg-none mx-1" aria-hidden="true">{{ __('Clipboard') }}</span>
+    <span class="visually-hidden">{{ __('Clipboard') }}</span>
+  </a>
+  <ul class="dropdown-menu dropdown-menu-end mb-2" aria-labelledby="clipboard-menu">
+    <li><h6 class="dropdown-header">{{ __('Clipboard') }}</h6></li>
+    <li class="text-muted text-nowrap px-3 pb-2">
+      <span id="counts-block"
+            data-count-format="{{ __(':label count: :count') }}"
+            data-information-object-label="{{ __(config('app.ui_label_informationobject', 'Archival description')) }}"
+            data-actor-object-label="{{ __(config('app.ui_label_actor', 'Authority record')) }}"
+            data-repository-object-label="{{ __(config('app.ui_label_repository', 'Archival institution')) }}"
+            @if(auth()->check() && (auth()->user()->isEditor() || auth()->user()->isAdministrator()))
+              data-accession-object-label="{{ __(config('atom.app_ui_label_accessioncount', 'Accession')) }}"
+            @endif>
+      </span>
+    </li>
+    <li>
+      <button type="button" class="dropdown-item" id="clipboard-clear-btn" title="{{ __('Clear all selections') }}"
+              data-clear-url="{{ route('clipboard.clear') }}"
+              data-csrf="{{ csrf_token() }}">
+        <i class="fas fa-trash-alt me-2"></i>{{ __('Clear all selections') }}
+      </button>
+    </li>
+    <li>
+      <a class="dropdown-item" href="{{ route('clipboard.view') }}" title="{{ __('Go to clipboard') }}">
+        <i class="fas fa-clipboard-list me-2"></i>{{ __('Go to clipboard') }}
+      </a>
+    </li>
+    <li>
+      <a class="dropdown-item" href="{{ url('/clipboard/load') }}" title="{{ __('Load clipboard') }}">
+        <i class="fas fa-upload me-2"></i>{{ __('Load clipboard') }}
+      </a>
+    </li>
+    <li>
+      <form method="POST" action="{{ route('clipboard.save') }}" id="clipboard-save-form">
+        @csrf
+        <button type="submit" class="dropdown-item" title="{{ __('Save clipboard') }}">
+          <i class="fas fa-download me-2"></i>{{ __('Save clipboard') }}
+        </button>
+      </form>
+    </li>
+  </ul>
+</li>

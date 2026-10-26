@@ -1,0 +1,896 @@
+<?php
+
+/**
+ * ExtendedRightsService - Service for Heratio
+ *
+ * Copyright (C) 2026 Johan Pieterse
+ * Plain Sailing Information Systems
+ * Email: johan@plainsailingisystems.co.za
+ *
+ * This file is part of Heratio.
+ *
+ * Heratio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Heratio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Heratio. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+
+
+namespace AhgInformationObjectManage\Services;
+
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
+
+/**
+ * Extended Rights Service
+ *
+ * Migrated from /usr/share/nginx/archive/atom-ahg-plugins/ahgExtendedRightsPlugin/lib/Services/ExtendedRightsService.php
+ * and /usr/share/nginx/archive/atom-ahg-plugins/ahgExtendedRightsPlugin/lib/Services/EmbargoService.php
+ */
+class ExtendedRightsService
+{
+    protected string $culture;
+
+    public function __construct(?string $culture = null)
+    {
+        $this->culture = $culture ?? app()->getLocale();
+    }
+
+    // =========================================
+    // STANDARD RIGHTS (rights + rights_i18n via relation table)
+    // =========================================
+
+    /**
+     * Get standard rights for an IO via relation table (type_id=168).
+     * Relation links: subject_id = information_object.id, object_id = rights.id
+     */
+    public function getRightsForObject(int $objectId, ?string $culture = null): Collection
+    {
+        $culture = $culture ?? $this->culture;
+
+        try {
+            return DB::table('relation as r')
+                ->join('rights', 'rights.id', '=', 'r.object_id')
+                ->leftJoin('rights_i18n as ri', function ($j) use ($culture) {
+                    $j->on('ri.id', '=', 'rights.id')
+                        ->where('ri.culture', $culture);
+                })
+                ->where('r.subject_id', $objectId)
+                ->where('r.type_id', 168)
+                ->select([
+                    'rights.id',
+                    'rights.start_date',
+                    'rights.end_date',
+                    'rights.basis_id',
+                    'rights.rights_holder_id',
+                    'rights.copyright_status_id',
+                    'rights.copyright_status_date',
+                    'rights.copyright_jurisdiction',
+                    'rights.statute_determination_date',
+                    'rights.statute_citation_id',
+                    'rights.source_culture',
+                    'ri.rights_note',
+                    'ri.copyright_note',
+                    'ri.identifier_value',
+                    'ri.identifier_type',
+                    'ri.identifier_role',
+                    'ri.license_terms',
+                    'ri.license_note',
+                    'ri.statute_jurisdiction',
+                    'ri.statute_note',
+                ])
+                ->get()
+                ->map(function ($right) {
+                    // Resolve term names for basis and copyright status
+                    if ($right->basis_id) {
+                        $right->basis_name = $this->getTermName($right->basis_id, $this->culture);
+                    }
+                    if ($right->copyright_status_id) {
+                        $right->copyright_status_name = $this->getTermName($right->copyright_status_id, $this->culture);
+                    }
+                    if ($right->rights_holder_id) {
+                        $right->rights_holder_name = $this->getRightsHolderName($right->rights_holder_id);
+                    }
+                    return $right;
+                });
+        } catch (\Illuminate\Database\QueryException $e) {
+            return collect();
+        }
+    }
+
+    // =========================================
+    // EXTENDED RIGHTS (extended_rights table)
+    // =========================================
+
+    /**
+     * Get extended rights for an object.
+     * Reads rights_record (#1464), joining rights_record_i18n and aliasing
+     * columns back to the extended_rights names callers still use.
+     */
+    public function getExtendedRights(int $objectId): Collection
+    {
+        try {
+            // #1464: rights_record is the authoritative store. Columns are
+            // aliased back to the extended_rights names so the ~160 downstream
+            // references in blades, forms and controllers keep working.
+            return DB::table('rights_record as er')
+                ->leftJoin('rights_record_i18n as eri', function ($j) {
+                    $j->on('eri.id', '=', 'er.id')
+                        ->where('eri.culture', '=', $this->culture);
+                })
+                ->leftJoin('rights_statement as rs', 'er.rights_statement_id', '=', 'rs.id')
+                ->leftJoin('rights_statement_i18n as rs_i18n', function ($j) {
+                    $j->on('rs.id', '=', 'rs_i18n.rights_statement_id')
+                        ->where('rs_i18n.culture', '=', $this->culture);
+                })
+                ->leftJoin('rights_cc_license as cc', 'er.cc_license_id', '=', 'cc.id')
+                ->where('er.object_id', $objectId)
+                ->select([
+                    'er.*',
+                    'er.cc_license_id as creative_commons_license_id',
+                    'er.copyright_holder as rights_holder',
+                    'er.start_date as rights_date',
+                    'er.end_date as expiry_date',
+                    'er.copyright_note as copyright_notice',
+                    'eri.rights_note',
+                    'eri.restriction_note as usage_conditions',
+                    'rs.code as rights_statement_code',
+                    'rs.uri as rights_statement_uri',
+                    DB::raw("COALESCE(rs.icon_filename, '') as rights_statement_icon"),
+                    'rs_i18n.name as rights_statement_name',
+                    'rs_i18n.definition as rights_statement_definition',
+                    'cc.code as cc_license_code',
+                    'cc.uri as cc_license_uri',
+                ])
+                ->orderByDesc('er.is_primary')
+                ->orderByDesc('er.created_at')
+                ->get();
+        } catch (\Illuminate\Database\QueryException $e) {
+            return collect();
+        }
+    }
+
+    /**
+     * Get TK labels assigned to an extended rights record.
+     */
+    public function getTkLabelsForRights(int $extendedRightsId): Collection
+    {
+        try {
+            // #1464: TK/BC assignments live in icip_tk_label keyed by OBJECT,
+            // which is what TermProtocolService enforces against. The argument
+            // is now a rights_record id, so resolve its object first.
+            $objectId = DB::table('rights_record')->where('id', $extendedRightsId)->value('object_id');
+            if (! $objectId) {
+                return collect();
+            }
+
+            return DB::table('icip_tk_label as il')
+                ->join('icip_tk_label_type as tkl', 'il.label_type_id', '=', 'tkl.id')
+                ->where('il.information_object_id', $objectId)
+                ->select(['tkl.*'])
+                ->get();
+        } catch (\Illuminate\Database\QueryException $e) {
+            return collect();
+        }
+    }
+
+    /**
+     * Save (create) an extended right for an object.
+     * Inserts into rights_record, rights_record_i18n, and icip_tk_label (#1464).
+     */
+    /**
+     * Snapshot for the security_audit_log before/after diff.
+     */
+    private function rightSnapshot(int $rightsId): array
+    {
+        $row = DB::table('rights_record')->where('id', $rightsId)->first();
+        if (!$row) return [];
+        $arr = (array) $row;
+        unset($arr['id'], $arr['created_at'], $arr['updated_at'], $arr['created_by'], $arr['updated_by']);
+        $i18n = (array) (DB::table('rights_record_i18n')
+            ->where('id', $rightsId)
+            ->where('culture', $this->culture)
+            ->select('rights_note', 'restriction_note')
+            ->first() ?? []);
+        return array_merge($arr, $i18n);
+    }
+
+    public function saveExtendedRight(int $objectId, array $data, ?int $userId = null): int
+    {
+        $now = date('Y-m-d H:i:s');
+
+        // #1464: writes go to rights_record, the authoritative store.
+        if (!empty($data['is_primary'])) {
+            DB::table('rights_record')
+                ->where('object_id', $objectId)
+                ->where('is_primary', 1)
+                ->update(['is_primary' => 0, 'updated_at' => $now]);
+        }
+
+        $id = DB::table('rights_record')->insertGetId([
+            'object_id'           => $objectId,
+            // A CC licence is a licence grant; anything else defaults to
+            // copyright, matching the backfill and saveRightsRecord().
+            'basis'               => !empty($data['creative_commons_license_id']) ? 'license' : 'copyright',
+            'rights_statement_id' => $data['rights_statement_id'] ?? null,
+            'cc_license_id'       => $data['creative_commons_license_id'] ?? null,
+            'start_date'          => $data['rights_date'] ?? null,
+            'end_date'            => $data['expiry_date'] ?? null,
+            'copyright_holder'    => $data['rights_holder'] ?? null,
+            'rights_holder_uri'   => $data['rights_holder_uri'] ?? null,
+            'copyright_note'      => $data['copyright_notice'] ?? null,
+            'is_primary'          => $data['is_primary'] ?? 1,
+            'created_by'          => $userId,
+            'updated_by'          => $userId,
+            'created_at'          => $now,
+            'updated_at'          => $now,
+        ]);
+
+        DB::table('rights_record_i18n')->insert([
+            'id'               => $id,
+            'culture'          => $this->culture,
+            'rights_note'      => $data['rights_note'] ?? null,
+            'restriction_note' => $data['usage_conditions'] ?? null,
+        ]);
+
+        // TK/BC labels go to icip_tk_label, which is what TermProtocolService
+        // enforces against - recording them anywhere else has no effect.
+        \AhgCore\Services\IcipLabelAssignmentService::applyLegacyIds($objectId, $data['tk_label_ids'] ?? []);
+
+        \AhgCore\Support\AuditLog::captureCreate($id, 'rights_record', $this->rightSnapshot($id));
+        return $id;
+    }
+
+    /**
+     * Update an existing extended right.
+     */
+    public function updateExtendedRight(int $rightsId, array $data, ?int $userId = null): void
+    {
+        $before = $this->rightSnapshot($rightsId);
+        $now = date('Y-m-d H:i:s');
+
+        $record = [
+            'basis'               => !empty($data['creative_commons_license_id']) ? 'license' : 'copyright',
+            'rights_statement_id' => $data['rights_statement_id'] ?? null,
+            'cc_license_id'       => $data['creative_commons_license_id'] ?? null,
+            'start_date'          => $data['rights_date'] ?? null,
+            'end_date'            => $data['expiry_date'] ?? null,
+            'copyright_holder'    => $data['rights_holder'] ?? null,
+            'rights_holder_uri'   => $data['rights_holder_uri'] ?? null,
+            'copyright_note'      => $data['copyright_notice'] ?? null,
+            'is_primary'          => $data['is_primary'] ?? 1,
+            'updated_by'          => $userId,
+            'updated_at'          => $now,
+        ];
+
+        DB::table('rights_record')->where('id', $rightsId)->update($record);
+
+        DB::table('rights_record_i18n')->updateOrInsert(
+            ['id' => $rightsId, 'culture' => $this->culture],
+            [
+                'rights_note'      => $data['rights_note'] ?? null,
+                'restriction_note' => $data['usage_conditions'] ?? null,
+            ]
+        );
+
+        // Replace TK labels on the object (icip_tk_label is what the protocol
+        // layer enforces against).
+        $objectId = (int) DB::table('rights_record')->where('id', $rightsId)->value('object_id');
+        if ($objectId) {
+            DB::table('icip_tk_label')->where('information_object_id', $objectId)->delete();
+            \AhgCore\Services\IcipLabelAssignmentService::applyLegacyIds($objectId, $data['tk_label_ids'] ?? []);
+        }
+
+        \AhgCore\Support\AuditLog::captureEdit($rightsId, 'rights_record', $before, $this->rightSnapshot($rightsId));
+    }
+
+    /**
+     * Delete an extended right and its i18n + TK label rows.
+     */
+    public function deleteExtendedRight(int $rightsId): void
+    {
+        \AhgCore\Support\AuditLog::captureDelete($rightsId, 'rights_record', $this->rightSnapshot($rightsId));
+
+        // TK/BC labels are deliberately NOT deleted here. In the ICIP model they
+        // are attached to the OBJECT, not to a rights record, and they carry a
+        // community's own assertion of authority. Deleting a rights record must
+        // not strip that - especially as an object can hold more than one
+        // record, so the labels may not even relate to the one being removed.
+        DB::table('rights_record_i18n')->where('id', $rightsId)->delete();
+        DB::table('rights_record')->where('id', $rightsId)->delete();
+    }
+
+    // =========================================
+    // EMBARGO (embargo table)
+    // =========================================
+
+    /**
+     * Get active embargo for an object.
+     */
+    public function getActiveEmbargo(int $objectId): ?object
+    {
+        try {
+            return DB::table('embargo')
+                ->where('object_id', $objectId)
+                ->where('is_active', 1)
+                ->where('start_date', '<=', date('Y-m-d'))
+                ->where(function ($q) {
+                    $q->whereNull('end_date')
+                        ->orWhere('end_date', '>=', date('Y-m-d'));
+                })
+                ->orderByDesc('created_at')
+                ->first();
+        } catch (\Illuminate\Database\QueryException $e) {
+            return null;
+        }
+    }
+
+    /**
+     * Get all embargoes for an object (active and historical).
+     */
+    public function getAllEmbargoes(int $objectId): Collection
+    {
+        try {
+            return DB::table('embargo')
+                ->where('object_id', $objectId)
+                ->orderByDesc('created_at')
+                ->get();
+        } catch (\Illuminate\Database\QueryException $e) {
+            return collect();
+        }
+    }
+
+    /**
+     * Create a new embargo.
+     */
+    public function createEmbargo(array $data): int
+    {
+        $now = date('Y-m-d H:i:s');
+        $startDate = $data['start_date'] ?? date('Y-m-d');
+        $status = strtotime($startDate) <= time() ? 'active' : 'pending';
+
+        return DB::table('embargo')->insertGetId([
+            'object_id'         => $data['object_id'],
+            'embargo_type'      => $data['embargo_type'],
+            'start_date'        => $startDate,
+            'end_date'          => $data['end_date'] ?? null,
+            'reason'            => $data['reason'] ?? null,
+            'is_perpetual'      => $data['is_perpetual'] ?? 0,
+            'status'            => $status,
+            'created_by'        => $data['created_by'] ?? null,
+            'notify_on_expiry'  => $data['notify_on_expiry'] ?? 1,
+            'notify_days_before'=> $data['notify_days_before'] ?? 30,
+            'is_active'         => 1,
+            'created_at'        => $now,
+            'updated_at'        => $now,
+        ]);
+    }
+
+    /**
+     * Update an existing embargo.
+     */
+    public function updateEmbargo(int $id, array $data): bool
+    {
+        $updateData = ['updated_at' => date('Y-m-d H:i:s')];
+
+        $allowed = [
+            'embargo_type', 'start_date', 'end_date', 'reason',
+            'is_perpetual', 'status', 'notify_on_expiry', 'notify_days_before',
+            'updated_by',
+        ];
+
+        foreach ($allowed as $field) {
+            if (array_key_exists($field, $data)) {
+                $updateData[$field] = $data[$field];
+            }
+        }
+
+        return DB::table('embargo')
+            ->where('id', $id)
+            ->update($updateData) > 0;
+    }
+
+    /**
+     * Lift an embargo.
+     */
+    public function liftEmbargo(int $id, int $userId, string $reason): bool
+    {
+        return DB::table('embargo')
+            ->where('id', $id)
+            ->update([
+                'is_active'   => 0,
+                'status'      => 'lifted',
+                'lifted_by'   => $userId,
+                'lifted_at'   => date('Y-m-d H:i:s'),
+                'lift_reason' => $reason,
+                'updated_at'  => date('Y-m-d H:i:s'),
+            ]) > 0;
+    }
+
+    /**
+     * Create embargo with optional propagation to child records.
+     */
+    public function createEmbargoWithPropagation(array $data, bool $applyToChildren = false): array
+    {
+        $results = ['created' => 0, 'failed' => 0, 'ids' => []];
+
+        // Create embargo for the main object
+        try {
+            $embargoId = $this->createEmbargo($data);
+            $results['created']++;
+            $results['ids'][] = $embargoId;
+        } catch (\Exception $e) {
+            $results['failed']++;
+            return $results;
+        }
+
+        // If propagation requested, apply to all descendants
+        if ($applyToChildren) {
+            // heratio#1541: closure tables, so records with no lft/rgt are included.
+            $descendants = app(\AhgCore\Services\HierarchyQueryService::class)->descendantIds('information_object', (int) $data['object_id'], false);
+            if ($descendants) {
+
+                foreach ($descendants as $childId) {
+                    try {
+                        $childData = $data;
+                        $childData['object_id'] = $childId;
+                        $childEmbargoId = $this->createEmbargo($childData);
+                        $results['created']++;
+                        $results['ids'][] = $childEmbargoId;
+                    } catch (\Exception $e) {
+                        $results['failed']++;
+                    }
+                }
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * Count descendants for an IO (for propagation UI).
+     */
+    public function getDescendantCount(int $objectId): int
+    {
+        // heratio#1541: closure tables, not the nested set.
+        return count(app(\AhgCore\Services\HierarchyQueryService::class)->descendantIds('information_object', $objectId, false));
+    }
+
+    // =========================================
+    // TERM / LOOKUP HELPERS
+    // =========================================
+
+    /**
+     * Resolve a single term name by ID.
+     */
+    public function getTermName(int $termId, ?string $culture = null): ?string
+    {
+        $culture = $culture ?? $this->culture;
+
+        return DB::table('term_i18n')
+            ->where('id', $termId)
+            ->where('culture', $culture)
+            ->value('name');
+    }
+
+    /**
+     * Batch-resolve term names.
+     */
+    public function getTermNames(array $ids, ?string $culture = null): array
+    {
+        if (empty($ids)) {
+            return [];
+        }
+
+        $culture = $culture ?? $this->culture;
+
+        return DB::table('term_i18n')
+            ->whereIn('id', $ids)
+            ->where('culture', $culture)
+            ->pluck('name', 'id')
+            ->toArray();
+    }
+
+    /**
+     * Resolve rights holder name from actor_i18n.
+     */
+    public function getRightsHolderName(int $actorId): ?string
+    {
+        return DB::table('actor_i18n')
+            ->where('id', $actorId)
+            ->where('culture', $this->culture)
+            ->value('authorized_form_of_name');
+    }
+
+    // =========================================
+    // RIGHTS STATEMENTS & CC LICENSES (for forms)
+    // =========================================
+
+    /**
+     * Get all active rights statements.
+     */
+    public function getRightsStatements(): Collection
+    {
+        try {
+            return DB::table('rights_statement as rs')
+                ->leftJoin('rights_statement_i18n as rs_i18n', function ($j) {
+                    $j->on('rs.id', '=', 'rs_i18n.rights_statement_id')
+                        ->where('rs_i18n.culture', '=', $this->culture);
+                })
+                ->where('rs.is_active', 1)
+                ->select('rs.id', 'rs.code', 'rs.uri', 'rs.category', 'rs.icon_filename', 'rs_i18n.name', 'rs_i18n.definition')
+                ->orderBy('rs.sort_order')
+                ->get();
+        } catch (\Illuminate\Database\QueryException $e) {
+            return collect();
+        }
+    }
+
+    /**
+     * Get all active Creative Commons licenses.
+     */
+    public function getCreativeCommonsLicenses(): Collection
+    {
+        try {
+            return DB::table('rights_cc_license')
+                ->where('is_active', 1)
+                ->select('id', 'code', 'uri')
+                ->orderBy('sort_order')
+                ->get()
+                ->map(function ($item) {
+                    $item->name = 'CC ' . strtoupper($item->code);
+                    return $item;
+                });
+        } catch (\Illuminate\Database\QueryException $e) {
+            return collect();
+        }
+    }
+
+    /**
+     * Get all active TK labels.
+     */
+    public function getTkLabels(): Collection
+    {
+        try {
+            return DB::table('rights_tk_label')
+                ->where('is_active', 1)
+                ->select('id', 'code', 'uri', 'icon_path', 'category', 'color')
+                ->orderBy('category')
+                ->orderBy('sort_order')
+                ->get();
+        } catch (\Illuminate\Database\QueryException $e) {
+            return collect();
+        }
+    }
+
+    /**
+     * Get donors/actors for rights holder selection.
+     */
+    public function getDonors(int $limit = 200): Collection
+    {
+        try {
+            return DB::table('actor as a')
+                ->leftJoin('actor_i18n as ai', function ($j) {
+                    $j->on('ai.id', '=', 'a.id')
+                        ->where('ai.culture', '=', $this->culture);
+                })
+                ->select(['a.id', 'ai.authorized_form_of_name as name'])
+                ->whereNotNull('ai.authorized_form_of_name')
+                ->orderBy('ai.authorized_form_of_name')
+                ->limit($limit)
+                ->get();
+        } catch (\Illuminate\Database\QueryException $e) {
+            return collect();
+        }
+    }
+
+    // =========================================
+    // PREMIS RIGHTS CRUD (rights + rights_i18n + granted_right + relation)
+    // =========================================
+
+    /**
+     * Get taxonomy terms by taxonomy_id for form dropdowns.
+     */
+    public function getTermsByTaxonomy(int $taxonomyId): Collection
+    {
+        return DB::table('term as t')
+            ->join('term_i18n as ti', function ($j) {
+                $j->on('ti.id', '=', 't.id')
+                    ->where('ti.culture', '=', $this->culture);
+            })
+            ->where('t.taxonomy_id', $taxonomyId)
+            ->select('t.id', 'ti.name')
+            ->orderBy('ti.name')
+            ->get();
+    }
+
+    /**
+     * Get granted rights for a given rights record.
+     */
+    public function getGrantedRights(int $rightsId): Collection
+    {
+        return DB::table('granted_right')
+            ->where('rights_id', $rightsId)
+            ->orderBy('serial_number')
+            ->get()
+            ->map(function ($gr) {
+                if ($gr->act_id) {
+                    $gr->act_name = $this->getTermName($gr->act_id, $this->culture);
+                }
+                return $gr;
+            });
+    }
+
+    /**
+     * Create a PREMIS rights record with relation to an IO.
+     * Inserts: object (QubitRights) -> rights -> rights_i18n -> object (QubitRelation) -> relation
+     */
+    public function createPremisRight(int $ioId, array $data): int
+    {
+        $now = date('Y-m-d H:i:s');
+        $culture = $this->culture;
+
+        // Create object row for rights
+        $rightsObjectId = DB::table('object')->insertGetId([
+            'class_name' => 'QubitRights',
+            'created_at' => $now,
+            'updated_at' => $now,
+            'serial_number' => 0,
+        ]);
+
+        // Insert rights record
+        DB::table('rights')->insert([
+            'id'                        => $rightsObjectId,
+            'start_date'                => $data['start_date'] ?? null,
+            'end_date'                  => $data['end_date'] ?? null,
+            'basis_id'                  => $data['basis_id'] ?? null,
+            'rights_holder_id'          => $data['rights_holder_id'] ?? null,
+            'copyright_status_id'       => $data['copyright_status_id'] ?? null,
+            'copyright_status_date'     => $data['copyright_status_date'] ?? null,
+            'copyright_jurisdiction'    => $data['copyright_jurisdiction'] ?? null,
+            'statute_determination_date'=> $data['statute_determination_date'] ?? null,
+            'statute_citation_id'       => $data['statute_citation_id'] ?? null,
+            'source_culture'            => $culture,
+        ]);
+
+        // Insert rights_i18n
+        DB::table('rights_i18n')->insert([
+            'id'                 => $rightsObjectId,
+            'culture'            => $culture,
+            'rights_note'        => $data['rights_note'] ?? null,
+            'copyright_note'     => $data['copyright_note'] ?? null,
+            'identifier_value'   => $data['identifier_value'] ?? null,
+            'identifier_type'    => $data['identifier_type'] ?? null,
+            'identifier_role'    => $data['identifier_role'] ?? null,
+            'license_terms'      => $data['license_terms'] ?? null,
+            'license_note'       => $data['license_note'] ?? null,
+            'statute_jurisdiction'=> $data['statute_jurisdiction'] ?? null,
+            'statute_note'       => $data['statute_note'] ?? null,
+        ]);
+
+        // Create object row for relation
+        $relationObjectId = DB::table('object')->insertGetId([
+            'class_name' => 'QubitRelation',
+            'created_at' => $now,
+            'updated_at' => $now,
+            'serial_number' => 0,
+        ]);
+
+        // Create relation linking IO (subject) -> rights (object), type_id=168
+        DB::table('relation')->insert([
+            'id'             => $relationObjectId,
+            'subject_id'     => $ioId,
+            'object_id'      => $rightsObjectId,
+            'type_id'        => 168,
+            'source_culture' => $culture,
+        ]);
+
+        return $rightsObjectId;
+    }
+
+    /**
+     * Update an existing PREMIS rights record.
+     */
+    public function updatePremisRight(int $rightsId, array $data): void
+    {
+        $now = date('Y-m-d H:i:s');
+        $culture = $this->culture;
+
+        DB::table('rights')->where('id', $rightsId)->update([
+            'start_date'                => $data['start_date'] ?? null,
+            'end_date'                  => $data['end_date'] ?? null,
+            'basis_id'                  => $data['basis_id'] ?? null,
+            'rights_holder_id'          => $data['rights_holder_id'] ?? null,
+            'copyright_status_id'       => $data['copyright_status_id'] ?? null,
+            'copyright_status_date'     => $data['copyright_status_date'] ?? null,
+            'copyright_jurisdiction'    => $data['copyright_jurisdiction'] ?? null,
+            'statute_determination_date'=> $data['statute_determination_date'] ?? null,
+            'statute_citation_id'       => $data['statute_citation_id'] ?? null,
+        ]);
+
+        // Upsert rights_i18n
+        $i18nExists = DB::table('rights_i18n')
+            ->where('id', $rightsId)
+            ->where('culture', $culture)
+            ->exists();
+
+        $i18nData = [
+            'rights_note'        => $data['rights_note'] ?? null,
+            'copyright_note'     => $data['copyright_note'] ?? null,
+            'identifier_value'   => $data['identifier_value'] ?? null,
+            'identifier_type'    => $data['identifier_type'] ?? null,
+            'identifier_role'    => $data['identifier_role'] ?? null,
+            'license_terms'      => $data['license_terms'] ?? null,
+            'license_note'       => $data['license_note'] ?? null,
+            'statute_jurisdiction'=> $data['statute_jurisdiction'] ?? null,
+            'statute_note'       => $data['statute_note'] ?? null,
+        ];
+
+        if ($i18nExists) {
+            DB::table('rights_i18n')
+                ->where('id', $rightsId)
+                ->where('culture', $culture)
+                ->update($i18nData);
+        } else {
+            DB::table('rights_i18n')->insert(array_merge([
+                'id'      => $rightsId,
+                'culture' => $culture,
+            ], $i18nData));
+        }
+
+        DB::table('object')->where('id', $rightsId)->update(['updated_at' => $now]);
+    }
+
+    /**
+     * Delete a PREMIS rights record and its related rows.
+     */
+    public function deletePremisRight(int $rightsId): void
+    {
+        // Delete granted rights
+        DB::table('granted_right')->where('rights_id', $rightsId)->delete();
+        // Delete i18n
+        DB::table('rights_i18n')->where('id', $rightsId)->delete();
+        // Delete relation rows linking to this right
+        $relationIds = DB::table('relation')
+            ->where('object_id', $rightsId)
+            ->where('type_id', 168)
+            ->pluck('id')
+            ->toArray();
+        DB::table('relation')->where('object_id', $rightsId)->where('type_id', 168)->delete();
+        // Delete relation object rows
+        if (!empty($relationIds)) {
+            DB::table('object')->whereIn('id', $relationIds)->delete();
+        }
+        // Delete rights record
+        DB::table('rights')->where('id', $rightsId)->delete();
+        // Delete object row
+        DB::table('object')->where('id', $rightsId)->delete();
+    }
+
+    /**
+     * Save granted rights for a PREMIS rights record (replace all).
+     */
+    public function saveGrantedRights(int $rightsId, array $grantedRows): void
+    {
+        // Delete existing granted rights
+        DB::table('granted_right')->where('rights_id', $rightsId)->delete();
+
+        foreach ($grantedRows as $index => $row) {
+            if (empty($row['act_id'])) {
+                continue;
+            }
+            DB::table('granted_right')->insert([
+                'rights_id'     => $rightsId,
+                'act_id'        => (int) $row['act_id'],
+                'restriction'   => (int) ($row['restriction'] ?? 1),
+                'start_date'    => $row['start_date'] ?? null,
+                'end_date'      => $row['end_date'] ?? null,
+                'notes'         => $row['notes'] ?? null,
+                'serial_number' => $index,
+            ]);
+        }
+    }
+
+    // =========================================
+    // JSON-LD EXPORT
+    // =========================================
+
+    /**
+     * Build a JSON-LD rights object for an IO.
+     */
+    public function exportJsonLd(int $objectId, ?string $culture = null): array
+    {
+        $culture = $culture ?? $this->culture;
+
+        // Get standard rights via relation
+        $standardRights = $this->getRightsForObject($objectId, $culture);
+
+        // Get extended rights
+        $extendedRights = $this->getExtendedRights($objectId);
+
+        // Get active embargo
+        $embargo = $this->getActiveEmbargo($objectId);
+
+        // Get IO metadata
+        $io = DB::table('information_object as io')
+            ->join('information_object_i18n as i18n', function ($j) use ($culture) {
+                $j->on('i18n.id', '=', 'io.id')->where('i18n.culture', $culture);
+            })
+            ->leftJoin('slug as s', 's.object_id', '=', 'io.id')
+            ->where('io.id', $objectId)
+            ->select('io.id', 'io.identifier', 'i18n.title', 's.slug')
+            ->first();
+
+        $siteUrl = rtrim(config('app.url', ''), '/');
+
+        $jsonLd = [
+            '@context' => [
+                '@vocab'  => 'http://schema.org/',
+                'dcterms' => 'http://purl.org/dc/terms/',
+                'edm'     => 'http://www.europeana.eu/schemas/edm/',
+                'cc'      => 'http://creativecommons.org/ns#',
+                'rs'      => 'http://rightsstatements.org/vocab/',
+            ],
+            '@type'      => 'ArchiveComponent',
+            '@id'        => $siteUrl . '/' . ($io->slug ?? ''),
+            'identifier' => $io->identifier ?? null,
+            'name'       => $io->title ?? null,
+        ];
+
+        // Standard rights
+        if ($standardRights->isNotEmpty()) {
+            $jsonLd['rights'] = $standardRights->map(function ($r) {
+                return [
+                    '@type'       => 'PropertyValue',
+                    'propertyID'  => 'rights',
+                    'value'       => $r->rights_note ?? '',
+                    'description' => $r->copyright_note ?? '',
+                    'startDate'   => $r->start_date,
+                    'endDate'     => $r->end_date,
+                ];
+            })->values()->toArray();
+        }
+
+        // Extended rights - rights statement
+        $primary = $extendedRights->firstWhere('is_primary', 1);
+        if ($primary && !empty($primary->rights_statement_uri)) {
+            $jsonLd['dcterms:rights'] = [
+                '@id'   => $primary->rights_statement_uri,
+                '@type' => 'dcterms:RightsStatement',
+                'name'  => $primary->rights_statement_name ?? $primary->rights_statement_code ?? null,
+            ];
+        }
+
+        // Extended rights - CC license
+        if ($primary && !empty($primary->cc_license_uri)) {
+            $jsonLd['cc:license'] = [
+                '@id'   => $primary->cc_license_uri,
+                '@type' => 'cc:License',
+                'name'  => $primary->cc_license_code ?? null,
+            ];
+        }
+
+        // Embargo info
+        if ($embargo) {
+            $jsonLd['accessRestriction'] = [
+                '@type'     => 'PropertyValue',
+                'propertyID'=> 'embargo',
+                'value'     => $embargo->embargo_type,
+                'startDate' => $embargo->start_date,
+                'endDate'   => $embargo->end_date,
+                'status'    => $embargo->status,
+            ];
+        }
+
+        return $jsonLd;
+    }
+}

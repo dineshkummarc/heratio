@@ -1,0 +1,158 @@
+<?php
+
+use AhgSettings\Controllers\SettingsController;
+use Illuminate\Support\Facades\Route;
+
+// Dynamic theme CSS - public, no auth needed
+Route::get('/css/ahg-theme-dynamic.css', [SettingsController::class, 'dynamicCss'])->name('settings.dynamic-css');
+
+// Legacy AtoM URL aliases
+Route::get('/ahgSettings', fn () => redirect('/admin/settings'));
+Route::get('/ahgSettings/{action}', fn (string $action) => redirect('/admin/settings/'.\Illuminate\Support\Str::kebab($action)));
+
+Route::middleware('admin')->group(function () {
+    // Dedicated settings pages (alphabetical, BEFORE catch-all)
+    Route::match(['get', 'post'], '/admin/settings/clipboard', [SettingsController::class, 'clipboard'])->name('settings.clipboard');
+    Route::match(['get', 'post'], '/admin/settings/csv-validator', [SettingsController::class, 'csvValidator'])->name('settings.csv-validator');
+    Route::match(['get', 'post'], '/admin/settings/default-template', [SettingsController::class, 'defaultTemplate'])->name('settings.default-template');
+    Route::match(['get', 'post'], '/admin/settings/diacritics', [SettingsController::class, 'diacritics'])->name('settings.diacritics');
+    Route::match(['get', 'post'], '/admin/settings/digital-objects', [SettingsController::class, 'digitalObjects'])->name('settings.digital-objects');
+    Route::match(['get', 'post'], '/admin/settings/dip-upload', [SettingsController::class, 'dipUpload'])->name('settings.dip-upload');
+    Route::get('/admin/settings/email', fn () => redirect('/admin/ahgSettings/email')); // legacy redirect
+    Route::match(['get', 'post'], '/settings/findingAid', [SettingsController::class, 'findingAid'])->name('settings.finding-aid');
+    Route::match(['get', 'post'], '/admin/settings/finding-aid', [SettingsController::class, 'findingAid']); // legacy alias
+    Route::match(['get', 'post'], '/admin/settings/global', [SettingsController::class, 'global'])->name('settings.global');
+    Route::match(['get', 'post'], '/admin/settings/header-customizations', [SettingsController::class, 'headerCustomizations'])->name('settings.header-customizations');
+    Route::match(['get', 'post'], '/admin/settings/identifier', [SettingsController::class, 'identifier'])->name('settings.identifier');
+    Route::match(['get', 'post'], '/admin/settings/interface-labels', [SettingsController::class, 'interfaceLabels'])->name('settings.interface-labels');
+    Route::match(['get', 'post'], '/admin/settings/inventory', [SettingsController::class, 'inventory'])->name('settings.inventory');
+    Route::match(['get', 'post'], '/admin/settings/languages', [SettingsController::class, 'languages'])->name('settings.languages');
+    Route::match(['get', 'post'], '/admin/settings/markdown', [SettingsController::class, 'markdown'])->name('settings.markdown');
+    Route::match(['get', 'post'], '/admin/settings/oai', [SettingsController::class, 'oai'])->name('settings.oai');
+    Route::match(['get', 'post'], '/admin/settings/permissions', [SettingsController::class, 'permissions'])->name('settings.permissions');
+    Route::match(['get', 'post'], '/admin/settings/privacy-notification', [SettingsController::class, 'privacyNotification'])->name('settings.privacy-notification');
+    Route::match(['get', 'post'], '/admin/settings/security', [SettingsController::class, 'security'])->name('settings.security');
+    Route::match(['get', 'post'], '/admin/settings/site-information', [SettingsController::class, 'siteInformation'])->name('settings.site-information');
+    Route::match(['get', 'post'], '/admin/settings/storage-service', [SettingsController::class, 'storageService'])->name('settings.storage-service');
+    Route::get('/admin/settings/system-info', fn () => redirect('/admin/ahgSettings/systemInfo')); // legacy redirect
+    Route::get('/admin/settings/services', fn () => redirect('/admin/ahgSettings/services')); // legacy redirect
+    Route::get('/admin/settings/themes', fn () => redirect('/admin/ahgSettings/themes')); // legacy redirect
+    Route::match(['get', 'post'], '/admin/settings/treeview', [SettingsController::class, 'treeview'])->name('settings.treeview');
+    Route::match(['get', 'post'], '/admin/settings/uploads', [SettingsController::class, 'uploads'])->name('settings.uploads');
+    Route::match(['get', 'post'], '/admin/settings/visible-elements', [SettingsController::class, 'visibleElements'])->name('settings.visible-elements');
+    Route::match(['get', 'post'], '/admin/settings/web-analytics', [SettingsController::class, 'webAnalytics'])->name('settings.web-analytics');
+    Route::match(['get', 'post'], '/admin/settings/analytics', [SettingsController::class, 'webAnalytics'])->name('settings.analytics'); // AtoM alias
+    Route::get('/admin/settings/ai-condition', fn () => redirect('/admin/ahgSettings/aiCondition')); // legacy redirect
+    Route::match(['get', 'post'], '/admin/settings/ldap', [SettingsController::class, 'ldap'])->name('settings.ldap');
+    Route::get('/admin/settings/levels', fn () => redirect('/admin/ahgSettings/levels')); // legacy redirect
+    Route::match(['get', 'post'], '/admin/settings/paths', [SettingsController::class, 'paths'])->name('settings.paths');
+    Route::match(['get', 'post'], '/admin/settings/preservation', [SettingsController::class, 'preservation'])->name('settings.preservation');
+    Route::get('/admin/settings/webhooks', fn () => redirect('/admin/ahgSettings/webhooks')); // legacy redirect
+    Route::get('/admin/settings/tts', fn () => redirect('/admin/ahgSettings/tts')); // legacy redirect
+    Route::get('/admin/settings/icip-settings', fn () => redirect('/admin/ahgSettings/icipSettings')); // legacy redirect
+    Route::get('/admin/settings/sector-numbering', fn () => redirect('/admin/ahgSettings/sectorNumbering')); // legacy redirect
+    Route::match(['get', 'post'], '/admin/settings/numbering-schemes', [SettingsController::class, 'numberingSchemes'])->name('settings.numbering-schemes');
+    Route::match(['get', 'post'], '/admin/settings/numbering-scheme-edit/{id?}', [SettingsController::class, 'numberingSchemeEdit'])->name('settings.numbering-scheme-edit');
+    Route::match(['get', 'post'], '/admin/settings/dam-tools', [SettingsController::class, 'damTools'])->name('settings.dam-tools');
+    Route::get('/admin/settings/ai-services', fn () => redirect('/admin/ahgSettings/aiServices')); // legacy redirect
+    Route::match(['get', 'post'], '/admin/settings/ahg-import', [SettingsController::class, 'ahgImportSettings'])->name('settings.ahg-import');
+    Route::get('/admin/settings/ahg-integration', fn () => redirect('/admin/ahgSettings/ahgIntegration')); // legacy redirect
+    Route::get('/admin/settings/library', [SettingsController::class, 'library'])->name('settings.library');
+    Route::get('/admin/settings/carousel', fn () => redirect('/admin/ahgSettings/carousel')); // legacy redirect
+    Route::get('/admin/settings/authority', fn () => redirect('/admin/ahgSettings/authority')); // legacy redirect
+    Route::match(['get', 'post'], '/settings/pageElements', [SettingsController::class, 'pageElements'])->name('settings.page-elements');
+    Route::match(['get', 'post'], '/admin/settings/page-elements', [SettingsController::class, 'pageElements']); // legacy alias
+    // Dropdown manager
+    Route::get('/admin/settings/dropdown', [SettingsController::class, 'dropdownIndex'])->name('settings.dropdown.index');
+    Route::match(['get', 'post'], '/admin/settings/dropdown/edit/{id?}', [SettingsController::class, 'dropdownEdit'])->name('settings.dropdown.store');
+    Route::match(['get', 'post'], '/admin/errorLog', [SettingsController::class, 'errorLog'])->name('settings.error-log');
+    Route::get('/admin/settings/cron-jobs', fn () => redirect('/admin/ahgSettings/cronJobs')); // legacy redirect
+    Route::post('/admin/settings/cron-jobs/toggle/{id}', [SettingsController::class, 'cronJobToggle'])->name('settings.cron-toggle');
+    Route::post('/admin/settings/cron-jobs/update/{id}', [SettingsController::class, 'cronJobUpdate'])->name('settings.cron-update');
+    Route::post('/admin/settings/cron-jobs/run/{id}', [SettingsController::class, 'cronJobRunNow'])->name('settings.cron-run');
+    Route::post('/admin/settings/cron-jobs/seed', [SettingsController::class, 'cronJobSeed'])->name('settings.cron-seed');
+    Route::get('/ahgSettings/cronJobs', [SettingsController::class, 'cronJobs']); // AtoM alias
+    // Aliases: AtoM DB menu paths → Heratio settings pages
+    Route::get('/sfPluginAdminPlugin/themes', [SettingsController::class, 'themes']);
+    Route::get('/settings/siteInformation', [SettingsController::class, 'siteInformation']);
+    Route::get('/settings/visibleElements', [SettingsController::class, 'visibleElements']);
+    Route::get('/sfPluginAdminPlugin/plugins', fn () => redirect('/admin/ahgSettings/plugins')); // legacy redirect
+
+    // ── Canonical /admin/ahgSettings/ routes (standardised URLs) ──
+    Route::match(['get', 'post'], '/admin/ahgSettings/aiCondition', [SettingsController::class, 'aiCondition'])->name('settings.ai-condition');
+    // AI Condition client management (JSON endpoints called from ai-condition.blade.php)
+    Route::post('/admin/ai/condition/client/save', [SettingsController::class, 'aiConditionClientSave'])->name('settings.ai-condition.client.save');
+    Route::post('/admin/ai/condition/client/revoke', [SettingsController::class, 'aiConditionClientRevoke'])->name('settings.ai-condition.client.revoke');
+    Route::post('/admin/ai/condition/client/training-toggle', [SettingsController::class, 'aiConditionClientTrainingToggle'])->name('settings.ai-condition.client.training-toggle');
+    Route::get('/admin/ai/condition/api-test', [SettingsController::class, 'aiConditionApiTest'])->name('settings.ai-condition.api-test');
+    Route::match(['get', 'post'], '/admin/ahgSettings/accession', [SettingsController::class, 'accessionSettings'])->name('settings.ahg.accession');
+    Route::match(['get', 'post'], '/admin/ahgSettings/ahgIntegration', [SettingsController::class, 'ahgIntegration'])->name('settings.ahg-integration');
+    Route::match(['get', 'post'], '/admin/ahgSettings/aiServices', [SettingsController::class, 'aiServices'])->name('settings.ai-services');
+    // Same-origin proxies for the Test Connection buttons on the aiServices page.
+    // Server-side test bypasses browser CORS + mixed-content + localhost-mismatch.
+    Route::post('/admin/ahgSettings/aiServices/test', [SettingsController::class, 'aiServicesTest'])->name('settings.ai-services.test');
+    Route::post('/admin/ahgSettings/aiServices/test-mt', [SettingsController::class, 'aiServicesTestMt'])->name('settings.ai-services.test-mt');
+    Route::match(['get', 'post'], '/admin/ahgSettings/audit', [SettingsController::class, 'auditSettings'])->name('settings.ahg.audit');
+    Route::match(['get', 'post'], '/admin/ahgSettings/authority', [SettingsController::class, 'authority'])->name('settings.authority');
+    Route::match(['get', 'post'], '/admin/ahgSettings/jobs', [SettingsController::class, 'jobsSettings'])->name('settings.ahg.jobs');
+    Route::match(['get', 'post'], '/admin/ahgSettings/photos', [SettingsController::class, 'photosSettings'])->name('settings.ahg.photos');
+    Route::get('/admin/ahgSettings/cronJobs', [SettingsController::class, 'cronJobs'])->name('settings.cron-jobs');
+    Route::match(['get', 'post'], '/admin/ahgSettings/ingest', [SettingsController::class, 'ingestSettings'])->name('settings.ahg.ingest');
+    Route::match(['get', 'post'], '/admin/ahgSettings/email', [SettingsController::class, 'email'])->name('settings.email');
+    Route::match(['get', 'post'], '/admin/ahgSettings/encryption', [SettingsController::class, 'encryptionSettings'])->name('settings.ahg.encryption');
+    Route::match(['get', 'post'], '/admin/ahgSettings/ftp', [SettingsController::class, 'ftpSettings'])->name('settings.ahg.ftp');
+    Route::match(['get', 'post'], '/admin/ahgSettings/sharepoint', [SettingsController::class, 'sharePointSettings'])->name('settings.ahg.sharepoint');
+    Route::match(['get', 'post'], '/admin/ahgSettings/fuseki', [SettingsController::class, 'fusekiSettings'])->name('settings.ahg.fuseki');
+    Route::match(['get', 'post'], '/admin/ahgSettings/icipSettings', [SettingsController::class, 'icipSettings'])->name('settings.icip-settings');
+    Route::match(['get', 'post'], '/admin/ahgSettings/iiif', [SettingsController::class, 'iiifGroupSettings'])->name('settings.ahg.iiif');
+    Route::match(['get', 'post'], '/admin/ahgSettings/levels', [SettingsController::class, 'levels'])->name('settings.levels');
+    Route::match(['get', 'post'], '/admin/ahgSettings/library', [SettingsController::class, 'librarySettings'])->name('settings.ahg.library');
+    Route::match(['get', 'post'], '/admin/ahgSettings/media', [SettingsController::class, 'mediaSettings'])->name('settings.ahg.media');
+    Route::match(['get', 'post'], '/admin/ahgSettings/metadata', [SettingsController::class, 'metadataSettings'])->name('settings.ahg.metadata');
+    Route::match(['get', 'post'], '/admin/ahgSettings/multiTenant', [SettingsController::class, 'multiTenantSettings'])->name('settings.ahg.multi_tenant');
+    Route::match(['get', 'post'], '/admin/ahgSettings/plugins', [SettingsController::class, 'plugins'])->name('settings.plugins');
+    Route::match(['get', 'post'], '/admin/ahgSettings/sectorNumbering', [SettingsController::class, 'sectorNumbering'])->name('settings.sector-numbering');
+    Route::match(['get', 'post'], '/admin/ahgSettings/spectrum', [SettingsController::class, 'spectrumSettings'])->name('settings.ahg.spectrum');
+    Route::get('/admin/ahgSettings/systemInfo', [SettingsController::class, 'systemInfo'])->name('settings.system-info');
+    Route::get('/admin/ahgSettings/services', [SettingsController::class, 'services'])->name('settings.services');
+    Route::match(['get', 'post'], '/admin/ahgSettings/tts', [SettingsController::class, 'tts'])->name('settings.tts');
+    Route::match(['get', 'post'], '/admin/ahgSettings/themes', [SettingsController::class, 'themes'])->name('settings.themes');
+    Route::match(['get', 'post'], '/admin/ahgSettings/voiceAi', [SettingsController::class, 'voiceAiSettings'])->name('settings.ahg.voice_ai');
+    Route::match(['get', 'post'], '/admin/ahgSettings/webhooks', [SettingsController::class, 'webhooks'])->name('settings.webhooks');
+    Route::match(['get', 'post'], '/admin/ahgSettings/dataProtection', [SettingsController::class, 'dataProtectionSettings'])->name('settings.ahg.data_protection');
+    Route::match(['get', 'post'], '/admin/ahgSettings/faces', [SettingsController::class, 'facesSettings'])->name('settings.ahg.faces');
+    Route::match(['get', 'post'], '/admin/ahgSettings/integrity', [SettingsController::class, 'integritySettings'])->name('settings.ahg.integrity');
+    Route::match(['get', 'post'], '/admin/ahgSettings/security', [SettingsController::class, 'securitySettings'])->name('settings.ahg.security');
+    Route::match(['get', 'post'], '/admin/ahgSettings/portableExport', [SettingsController::class, 'portableExportSettings'])->name('settings.ahg.portable_export');
+    Route::match(['get', 'post'], '/admin/ahgSettings/compliance', [SettingsController::class, 'complianceSettings'])->name('settings.ahg.compliance');
+
+    // Legacy redirects for old /admin/settings/ahg/ paths
+    Route::get('/admin/settings/ahg/ai_condition', fn () => redirect('/admin/ahgSettings/aiCondition'));
+    Route::get('/admin/settings/ahg/accession', fn () => redirect('/admin/ahgSettings/accession'));
+    Route::get('/admin/settings/ahg/audit', fn () => redirect('/admin/ahgSettings/audit')); // legacy redirect
+    Route::get('/admin/settings/ahg/data_protection', fn () => redirect('/admin/ahgSettings/dataProtection')); // legacy redirect
+    Route::get('/admin/settings/ahg/encryption', fn () => redirect('/admin/ahgSettings/encryption')); // legacy redirect
+    Route::get('/admin/settings/ahg/faces', fn () => redirect('/admin/ahgSettings/faces')); // legacy redirect
+    Route::get('/admin/settings/ahg/ftp', fn () => redirect('/admin/ahgSettings/ftp')); // legacy redirect
+    Route::get('/admin/settings/ahg/fuseki', fn () => redirect('/admin/ahgSettings/fuseki')); // legacy redirect
+    Route::get('/admin/settings/ahg/jobs', fn () => redirect('/admin/ahgSettings/jobs')); // legacy redirect
+    Route::get('/admin/settings/ahg/spectrum', fn () => redirect('/admin/ahgSettings/spectrum')); // legacy redirect
+    Route::get('/admin/settings/ahg/photos', fn () => redirect('/admin/ahgSettings/photos')); // legacy redirect
+    Route::get('/admin/settings/ahg/media', fn () => redirect('/admin/ahgSettings/media')); // legacy redirect
+    Route::get('/admin/settings/ahg/metadata', fn () => redirect('/admin/ahgSettings/metadata')); // legacy redirect
+    Route::get('/admin/settings/ahg/ingest', fn () => redirect('/admin/ahgSettings/ingest')); // legacy redirect
+    Route::get('/admin/settings/ahg/integrity', fn () => redirect('/admin/ahgSettings/integrity')); // legacy redirect
+    Route::get('/admin/settings/ahg/voice_ai', fn () => redirect('/admin/ahgSettings/voiceAi')); // legacy redirect
+    Route::get('/admin/settings/ahg/iiif', fn () => redirect('/admin/ahgSettings/iiif')); // legacy redirect
+    Route::get('/admin/settings/ahg/security', fn () => redirect('/admin/ahgSettings/security')); // legacy redirect
+    Route::get('/admin/settings/ahg/library', fn () => redirect('/admin/ahgSettings/library')); // legacy redirect
+    Route::get('/admin/settings/ahg/multi_tenant', fn () => redirect('/admin/ahgSettings/multiTenant')); // legacy redirect
+    Route::get('/admin/settings/ahg/portable_export', fn () => redirect('/admin/ahgSettings/portableExport')); // legacy redirect
+    Route::get('/admin/settings/ahg/compliance', fn () => redirect('/admin/ahgSettings/compliance')); // legacy redirect
+    Route::get('/admin/settings/ahg/ahg_central', fn () => redirect('/admin/ahgSettings/ahgIntegration')); // legacy redirect (heratio#127: AHG Central has a bespoke page)
+
+    // AHG group route - catch-all for generic key-value settings
+    Route::match(['get', 'post'], '/admin/settings/ahg/{group}', [SettingsController::class, 'ahgSection'])->name('settings.ahg');
+    Route::match(['get', 'post'], '/admin/settings/{section}', [SettingsController::class, 'section'])->name('settings.section');
+    Route::get('/admin/settings', [SettingsController::class, 'index'])->name('settings.index');
+});

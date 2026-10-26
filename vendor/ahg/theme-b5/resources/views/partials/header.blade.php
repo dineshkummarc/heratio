@@ -1,0 +1,174 @@
+{{-- Skip to main content (accessibility) --}}
+<div class="visually-hidden-focusable p-3 border-bottom">
+  <a class="btn atom-btn-outline-light btn-sm" href="#main-column">{{ __('Skip to main content') }}</a>
+</div>
+
+{{-- Tighten vertical spacing when the navbar wraps onto multiple rows --}}
+<style>
+  @media (min-width: 992px) {
+    header#top-bar .navbar-nav { row-gap: 0; }
+    header#top-bar .nav-item { margin-top: 0 !important; margin-bottom: 0 !important; }
+    header#top-bar .nav-link i.fa-2x { padding-top: 0 !important; padding-bottom: 0 !important; }
+    header#top-bar .nav-link.p-0 i.fa-2x { padding-top: 0 !important; padding-bottom: 0 !important; }
+    header#top-bar .navbar-collapse > .d-flex { row-gap: 0 !important; }
+  }
+</style>
+
+<header id="top-bar" class="navbar navbar-expand-lg navbar-dark" role="navigation" aria-label="{{ __('Main navigation') }}">
+  <div class="container-fluid">
+    {{-- Brand / Logo --}}
+    @if(($themeData['toggleLogo'] ?? true) || ($themeData['toggleTitle'] ?? true))
+      <a class="navbar-brand d-flex flex-wrap flex-lg-nowrap align-items-center py-0 me-0" href="{{ url('/') }}" title="{{ __('Home') }}" rel="home">
+        @if($themeData['toggleLogo'] ?? true)
+          @if($themeData['customLogo'] ?? null)
+            <img src="{{ $themeData['customLogo'] }}" alt="{{ ($themeData['siteTitle'] ?? '') !== '' ? $themeData['siteTitle'] : config('app.name', 'Heratio') }}" class="d-inline-block me-3" height="70" style="padding: 0;">
+          @else
+            <img src="{{ asset('vendor/ahg-theme-b5/images/image.png') }}" alt="{{ ($themeData['siteTitle'] ?? '') !== '' ? $themeData['siteTitle'] : config('app.name', 'Heratio') }}" class="d-inline-block me-3" height="70" style="padding: 0;">
+          @endif
+        @endif
+        @if(($themeData['toggleTitle'] ?? true) && !empty($themeData['siteTitle']))
+          <span class="text-wrap my-1 me-3">{{ $themeData['siteTitle'] }}</span>
+        @endif
+      </a>
+    @endif
+
+    {{-- Hamburger toggle --}}
+    <button class="navbar-toggler atom-btn-secondary my-2 me-1 px-1" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-content" aria-controls="navbar-content" aria-expanded="false">
+      <i class="fas fa-2x fa-fw fa-bars" data-bs-toggle="tooltip" data-bs-placement="bottom" title="{{ __('Toggle navigation') }}" aria-hidden="true"></i>
+      <span class="visually-hidden">{{ __('Toggle navigation') }}</span>
+    </button>
+
+    <div class="collapse navbar-collapse flex-wrap justify-content-end me-1" id="navbar-content">
+      <div class="d-flex flex-wrap flex-lg-nowrap flex-grow-1">
+        {{-- Browse menu --}}
+        @include('theme::partials.menus.browse-menu')
+
+        {{-- Search box --}}
+        @include('theme::partials.menus.search-box')
+      </div>
+
+      <div class="d-flex flex-nowrap flex-column flex-lg-row align-items-strech align-items-lg-center">
+        <ul class="navbar-nav mx-lg-2">
+          {{-- RiC Tools Dropdown - gated by ahgRicExplorerPlugin --}}
+          @if(\AhgCore\Services\MenuService::isPluginEnabled('ahgRicExplorerPlugin'))
+            <li class="nav-item dropdown d-flex flex-column">
+              <a class="nav-link dropdown-toggle d-flex align-items-center p-0" href="#" id="ric-tools-menu" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                <i class="fas fa-2x fa-fw fa-sitemap px-0 px-lg-2 py-2" data-bs-toggle="tooltip" data-bs-placement="bottom" data-bs-custom-class="d-none d-lg-block" title="{{ __('RiC Tools') }}" aria-hidden="true"></i>
+                <span class="d-lg-none mx-1" aria-hidden="true">{{ __('RiC Tools') }}</span>
+                <span class="visually-hidden">{{ __('RiC Tools') }}</span>
+              </a>
+              <ul class="dropdown-menu dropdown-menu-end mb-2" aria-labelledby="ric-tools-menu">
+                <li><h6 class="dropdown-header">{{ __('RiC Tools') }}</h6></li>
+                <li><a class="dropdown-item" href="{{ url('/admin/ric') }}"><i class="fas fa-tachometer-alt me-2"></i>{{ __('Dashboard') }}</a></li>
+                <li><a class="dropdown-item" href="{{ url('/admin/ric/sync-status') }}"><i class="fas fa-sync me-2"></i>{{ __('Sync Status') }}</a></li>
+                <li><a class="dropdown-item" href="{{ url('/admin/ric/queue') }}"><i class="fas fa-tasks me-2"></i>{{ __('Queue') }}</a></li>
+                <li><a class="dropdown-item" href="{{ url('/admin/ric/logs') }}"><i class="fas fa-history me-2"></i>{{ __('Sync Logs') }}</a></li>
+                <li><hr class="dropdown-divider"></li>
+                <li><a class="dropdown-item" href="{{ route('settings.section', 'fuseki') }}"><i class="fas fa-cog me-2"></i>{{ __('Settings') }}</a></li>
+                <li><a class="dropdown-item" href="https://www.ica.org/standards/RiC/ontology" target="_blank"><i class="fas fa-book me-2"></i>{{ __('RiC-O Reference') }}</a></li>
+              </ul>
+            </li>
+          @endif
+
+          {{-- Articles / Blog (demo site only) --}}
+          @php
+            $blogEnabled = (config('heratio.homepage_mode')
+                ?: (in_array(request()->getHost(), ['heratio.org', 'www.heratio.org', 'heratio.theahg.co.za'], true) ? 'marketing' : 'institutional')) === 'marketing';
+          @endphp
+          @if($blogEnabled)
+            <li class="nav-item d-flex flex-column">
+              <a class="nav-link d-flex align-items-center p-0" href="{{ url('/articles') }}" id="articles-menu">
+                <i class="fas fa-2x fa-fw fa-newspaper px-0 px-lg-2 py-2" data-bs-toggle="tooltip" data-bs-placement="bottom" data-bs-custom-class="d-none d-lg-block" title="{{ __('Articles') }}" aria-hidden="true"></i>
+                <span class="d-lg-none mx-1" aria-hidden="true">{{ __('Articles') }}</span>
+                <span class="visually-hidden">{{ __('Articles') }}</span>
+              </a>
+            </li>
+          @endif
+
+          {{-- Help: one nav icon, with the page-specific article (#1332) and the
+               Help Center under a dropdown so there aren't two help icons. --}}
+          <li class="nav-item dropdown d-flex flex-column">
+            <a class="nav-link d-flex align-items-center p-0" href="{{ url('/help') }}" id="help-center-menu" role="button" data-bs-toggle="dropdown" data-bs-display="static" aria-expanded="false">
+              <i class="fas fa-2x fa-fw fa-question-circle px-0 px-lg-2 py-2" title="{{ __('Help') }}" aria-hidden="true"></i>
+              <span class="d-lg-none mx-1" aria-hidden="true">{{ __('Help') }}</span>
+              <span class="visually-hidden">{{ __('Help') }}</span>
+            </a>
+            <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="help-center-menu">
+              <li>
+                {{-- Opens the page's help in an in-page slide-out PANEL (data-help-panel,
+                     wired in the master layout). The href is the /help/context resolver,
+                     so ctrl/middle-click still opens it in a new tab; F1 also opens a new tab. --}}
+                <a class="dropdown-item" id="contextual-help-link" data-help-panel
+                   href="{{ !empty($contextualHelp) ? $contextualHelp['url'] : route('help.context', ['path' => request()->path(), 'route' => optional(request()->route())->getName()]) }}"
+                   title="{{ __('Open help in a panel (F1 opens a new tab)') }}">
+                  <i class="fas fa-circle-info me-2 text-info"></i>{{ __('Help for this page') }}@if(!empty($contextualHelp)): {{ $contextualHelp['title'] }}@endif
+                </a>
+              </li>
+              <li>
+                <a class="dropdown-item text-muted small" data-help-f1 href="#" target="_blank" rel="noopener">
+                  <i class="fas fa-up-right-from-square me-2"></i>{{ __('Open help in new tab') }} <span class="ms-1">(F1)</span>
+                </a>
+              </li>
+              <li><hr class="dropdown-divider"></li>
+              <li>
+                <a class="dropdown-item" href="{{ url('/help') }}">
+                  <i class="fas fa-book me-2"></i>{{ __('Help Center') }}
+                </a>
+              </li>
+            </ul>
+          </li>
+
+          {{-- Main menu (Add / Manage / Import / Admin) - after Help Center, matching AtoM --}}
+          @if($themeData['isAuthenticated'] ?? false)
+            @include('theme::partials.menus.main-menu')
+          @endif
+
+          {{-- Spectrum Tasks Bell - hidden when Spectrum is disabled (the
+               /admin/spectrum/* routes 404 via EnsureSpectrumEnabled). --}}
+          @if(($themeData['isAuthenticated'] ?? false) && ($spectrumEnabled ?? false))
+            @php
+              $spectrumBellCount = 0;
+              try {
+                  $spectrumBellCount = \AhgSpectrum\Services\SpectrumNotificationService::getActiveTaskCount(auth()->id());
+              } catch (\Exception $e) {}
+            @endphp
+            <li class="nav-item d-flex flex-column">
+              <a class="nav-link d-flex align-items-center p-0 position-relative" href="{{ route('ahgspectrum.my-tasks') }}">
+                <i class="fas fa-2x fa-fw fa-bell px-0 px-lg-2 py-2" data-bs-toggle="tooltip" data-bs-placement="bottom" data-bs-custom-class="d-none d-lg-block" title="{{ __('My Tasks') }}" aria-hidden="true"></i>
+                @if($spectrumBellCount > 0)
+                  <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger" style="font-size: 0.6rem; margin-left: -18px; margin-top: 6px;">
+                    {{ $spectrumBellCount > 99 ? '99+' : $spectrumBellCount }}
+                  </span>
+                @endif
+                <span class="d-lg-none mx-1" aria-hidden="true">{{ __('My Tasks') }}</span>
+                <span class="visually-hidden">{{ $spectrumBellCount > 0 ? __('My Tasks (:count pending)', ['count' => $spectrumBellCount]) : __('My Tasks') }}</span>
+              </a>
+            </li>
+          @endif
+
+          {{-- Clipboard --}}
+          @include('theme::partials.menus.clipboard-menu')
+
+          {{-- Language switcher --}}
+          @include('theme::partials.menus.language-menu')
+
+          {{-- Quick links --}}
+          @include('theme::partials.menus.quick-links-menu')
+
+          {{-- AHG Admin menu --}}
+          @if($themeData['isAdmin'] ?? false)
+            @include('theme::partials.menus.ahg-admin-menu')
+          @endif
+        </ul>
+
+        {{-- Culture switcher REMOVED - duplicates the globe-icon language-menu
+             included above (line 113). Keeping the original AtoM-style
+             fa-globe-europe selector; this POST-based switcher was a parallel
+             port that ended up in the same nav. --}}
+
+        {{-- User menu --}}
+        @include('theme::partials.menus.user-menu')
+      </div>
+    </div>
+  </div>
+</header>

@@ -1,0 +1,100 @@
+@extends('theme::layouts.1col')
+@section('title', 'Donut - Document Understanding')
+@section('body-class', 'admin ai-services donut')
+@section('content')
+<nav aria-label="{{ __('breadcrumb') }}" class="mb-3"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="{{ route('admin.ai.index') }}">{{ __('AI Services') }}</a></li><li class="breadcrumb-item active">{{ __('Donut') }}</li></ol></nav>
+<h1><i class="fas fa-file-invoice me-2"></i>{{ __('Document Understanding (Donut)') }}</h1>
+<p class="text-muted mb-4">{{ __('End-to-end document image understanding for FamilySearch ILM field extraction. Complements HTR by recognising form structure and typed metadata.') }}</p>
+
+@if($health)
+<div class="card mb-4">
+  <div class="card-header" style="background: var(--ahg-primary); color: white;"><i class="fas fa-server me-2"></i>{{ __('Service Status') }}</div>
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-3"><strong>{{ __('Status:') }}</strong> <span class="badge bg-success">{{ __('Online') }}</span></div>
+      <div class="col-md-3"><strong>{{ __('Version:') }}</strong> {{ $health['version'] ?? '0.1.0' }}</div>
+      <div class="col-md-3"><strong>{{ __('Model Ready:') }}</strong>
+        @if($health['model_ready'] ?? false)
+          <span class="badge bg-success">{{ __('Yes') }}</span>
+        @else
+          <span class="badge bg-warning text-dark">{{ __('Not trained yet') }}</span>
+        @endif
+      </div>
+      <div class="col-md-3"><strong>{{ __('Annotations:') }}</strong> {{ $health['total_annotations'] ?? 0 }}</div>
+    </div>
+  </div>
+</div>
+@else
+<div class="alert alert-danger"><i class="fas fa-exclamation-triangle me-2"></i>{{ __('Donut service is offline. Start it on port 5008.') }}</div>
+@endif
+
+<div class="row">
+  <div class="col-md-4 mb-4">
+    <div class="card h-100">
+      <div class="card-header" style="background: var(--ahg-primary); color: white;"><i class="fas fa-file-import me-2"></i>{{ __('Extract ILM Fields') }}</div>
+      <div class="card-body"><p>{{ __('Upload a document image and extract FamilySearch ILM fields (record type, event year, event place) using Donut.') }}</p></div>
+      <div class="card-footer"><a href="{{ route('admin.ai.donut.extract') }}" class="btn atom-btn-white w-100"><i class="fas fa-upload me-1"></i>{{ __('Extract') }}</a></div>
+    </div>
+  </div>
+  <div class="col-md-4 mb-4">
+    <div class="card h-100">
+      <div class="card-header" style="background: var(--ahg-primary); color: white;"><i class="fas fa-layer-group me-2"></i>{{ __('Batch Extract') }}</div>
+      <div class="card-body"><p>{{ __('Process multiple document images at once for bulk ILM field extraction.') }}</p></div>
+      <div class="card-footer"><a href="{{ route('admin.ai.donut.batch') }}" class="btn atom-btn-white w-100"><i class="fas fa-tasks me-1"></i>{{ __('Batch') }}</a></div>
+    </div>
+  </div>
+  <div class="col-md-4 mb-4">
+    <div class="card h-100">
+      <div class="card-header" style="background: var(--ahg-primary); color: white;"><i class="fas fa-graduation-cap me-2"></i>{{ __('Model Training') }}</div>
+      <div class="card-body">
+        <p>{{ __('Fine-tune Donut on your annotated training data.') }}</p>
+        @if($training)
+          <table class="table table-sm mb-0">
+            <tr><td>{{ __('Type A') }}</td><td class="text-end">{{ $training['annotations']['type_a'] ?? 0 }}</td></tr>
+            <tr><td>{{ __('Type B') }}</td><td class="text-end">{{ $training['annotations']['type_b'] ?? 0 }}</td></tr>
+            <tr><td>{{ __('Type C') }}</td><td class="text-end">{{ $training['annotations']['type_c'] ?? 0 }}</td></tr>
+            <tr class="fw-bold"><td>{{ __('Total') }}</td><td class="text-end">{{ $training['total'] ?? 0 }}</td></tr>
+          </table>
+          @if($training['model_exists'] ?? false)
+            <span class="badge bg-success mt-2">{{ __('Model trained') }}</span>
+          @endif
+        @endif
+      </div>
+      <div class="card-footer">
+        <form method="POST" action="{{ route('admin.ai.donut.startTraining') }}" class="d-inline">
+          @csrf
+          <button type="submit" class="btn atom-btn-white w-100" {{ ($training['training']['running'] ?? false) ? 'disabled' : '' }}>
+            <i class="fas fa-brain me-1"></i>{{ ($training['training']['running'] ?? false) ? 'Training...' : 'Start Training' }}
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header" style="background: var(--ahg-primary); color: white;"><i class="fas fa-info-circle me-2"></i>{{ __('How It Works') }}</div>
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-6">
+        <h5>{{ __('Donut (Document Understanding Transformer)') }}</h5>
+        <ul>
+          <li>{{ __('End-to-end: image in, structured JSON out') }}</li>
+          <li>{{ __('No separate OCR step - the model reads and understands form layout') }}</li>
+          <li>Fine-tuned on your {{ $health['total_annotations'] ?? 0 }} annotated SA vital records</li>
+          <li>Extracts: <code>FS_RECORD_TYPE</code>, <code>EVENT_YEAR_ORIG</code>, <code>EVENT_PLACE_ORIG</code></li>
+        </ul>
+      </div>
+      <div class="col-md-6">
+        <h5>{{ __('Combined Pipeline (Donut + HTR)') }}</h5>
+        <ol>
+          <li><strong>{{ __('Donut') }}</strong> classifies document type and extracts typed metadata fields</li>
+          <li><strong>{{ __('TrOCR (HTR)') }}</strong> reads handwritten genealogical content</li>
+          <li><strong>{{ __('ILM Formatter') }}</strong> combines both into FamilySearch ILM output</li>
+        </ol>
+        <p class="text-muted">{{ __('Use') }} <a href="{{ route('admin.ai.htr.extract') }}">{{ __('HTR Extract') }}</a> for the full combined pipeline.</p>
+      </div>
+    </div>
+  </div>
+</div>
+@endsection
